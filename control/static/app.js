@@ -31,6 +31,8 @@ const TIMEZONE_STORAGE_KEY = "baskets.sleepTimezone";
 const PATTERN_DEFAULTS = {
   Pulse: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
   Glow: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
+  White: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
+  Solid: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
   Sweep: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
   "Palette Drift": { hue: 40, saturation: 100, value: 255, period: 8000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
   Firefly: { hue: 58, saturation: 85, value: 255, period: 7000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },

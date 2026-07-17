@@ -174,6 +174,7 @@ inline bool serialJsonPatternId(const char* value, uint16_t& out) {
   else if (!strcmp(norm, "glow")) out = patterns::GLOW;
   else if (!strcmp(norm, "firefly")) out = patterns::FIREFLY;
   else if (!strcmp(norm, "oceanwave")) out = patterns::OCEAN_WAVE;
+  else if (!strcmp(norm, "white")) out = patterns::WHITE;
   else if (!strcmp(norm, "calibration")) out = patterns::CALIBRATION;
   else {
     char* end = nullptr;

@@ -623,6 +623,20 @@ def test_preview_json_endpoint_returns_lantern_samples_and_metrics() -> None:
     assert isinstance(first["luma"], float)
 
 
+def test_preview_json_endpoint_renders_white_channel_pattern() -> None:
+    client = TestClient(create_app(MockConductor()))
+
+    response = client.get(
+        "/preview.json",
+        params={"pattern": "White", "brightness": 64, "t": 0},
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["pattern"] == "White"
+    assert body["lanterns"][0]["rgbw"] == [0, 0, 0, 64]
+
+
 def test_preview_frames_endpoint_returns_sequence_metrics() -> None:
     client = TestClient(create_app(MockConductor()))
 

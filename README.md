@@ -134,7 +134,7 @@ batch notes.
 - 64-bit microsecond clock sync with free-run behavior on missed beacons.
 - Pattern broadcast with `pattern_id`, brightness, palette/params, and sequence
   tracking.
-- Patterns: Pulse, Palette Drift, Sweep, Solid test mode, and Glow.
+- Patterns: Pulse, Palette Drift, Sweep, Glow, White, and Solid test mode.
 - MAC-keyed roster and conductor-authoritative layout table.
 - Persistent role, position, pattern, brightness, and power policy in NVS.
 - Radio duty cycling, CPU light-sleep support, and schedule-driven deep-sleep

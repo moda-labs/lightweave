@@ -1120,11 +1120,12 @@ void test_nap_skips_tiny_naps() {
   TEST_ASSERT_EQUAL_INT64(0, napPlan(NAPC, in));
 }
 
-// SOLID and GLOW have no time term (LEDs latch, no re-render needed); everything
-// else animates. Unknown future ids must read as animated — the safe direction.
+// SOLID, GLOW, and WHITE have no time term (LEDs latch, no re-render needed);
+// everything else animates. Unknown future ids must read as animated — the safe direction.
 void test_pattern_static_ids() {
   TEST_ASSERT_TRUE(patterns::patternIsStatic(patterns::SOLID));
   TEST_ASSERT_TRUE(patterns::patternIsStatic(patterns::GLOW));
+  TEST_ASSERT_TRUE(patterns::patternIsStatic(patterns::WHITE));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::PULSE));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::PALETTE_DRIFT));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::SWEEP));
@@ -1504,6 +1505,7 @@ void test_pattern_boot_safe() {
                            patterns::patternBootSafe(patterns::PALETTE_DRIFT));
   TEST_ASSERT_EQUAL_UINT16(patterns::SWEEP, patterns::patternBootSafe(patterns::SWEEP));
   TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, patterns::patternBootSafe(patterns::GLOW));
+  TEST_ASSERT_EQUAL_UINT16(patterns::WHITE, patterns::patternBootSafe(patterns::WHITE));
   // Unknown/future ids pass through — the renderer decides what they mean.
   TEST_ASSERT_EQUAL_UINT16(999, patterns::patternBootSafe(999));
 }
@@ -1557,6 +1559,20 @@ void test_serial_json_glow_maps_hue_and_saturation_params() {
   TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, cmd.pattern_id);
   TEST_ASSERT_EQUAL_UINT16(40, cmd.params[0]);
   TEST_ASSERT_EQUAL_UINT16(90, cmd.params[1]);
+}
+
+void test_serial_json_white_maps_pattern_name() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":12,\"cmd\":\"pattern\",\"pattern\":\"White\",\"brightness\":48,"
+      "\"params\":{}}",
+      cmd, error));
+
+  TEST_ASSERT_EQUAL_UINT16(patterns::WHITE, cmd.pattern_id);
+  TEST_ASSERT_TRUE(cmd.has_brightness);
+  TEST_ASSERT_EQUAL_UINT8(48, cmd.brightness);
 }
 
 void test_serial_json_calibration_maps_params() {
@@ -2011,6 +2027,7 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_assign_parses_mac_and_position);
   RUN_TEST(test_serial_json_pattern_maps_name_brightness_and_params);
   RUN_TEST(test_serial_json_glow_maps_hue_and_saturation_params);
+  RUN_TEST(test_serial_json_white_maps_pattern_name);
   RUN_TEST(test_serial_json_calibration_maps_params);
   RUN_TEST(test_serial_json_power_policy_parses_runtime_sleep_controls);
   RUN_TEST(test_serial_json_ota_mode_parses_enabled_flag);

@@ -78,6 +78,13 @@ inline RgbwColor solid(uint8_t brightness) {
   return RgbwColor(brightness, brightness, brightness, brightness);
 }
 
+// Steady neutral white using only the SK6812 white channel. This is distinct
+// from SOLID, which deliberately drives RGB and W together for worst-case bench
+// power measurement.
+inline RgbwColor white(uint8_t brightness) {
+  return RgbwColor(0, 0, 0, brightness);
+}
+
 // Steady solid color: a constant hue with NO time dependence, so the whole field
 // holds one calm color and the LED draw is flat (no pulse). Fits the warm/gentle
 // aesthetic and is the realistic-conservative pattern for power measurement (a
@@ -185,6 +192,9 @@ inline void render(StripT& strip, const BeaconMsg& b, int64_t synced_us, float x
       break;
     case SOLID:
       c = solid(b.brightness);
+      break;
+    case WHITE:
+      c = white(b.brightness);
       break;
     case GLOW:
       c = glow(b.brightness, b.params);

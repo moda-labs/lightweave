@@ -995,7 +995,9 @@ static void printDiag() {
 //   pattern <n>          0 = uniform pulse, 1 = rainbow drift, 2 = sweep,
 //                        3 = solid full-white (worst-case draw, for measuring),
 //                        4 = glow (steady solid color; params[0]=hue deg,
-//                            params[1]=saturation %)
+//                            params[1]=saturation %),
+//                        6 = firefly, 7 = ocean wave,
+//                        8 = white (SK6812 white channel only)
 //   bri <n>              brightness 0-255
 //   param <i> <v>        params[i] (i=0..3): sweep period_ms / wavelength*100;
 //                        glow hue(deg) / saturation(%)
@@ -1094,6 +1096,7 @@ static const char* patternName(uint16_t id) {
     case patterns::FIREFLY: return "Firefly";
     case patterns::OCEAN_WAVE: return "Ocean Wave";
     case patterns::CALIBRATION: return "Calibration";
+    case patterns::WHITE: return "White";
     default: return "Unknown";
   }
 }
