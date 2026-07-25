@@ -5,6 +5,12 @@
 
 static constexpr uint16_t OTA_SERIAL_CHUNK_MAX = 128;
 static constexpr uint8_t OTA_STATUS_MAX = 64;
+// ESP-NOW broadcast has no per-recipient acknowledgement. Spread redundant
+// copies across a wider window so a short RF-loss burst cannot erase an entire
+// OTA chunk and permanently desynchronize the receiver's write offset.
+static constexpr uint8_t OTA_RADIO_SEND_COPIES = 8;
+static constexpr uint8_t OTA_RADIO_SEND_MAX_ATTEMPTS = 24;
+static constexpr uint8_t OTA_RADIO_SEND_DELAY_MS = 4;
 
 enum OtaStatusPhase : uint8_t {
   OTA_PHASE_IDLE = 0,

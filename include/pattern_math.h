@@ -10,6 +10,91 @@
 namespace pmath {
 
 static constexpr float kPi = 3.14159265358979323846f;
+static constexpr uint16_t kColorValueMarker = 0x8000u;
+static constexpr uint16_t kFireflyScatterMask = 0x007Fu;
+static constexpr uint16_t kOceanWavelengthMask = 0x03FFu;
+static constexpr uint16_t kOceanAngleMask = 0x01FFu;
+
+// Color value is metadata packed into otherwise-unused parameter bits. The
+// marker distinguishes new full-HSV configs from legacy configs, where a zero
+// saturation meant "use the old default". No beacon layout/protocol bump is
+// needed, and existing saved patterns retain their legacy parameter defaults.
+inline uint16_t colorValuePack(uint8_t value) {
+  return (uint16_t)(kColorValueMarker | value);
+}
+
+inline bool colorValuePresent(uint16_t packed) {
+  return (packed & kColorValueMarker) != 0;
+}
+
+inline float colorValueDecode(uint16_t packed) {
+  return colorValuePresent(packed) ? (packed & 0xFFu) / 255.0f : 1.0f;
+}
+
+// Firefly already uses all four params. Keep scatter in the low 7 bits and put
+// the 8-bit color value above it; bit 15 remains the full-HSV marker.
+inline uint16_t fireflyMetaPack(uint8_t scatter, uint8_t value) {
+  if (scatter > 100) scatter = 100;
+  return (uint16_t)(kColorValueMarker | ((uint16_t)value << 7) | scatter);
+}
+
+inline uint8_t fireflyScatterDecode(uint16_t packed) {
+  if (!colorValuePresent(packed)) {
+    uint16_t scatter = packed ? packed : 100;
+    return (uint8_t)(scatter > 100 ? 100 : scatter);
+  }
+  uint8_t scatter = (uint8_t)(packed & kFireflyScatterMask);
+  return scatter > 100 ? 100 : scatter;
+}
+
+inline float fireflyValueDecode(uint16_t packed) {
+  return colorValuePresent(packed)
+             ? ((packed >> 7) & 0xFFu) / 255.0f
+             : 1.0f;
+}
+
+// Ocean keeps wavelength and angle in their low bits. Six-bit saturation and
+// value live in the high bits, giving 64 perceptual steps for each while leaving
+// the current four-parameter wire shape intact.
+inline uint16_t oceanWavelengthSaturationPack(uint16_t wavelength,
+                                              uint8_t saturation_pct) {
+  if (wavelength > kOceanWavelengthMask) wavelength = kOceanWavelengthMask;
+  if (saturation_pct > 100) saturation_pct = 100;
+  uint16_t sat6 = (uint16_t)lroundf(saturation_pct * 63.0f / 100.0f);
+  return (uint16_t)(wavelength | (sat6 << 10));
+}
+
+inline uint16_t oceanAngleValuePack(uint16_t angle, uint8_t value) {
+  uint16_t value6 = (uint16_t)lroundf(value * 63.0f / 255.0f);
+  return (uint16_t)(kColorValueMarker | (value6 << 9) |
+                    (angle & kOceanAngleMask));
+}
+
+inline bool oceanColorPresent(uint16_t angle_value) {
+  return colorValuePresent(angle_value);
+}
+
+inline uint16_t oceanWavelengthDecode(uint16_t packed,
+                                      uint16_t angle_value) {
+  return oceanColorPresent(angle_value) ? packed & kOceanWavelengthMask : packed;
+}
+
+inline uint16_t oceanAngleDecode(uint16_t packed) {
+  return oceanColorPresent(packed) ? packed & kOceanAngleMask : packed;
+}
+
+inline float oceanSaturationDecode(uint16_t wavelength_saturation,
+                                   uint16_t angle_value) {
+  return oceanColorPresent(angle_value)
+             ? ((wavelength_saturation >> 10) & 0x3Fu) / 63.0f
+             : 1.0f;
+}
+
+inline float oceanValueDecode(uint16_t angle_value) {
+  return oceanColorPresent(angle_value)
+             ? ((angle_value >> 9) & 0x3Fu) / 63.0f
+             : 1.0f;
+}
 
 // Map microseconds to a phase in [0,1) over `period_s` seconds. Continuous and
 // monotonic within a period; wraps cleanly at the boundary (no visible hitch).
@@ -193,6 +278,52 @@ inline void hsvToRgb(float h, float s, float v, float& r, float& g, float& b) {
     case 4:  r = t; g = p; b = v; break;  // blue  -> magenta
     default: r = v; g = p; b = q; break;  // magenta-> red (case 5)
   }
+}
+
+struct RgbwUnit {
+  float r;
+  float g;
+  float b;
+  float w;
+};
+
+// Browser hex is sRGB-encoded, while LED PWM controls emitted light roughly
+// linearly. Decode sRGB before generating channel values or intermediate colors
+// carry far too much light and look flat/yellow on the physical LEDs.
+inline float srgbToLinear(float value) {
+  if (value <= 0.0f) return 0.0f;
+  if (value >= 1.0f) return 1.0f;
+  return value <= 0.04045f
+             ? value / 12.92f
+             : powf((value + 0.055f) / 1.055f, 2.4f);
+}
+
+// Convert an sRGB HSV color into linear RGBW. The SK6812's white die has a warm
+// spectrum and a different luminous output from an equal RGB mix, so it cannot
+// stand in for the common component of a chromatic browser color without a
+// measured fixture calibration. Reserve it for neutral and nearly-neutral
+// colors; otherwise preserve the selected hex entirely on the RGB dies. Fade
+// the handoff over the first 5% saturation to avoid a discontinuity around gray.
+// Intensity is applied after gamma decode so temporal fades remain smooth in
+// emitted-light space.
+inline RgbwUnit hsvToRgbw(float h, float s, float v, float intensity) {
+  if (s < 0.0f) s = 0.0f;
+  if (s > 1.0f) s = 1.0f;
+  if (v < 0.0f) v = 0.0f;
+  if (v > 1.0f) v = 1.0f;
+  if (intensity < 0.0f) intensity = 0.0f;
+  if (intensity > 1.0f) intensity = 1.0f;
+
+  float sr, sg, sb;
+  hsvToRgb(h, s, v, sr, sg, sb);
+  float r = srgbToLinear(sr);
+  float g = srgbToLinear(sg);
+  float b = srgbToLinear(sb);
+  constexpr float kNeutralBlendSaturation = 0.05f;
+  float white_mix = 1.0f - fminf(s / kNeutralBlendSaturation, 1.0f);
+  float w = fminf(r, fminf(g, b)) * white_mix;
+  return {(r - w) * intensity, (g - w) * intensity,
+          (b - w) * intensity, w * intensity};
 }
 
 // Square-wave heartbeat: ON for the first half_period_us of each full cycle, OFF

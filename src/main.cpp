@@ -1346,9 +1346,13 @@ static void otaFinalizePending() {
 }
 
 static void otaSendRepeated(const uint8_t* data, size_t len) {
-  for (uint8_t i = 0; i < 3; i++) {
-    esp_now_send(BROADCAST_ADDR, data, len);
-    delay(2);
+  uint8_t accepted = 0;
+  for (uint8_t attempt = 0;
+       accepted < OTA_RADIO_SEND_COPIES &&
+       attempt < OTA_RADIO_SEND_MAX_ATTEMPTS;
+       attempt++) {
+    if (esp_now_send(BROADCAST_ADDR, data, len) == ESP_OK) accepted++;
+    delay(OTA_RADIO_SEND_DELAY_MS);
   }
 }
 

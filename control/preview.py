@@ -10,6 +10,10 @@ from typing import Any
 
 MAX_BRIGHTNESS = 192
 MAX_PREVIEW_FRAMES = 240
+COLOR_VALUE_MARKER = 0x8000
+FIREFLY_SCATTER_MASK = 0x007F
+OCEAN_WAVELENGTH_MASK = 0x03FF
+OCEAN_ANGLE_MASK = 0x01FF
 
 
 @dataclass(frozen=True)
@@ -244,15 +248,14 @@ def _normalize_pattern(pattern: str) -> str:
 def _pattern_color(pattern: str, brightness: int, params: dict[str, Any], synced_us: int, x: float, y: float) -> Rgbw:
     if pattern == "pulse":
         hue = _number(params, "hue", "p0", default=0) % 360
-        saturation = _saturation(params)
+        saturation, value = _standard_color(params)
         intensity = _pulse_intensity(synced_us, 4.0, 0.0)
-        return _hsv_color(brightness, intensity, hue, saturation)
+        return _hsv_color(brightness, intensity, hue, saturation, value)
     if pattern == "palette_drift":
         period_s = _number(params, "period", "p0", default=8000) / 1000.0
         spatial = _number(params, "spatial", "p1", default=0) / 100.0
         hue = _drift_hue(synced_us, x, period_s, spatial)
-        r, g, b = _hsv_to_rgb(hue, 1.0, 1.0)
-        return Rgbw(round(r * brightness), round(g * brightness), round(b * brightness), 0)
+        return _hsv_color(brightness, 1.0, hue * 360.0, 1.0, 1.0)
     if pattern == "sweep":
         period_s = _number(params, "period", "p0", default=4000) / 1000.0
         wavelength = _number(params, "wavelength", "spatial", "p1", default=300) / 100.0
@@ -262,36 +265,53 @@ def _pattern_color(pattern: str, brightness: int, params: dict[str, Any], synced
         return Rgbw(brightness, brightness, brightness, brightness)
     if pattern == "glow":
         hue = _number(params, "hue", "p0", default=40) % 360
-        saturation = _saturation(params)
-        return _hsv_color(brightness, 1.0, hue, saturation)
+        saturation, value = _standard_color(params)
+        return _hsv_color(brightness, 1.0, hue, saturation, value)
     if pattern == "firefly":
         # Firefly params are positional on the wire (p0..p3) to avoid the
         # hue/period collision on params[0]; accept the friendly names too.
         period_s = _number(params, "p0", "period", default=7000) / 1000.0
         hue = _number(params, "p1", "hue", default=58) % 360
-        scatter = _number(params, "p2", "scatter", default=100)
-        scatter = (100 if scatter <= 0 else min(scatter, 100)) / 100.0
+        meta = int(_number(params, "p2", default=0))
+        full_hsv = _color_value_present(meta)
+        if full_hsv:
+            scatter = min(meta & FIREFLY_SCATTER_MASK, 100) / 100.0
+            value = ((meta >> 7) & 0xFF) / 255.0
+        else:
+            scatter_raw = _number(params, "scatter", "p2", default=100)
+            scatter = (100 if scatter_raw <= 0 else min(scatter_raw, 100)) / 100.0
+            value = 1.0
         saturation = _number(params, "p3", "saturation", default=85)
-        saturation = (85 if saturation <= 0 else min(saturation, 100)) / 100.0
+        saturation = (min(max(saturation, 0), 100) if full_hsv
+                      else (85 if saturation <= 0 else min(saturation, 100))) / 100.0
         intensity = _firefly_intensity(synced_us, x, y, period_s, scatter)
-        r, g, b = _hsv_to_rgb(hue / 360.0, saturation, intensity)
-        return Rgbw(round(r * brightness), round(g * brightness), round(b * brightness), 0)
+        return _hsv_color(brightness, intensity, hue, saturation, value)
     if pattern == "ocean_wave":
         # Positional params (p0..p3); accept the friendly names too.
         period_s = _number(params, "p0", "period", default=9000) / 1000.0
-        wavelength = _number(params, "p1", "wavelength", default=100) / 100.0
-        angle_rad = math.radians(_number(params, "p2", "angle", default=45) % 360)
+        wavelength_saturation = int(_number(params, "p1", "wavelength", default=100))
+        angle_value = int(_number(params, "p2", "angle", default=45))
+        full_hsv = _color_value_present(angle_value)
+        wavelength_raw = (wavelength_saturation & OCEAN_WAVELENGTH_MASK
+                          if full_hsv else wavelength_saturation)
+        angle_raw = angle_value & OCEAN_ANGLE_MASK if full_hsv else angle_value
+        wavelength = (wavelength_raw or 100) / 100.0
+        angle_rad = math.radians(angle_raw % 360)
         hue_base = _number(params, "p3", "hue", default=205)
-        hue_base = 205 if hue_base == 0 else hue_base % 360
+        hue_base = hue_base % 360 if full_hsv else (205 if hue_base == 0 else hue_base % 360)
+        base_saturation = (((wavelength_saturation >> 10) & 0x3F) / 63.0
+                           if full_hsv else 1.0)
+        base_value = (((angle_value >> 9) & 0x3F) / 63.0
+                      if full_hsv else 1.0)
         n = _ocean_intensity(synced_us, x, y, period_s, wavelength, angle_rad)
         foam = max(0.0, min(1.0, (n - 0.72) / 0.28))
         foam *= foam
-        value = 0.14 + 0.86 * (n ** 1.3)
+        value = base_value * (0.14 + 0.86 * (n ** 1.3))
         hue = (hue_base + 10.0 - 27.0 * n - 8.0 * foam) / 360.0
-        saturation = max(0.06, min(1.0, (0.98 - 0.15 * n) - 0.70 * foam))
-        r, g, b = _hsv_to_rgb(hue, saturation, value)
-        w = round(foam * value * 0.55 * brightness)
-        return Rgbw(round(r * brightness), round(g * brightness), round(b * brightness), w)
+        saturation = min(1.0, max(0.0, ((0.98 - 0.15 * n) - 0.70 * foam) * base_saturation))
+        if not full_hsv:
+            saturation = max(0.06, saturation)
+        return _hsv_color(brightness, 1.0, hue * 360.0, saturation, value)
     raise ValueError(f"unknown pattern: {pattern}")
 
 
@@ -374,11 +394,19 @@ def _number(params: dict[str, Any], *keys: str, default: float) -> float:
     return default
 
 
-def _saturation(params: dict[str, Any]) -> float:
+def _color_value_present(packed: int) -> bool:
+    return bool(packed & COLOR_VALUE_MARKER)
+
+
+def _standard_color(params: dict[str, Any]) -> tuple[float, float]:
+    packed_value = int(_number(params, "p2", default=0))
+    full_hsv = _color_value_present(packed_value)
     saturation = _number(params, "saturation", "p1", default=100)
+    if full_hsv:
+        return min(max(saturation, 0), 100) / 100.0, (packed_value & 0xFF) / 255.0
     if saturation <= 0:
         saturation = 100
-    return min(saturation, 100) / 100.0
+    return min(saturation, 100) / 100.0, 1.0
 
 
 def _phase(t_us: int, period_s: float) -> float:
@@ -471,9 +499,34 @@ def _drift_hue(synced_us: int, x: float, period_s: float, spatial: float) -> flo
     return h - math.floor(h)
 
 
-def _hsv_color(brightness: int, intensity: float, hue_degrees: float, saturation: float) -> Rgbw:
-    r, g, b = _hsv_to_rgb(hue_degrees / 360.0, saturation, intensity)
-    return Rgbw(round(r * brightness), round(g * brightness), round(b * brightness), 0)
+def _hsv_color(
+    brightness: int,
+    intensity: float,
+    hue_degrees: float,
+    saturation: float,
+    value: float,
+) -> Rgbw:
+    r, g, b = _hsv_to_rgb(hue_degrees / 360.0, saturation, value)
+    r = _srgb_to_linear(r)
+    g = _srgb_to_linear(g)
+    b = _srgb_to_linear(b)
+    # Match firmware: the fixture's warm-white die is not a color-neutral
+    # substitute for the common RGB component of a chromatic browser color.
+    # Blend it only across the first 5% saturation around neutral gray.
+    white_mix = 1.0 - min(max(saturation, 0.0) / 0.05, 1.0)
+    w = min(r, g, b) * white_mix
+    scale = brightness * max(0.0, min(1.0, intensity))
+    return Rgbw(
+        round((r - w) * scale),
+        round((g - w) * scale),
+        round((b - w) * scale),
+        round(w * scale),
+    )
+
+
+def _srgb_to_linear(value: float) -> float:
+    value = max(0.0, min(1.0, value))
+    return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
 
 
 def _hsv_to_rgb(h: float, s: float, v: float) -> tuple[float, float, float]:
@@ -500,11 +553,23 @@ def _hsv_to_rgb(h: float, s: float, v: float) -> tuple[float, float, float]:
 
 
 def _rgbw_to_preview_rgb(color: Rgbw) -> tuple[int, int, int]:
+    # Firmware bytes are linear-light PWM values. Recombine the natural-white
+    # emitter with RGB in linear space, then encode back to sRGB for a screen.
     return (
-        _clamp_byte(color.r + color.w),
-        _clamp_byte(color.g + color.w),
-        _clamp_byte(color.b + color.w),
+        _linear_byte_to_srgb(color.r + color.w),
+        _linear_byte_to_srgb(color.g + color.w),
+        _linear_byte_to_srgb(color.b + color.w),
     )
+
+
+def _linear_byte_to_srgb(value: int) -> int:
+    linear = max(0.0, min(1.0, value / 255.0))
+    srgb = (
+        12.92 * linear
+        if linear <= 0.0031308
+        else 1.055 * (linear ** (1.0 / 2.4)) - 0.055
+    )
+    return _clamp_byte(round(srgb * 255.0))
 
 
 def _clamp_byte(value: int) -> int:

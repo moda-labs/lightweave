@@ -67,6 +67,22 @@ def test_pattern_command_includes_brightness_and_params() -> None:
     }
 
 
+def test_legacy_glow_params_get_explicit_full_value_and_optional_value_is_packed() -> None:
+    transport = FakeTransport([
+        json.dumps({"id": 1, "ok": True}),
+        json.dumps({"id": 2, "ok": True}),
+    ])
+    conductor = JsonLineSerialConductor(transport)
+
+    conductor.update_pattern("Glow", 48, {"hue": 32, "saturation": 100})
+    conductor.update_pattern("Pulse", 48, {"hue": 0, "saturation": 0, "value": 128})
+
+    first = json.loads(transport.writes[0])["params"]
+    second = json.loads(transport.writes[1])["params"]
+    assert first == {"hue": 32, "saturation": 100, "p2": 0x80FF}
+    assert second == {"hue": 0, "saturation": 0, "p2": 0x8080}
+
+
 def test_keepalive_command_maps_to_json() -> None:
     transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "keepalive changed"})])
     conductor = JsonLineSerialConductor(transport)

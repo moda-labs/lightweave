@@ -8,6 +8,31 @@ from typing import Any, Protocol
 
 from control.serial_transport import SerialTransportError
 
+COLOR_VALUE_MARKER = 0x8000
+
+
+def _pattern_params_for_wire(
+    pattern: str,
+    params: dict[str, int | float | str],
+) -> dict[str, int | float | str]:
+    wire = dict(params)
+    normalized = pattern.strip().lower().replace("_", " ").replace("-", " ")
+    if normalized not in {"glow", "pulse"} or "p2" in wire:
+        return wire
+
+    has_hue = "hue" in wire or "p0" in wire
+    has_saturation = "saturation" in wire or "p1" in wire
+    if not (has_hue and has_saturation):
+        return wire
+
+    raw_value = wire.pop("value", 255)
+    try:
+        value = round(float(raw_value))
+    except (TypeError, ValueError):
+        value = 255
+    wire["p2"] = COLOR_VALUE_MARKER | max(0, min(255, value))
+    return wire
+
 
 class ConductorAdapter(Protocol):
     def snapshot(self) -> dict[str, Any]: ...
@@ -76,7 +101,12 @@ class JsonLineSerialConductor:
         return self._request("replace", old_mac=old_mac, new_mac=new_mac)
 
     def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str]) -> dict[str, Any]:
-        return self._request("pattern", pattern=pattern, brightness=brightness, params=params)
+        return self._request(
+            "pattern",
+            pattern=pattern,
+            brightness=brightness,
+            params=_pattern_params_for_wire(pattern, params),
+        )
 
     def blackout(self) -> dict[str, Any]:
         return self._request("blackout")
