@@ -42,6 +42,16 @@ const FIREFLY_SCATTER_MASK = 0x007f;
 const OCEAN_WAVELENGTH_MASK = 0x03ff;
 const OCEAN_ANGLE_MASK = 0x01ff;
 
+// Two hex colors are "the same" preset if every channel is within a couple of
+// counts — HSV<->hex rounding can drift a preset's recomputed hex by 1, which
+// would otherwise stop its swatch from highlighting when it is the active color.
+function hexApproxEqual(a, b) {
+  const ca = parseHexColor(a);
+  const cb = parseHexColor(b);
+  if (!ca || !cb) return false;
+  return Math.abs(ca.r - cb.r) <= 2 && Math.abs(ca.g - cb.g) <= 2 && Math.abs(ca.b - cb.b) <= 2;
+}
+
 function parseHexColor(input) {
   const trimmed = (input || "").trim().replace(/^#/, "");
   let expanded = trimmed;
@@ -479,13 +489,16 @@ function renderPatternControls() {
   $("#scatter-value").textContent = String(Number(patternDraft.scatter ?? 100));
   $("#pattern-angle").value = patternDraft.angle ?? 45;
   $("#angle-value").textContent = String(Number(patternDraft.angle ?? 45));
-  const hue = String(patternDraft.hue);
-  const isFullSaturation = Number(patternDraft.saturation ?? 100) === 100;
-  $$("#hue-picker button").forEach((button) => {
-    button.classList.toggle("active", isFullSaturation && button.dataset.hue === hue);
+  const draftHex = hueSaturationValueToHex(
+    patternDraft.hue,
+    patternDraft.saturation ?? 100,
+    patternDraft.value ?? 255,
+  );
+  $$("#color-presets button").forEach((button) => {
+    button.classList.toggle("active", hexApproxEqual(button.dataset.hex, draftHex));
   });
   const isColorPattern = patternDraft.pattern === "Pulse" || patternDraft.pattern === "Glow" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Ocean Wave";
-  $("#hue-picker").hidden = !isColorPattern;
+  $("#color-presets").hidden = !isColorPattern;
   $("#hex-color-row").hidden = !isColorPattern;
   if (isColorPattern) {
     const hex = hueSaturationValueToHex(
@@ -2207,16 +2220,11 @@ $("#pattern-picker").addEventListener("click", (event) => {
   }
 });
 
-$("#hue-picker").addEventListener("click", (event) => {
-  if (event.target.dataset.hue) {
-    if (!patternDraft && state) patternDraft = patternDraftFromState();
-    if (patternDraft) {
-      patternDraft.hue = Number(event.target.dataset.hue);
-      patternDraft.saturation = 100;
-      patternDraft.value = 255;
-      renderPatternControls();
-    }
-  }
+$("#color-presets").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-hex]");
+  if (!button) return;
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (patternDraft) applyHexColor(button.dataset.hex);
 });
 
 function applyHexColor(hex) {

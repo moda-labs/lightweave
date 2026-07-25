@@ -76,11 +76,17 @@
           </div>
           <label class="control-label" for="brightness">Brightness <span id="brightness-value">48</span> / 192</label>
           <input id="brightness" type="range" min="0" max="192" value="48">
-          <div class="segmented" id="hue-picker">
-            <button data-hue="30">Orange</button>
-            <button data-hue="40">Amber</button>
-            <button data-hue="50">Yellow</button>
-            <button data-hue="180">Cyan</button>
+          <div class="color-presets" id="color-presets">
+            <button type="button" data-hex="F49515"><span class="preset-sw" style="background:#F49515"></span>Warm orange yellow</button>
+            <button type="button" data-hex="F48A66"><span class="preset-sw" style="background:#F48A66"></span>Toro nagashi yellow</button>
+            <button type="button" data-hex="DB87D4"><span class="preset-sw" style="background:#DB87D4"></span>Lotus pink</button>
+            <button type="button" data-hex="CC0000"><span class="preset-sw" style="background:#CC0000"></span>Traditional red</button>
+            <button type="button" data-hex="FBEC5D"><span class="preset-sw" style="background:#FBEC5D"></span>Golden yellow</button>
+            <button type="button" data-hex="5EB28E"><span class="preset-sw" style="background:#5EB28E"></span>Leaf green</button>
+            <button type="button" data-hex="F2F5EE"><span class="preset-sw" style="background:#F2F5EE"></span>White</button>
+            <button type="button" data-hex="004225"><span class="preset-sw" style="background:#004225"></span>Lotus green</button>
+            <button type="button" data-hex="006125"><span class="preset-sw" style="background:#006125"></span>Lotus lantern</button>
+            <button type="button" data-hex="00711D"><span class="preset-sw" style="background:#00711D"></span>Green lantern</button>
           </div>
           <div class="pattern-param" id="hex-color-row">
             <label class="control-label" for="pattern-hex">Custom color (hex)</label>
