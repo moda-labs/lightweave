@@ -320,6 +320,59 @@ void test_hsv_wraps_and_stays_in_gamut() {
   TEST_ASSERT_FLOAT_WITHIN(1e-4, b0, b1);
 }
 
+void test_color_value_metadata_round_trips_without_losing_zero() {
+  uint16_t standard = pmath::colorValuePack(0);
+  TEST_ASSERT_TRUE(pmath::colorValuePresent(standard));
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 0.0f, pmath::colorValueDecode(standard));
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 128.0f / 255.0f,
+                           pmath::colorValueDecode(pmath::colorValuePack(128)));
+
+  uint16_t firefly = pmath::fireflyMetaPack(73, 41);
+  TEST_ASSERT_TRUE(pmath::colorValuePresent(firefly));
+  TEST_ASSERT_EQUAL_UINT8(73, pmath::fireflyScatterDecode(firefly));
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 41.0f / 255.0f,
+                           pmath::fireflyValueDecode(firefly));
+
+  uint16_t ocean_ws = pmath::oceanWavelengthSaturationPack(375, 37);
+  uint16_t ocean_av = pmath::oceanAngleValuePack(205, 96);
+  TEST_ASSERT_TRUE(pmath::oceanColorPresent(ocean_av));
+  TEST_ASSERT_EQUAL_UINT16(375, pmath::oceanWavelengthDecode(ocean_ws, ocean_av));
+  TEST_ASSERT_EQUAL_UINT16(205, pmath::oceanAngleDecode(ocean_av));
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.37f,
+                           pmath::oceanSaturationDecode(ocean_ws, ocean_av));
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 96.0f / 255.0f,
+                           pmath::oceanValueDecode(ocean_av));
+}
+
+void test_srgb_gamma_and_rgbw_extraction_preserve_hex_distinctions() {
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 0.0f, pmath::srgbToLinear(0.0f));
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 1.0f, pmath::srgbToLinear(1.0f));
+  TEST_ASSERT_FLOAT_WITHIN(1e-3, 0.216f, pmath::srgbToLinear(128.0f / 255.0f));
+
+  pmath::RgbwUnit bright = pmath::hsvToRgbw(32.0f / 360.0f, 1.0f, 1.0f, 1.0f);
+  pmath::RgbwUnit half = pmath::hsvToRgbw(32.0f / 360.0f, 1.0f,
+                                         128.0f / 255.0f, 1.0f);
+  TEST_ASSERT_TRUE(half.r < bright.r * 0.3f);
+  TEST_ASSERT_TRUE(half.g < bright.g * 0.3f);
+
+  pmath::RgbwUnit gray = pmath::hsvToRgbw(0.0f, 0.0f, 128.0f / 255.0f, 1.0f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 0.0f, gray.r);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 0.0f, gray.g);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 0.0f, gray.b);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3, 0.216f, gray.w);
+
+  // #EEEE9B is chromatic (a pale yellow), not neutral white.  Sending its
+  // common RGB component to the strip's warm-white die washes the tint out on
+  // real hardware because that emitter is neither color- nor intensity-matched
+  // to an RGB white mix.
+  pmath::RgbwUnit pale_yellow =
+      pmath::hsvToRgbw(60.0f / 360.0f, 35.0f / 100.0f,
+                       238.0f / 255.0f, 1.0f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, 0.0f, pale_yellow.w);
+  TEST_ASSERT_TRUE(pale_yellow.r > pale_yellow.b);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6, pale_yellow.r, pale_yellow.g);
+}
+
 void test_drift_hue_cycles_in_range() {
   for (int64_t us = 0; us < 8'000'000; us += 53'000) {
     float h = pmath::driftHue(us, 0.0f, 8.0f, 0.0f);
@@ -715,6 +768,10 @@ void test_ota_hex_decode_rejects_bad_or_oversized_input() {
 }
 
 void test_ota_chunk_decision_accepts_repeated_written_chunks() {
+  TEST_ASSERT_EQUAL_UINT8(8, OTA_RADIO_SEND_COPIES);
+  TEST_ASSERT_TRUE(OTA_RADIO_SEND_MAX_ATTEMPTS >= OTA_RADIO_SEND_COPIES);
+  TEST_ASSERT_TRUE(OTA_RADIO_SEND_DELAY_MS >= 4);
+
   TEST_ASSERT_EQUAL_UINT8(OTA_CHUNK_ACCEPT,
                           otaChunkDecision(0, 1000, 0, 200));
   TEST_ASSERT_EQUAL_UINT8(OTA_CHUNK_DUPLICATE,
@@ -1863,6 +1920,8 @@ int main(int, char**) {
   RUN_TEST(test_hsv_primary_hues);
   RUN_TEST(test_hsv_red_to_yellow_passes_through_orange);
   RUN_TEST(test_hsv_wraps_and_stays_in_gamut);
+  RUN_TEST(test_color_value_metadata_round_trips_without_losing_zero);
+  RUN_TEST(test_srgb_gamma_and_rgbw_extraction_preserve_hex_distinctions);
   RUN_TEST(test_drift_hue_cycles_in_range);
   RUN_TEST(test_drift_hue_unison_by_default_but_travels_with_spatial);
   RUN_TEST(test_firefly_intensity_stays_in_gamut);

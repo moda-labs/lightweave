@@ -1,3 +1,6 @@
+import json
+import subprocess
+
 from fastapi.testclient import TestClient
 
 import control.app as app_module
@@ -504,6 +507,97 @@ def test_preview_endpoint_accepts_json_params() -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
+
+
+def test_hex_picker_preserves_value_and_packs_distinct_pattern_colors() -> None:
+    script = r'''
+const fs = require("fs");
+const src = fs.readFileSync("control/static/app.js", "utf8");
+eval(src.slice(0, src.indexOf("function isPatternDirty")));
+function sample(hex) {
+  const rgb = parseHexColor(hex);
+  const hsv = rgbToHueSaturationValue(rgb.r, rgb.g, rgb.b);
+  return {
+    hex,
+    hsv,
+    roundTrip: hueSaturationValueToHex(hsv.hue, hsv.saturation, hsv.value),
+    params: patternParams({
+      pattern: "Glow", brightness: 48,
+      hue: hsv.hue, saturation: hsv.saturation, value: hsv.value,
+    }),
+  };
+}
+console.log(JSON.stringify([sample("#ff8800"), sample("#804400"), sample("#808080")]));
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    bright, half, gray = json.loads(result.stdout)
+
+    assert bright["roundTrip"] == "#ff8800"
+    assert half["roundTrip"] == "#804400"
+    assert gray["roundTrip"] == "#808080"
+    assert bright["params"]["p2"] != half["params"]["p2"]
+    assert gray["params"]["p1"] == 0
+    assert gray["params"]["p2"] & 0x8000
+
+
+def test_preview_distinguishes_hex_value_uses_white_for_gray_and_keeps_ocean_saturation() -> None:
+    client = TestClient(create_app(MockConductor()))
+
+    def glow_lantern(value: int, saturation: int = 100, hue: int = 32) -> dict:
+        response = client.get(
+            "/preview.json",
+            params={
+                "pattern": "Glow",
+                "brightness": 48,
+                "params": json.dumps({
+                    "p0": hue if saturation else 0,
+                    "p1": saturation,
+                    "p2": 0x8000 | value,
+                }),
+                "t": 0,
+            },
+        )
+        assert response.status_code == 200
+        return response.json()["lanterns"][0]
+
+    bright = glow_lantern(255)
+    half = glow_lantern(128)
+    gray = glow_lantern(128, saturation=0)
+    pale_yellow = glow_lantern(238, saturation=35, hue=60)
+    assert bright["rgbw"] == [48, 12, 0, 0]
+    assert half["rgbw"] == [10, 3, 0, 0]
+    assert sum(half["rgbw"]) < sum(bright["rgbw"])
+    assert gray["rgbw"] == [0, 0, 0, 10]
+    assert gray["rgb"][0] == gray["rgb"][1] == gray["rgb"][2]
+    assert gray["rgb"][0] > gray["rgbw"][3]
+    assert pale_yellow["rgbw"] == [41, 41, 16, 0]
+
+    def ocean_rgbw(saturation: int) -> list[int]:
+        sat6 = round(saturation * 63 / 100)
+        value6 = 63
+        response = client.get(
+            "/preview.json",
+            params={
+                "pattern": "Ocean Wave",
+                "brightness": 64,
+                "params": json.dumps({
+                    "p0": 9000,
+                    "p1": 100 | (sat6 << 10),
+                    "p2": 0x8000 | (value6 << 9) | 45,
+                    "p3": 205,
+                }),
+                "t": 1500,
+            },
+        )
+        assert response.status_code == 200
+        return response.json()["lanterns"][0]["rgbw"]
+
+    assert ocean_rgbw(100) != ocean_rgbw(20)
 
 
 def test_preview_json_endpoint_returns_lantern_samples_and_metrics() -> None:

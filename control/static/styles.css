@@ -277,6 +277,10 @@ tr.selected { background: rgba(240, 179, 90, .08); }
 .segmented { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
 .pattern-param { margin-top: 12px; }
 .pattern-param[hidden], .segmented[hidden] { display: none; }
+.color-presets { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 12px 0; }
+.color-presets[hidden] { display: none; }
+.color-presets button { display: flex; align-items: center; gap: 8px; text-align: left; padding: 8px 10px; font-size: 13px; }
+.color-presets .preset-sw { width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, .35); flex: none; }
 .hex-input-group { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .hex-input-group input[type="text"] { flex: 1; min-width: 0; background: #0b0f0c; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--text); font-family: "JetBrains Mono", "IBM Plex Mono", monospace; }
 .hex-input-group input[type="text"].invalid { border-color: #d9534f; }

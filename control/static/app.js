@@ -29,19 +29,29 @@ const MAX_ZOOM = 3;
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const TIMEZONE_STORAGE_KEY = "baskets.sleepTimezone";
 const PATTERN_DEFAULTS = {
-  Pulse: { hue: 40, saturation: 100, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
-  Glow: { hue: 40, saturation: 100, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
-  Sweep: { hue: 40, saturation: 100, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
-  "Palette Drift": { hue: 40, saturation: 100, period: 8000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
-  Firefly: { hue: 58, saturation: 85, period: 7000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
-  "Ocean Wave": { hue: 205, saturation: 100, period: 9000, wavelength: 100, spatial: 0, scatter: 100, angle: 45 },
+  Pulse: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
+  Glow: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
+  Sweep: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
+  "Palette Drift": { hue: 40, saturation: 100, value: 255, period: 8000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
+  Firefly: { hue: 58, saturation: 85, value: 255, period: 7000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
+  "Ocean Wave": { hue: 205, saturation: 100, value: 255, period: 9000, wavelength: 100, spatial: 0, scatter: 100, angle: 45 },
 };
 
-// Hue/saturation is the color model the firmware actually renders (see
-// pmath::hsvToRgb) — value/lightness isn't part of it, since overall
-// intensity is always the separate Brightness slider. So hex input only
-// ever needs to recover hue + saturation; the swatch is rendered at full
-// value to show exactly the hue/chroma that will hit the LEDs.
+const COLOR_VALUE_MARKER = 0x8000;
+const FIREFLY_SCATTER_MASK = 0x007f;
+const OCEAN_WAVELENGTH_MASK = 0x03ff;
+const OCEAN_ANGLE_MASK = 0x01ff;
+
+// Two hex colors are "the same" preset if every channel is within a couple of
+// counts — HSV<->hex rounding can drift a preset's recomputed hex by 1, which
+// would otherwise stop its swatch from highlighting when it is the active color.
+function hexApproxEqual(a, b) {
+  const ca = parseHexColor(a);
+  const cb = parseHexColor(b);
+  if (!ca || !cb) return false;
+  return Math.abs(ca.r - cb.r) <= 2 && Math.abs(ca.g - cb.g) <= 2 && Math.abs(ca.b - cb.b) <= 2;
+}
+
 function parseHexColor(input) {
   const trimmed = (input || "").trim().replace(/^#/, "");
   let expanded = trimmed;
@@ -56,7 +66,7 @@ function parseHexColor(input) {
   };
 }
 
-function rgbToHueSaturation(r, g, b) {
+function rgbToHueSaturationValue(r, g, b) {
   const rf = r / 255, gf = g / 255, bf = b / 255;
   const max = Math.max(rf, gf, bf);
   const min = Math.min(rf, gf, bf);
@@ -70,14 +80,19 @@ function rgbToHueSaturation(r, g, b) {
     if (hue < 0) hue += 360;
   }
   const saturation = max === 0 ? 0 : (delta / max) * 100;
-  return { hue: Math.round(hue) % 360, saturation: Math.round(saturation) };
+  return {
+    hue: Math.round(hue) % 360,
+    saturation: Math.round(saturation),
+    value: Math.round(max * 255),
+  };
 }
 
-function hueSaturationToHex(hue, saturation) {
+function hueSaturationValueToHex(hue, saturation, value) {
   const h = ((Number(hue) % 360) + 360) % 360;
   const s = Math.min(100, Math.max(0, Number(saturation))) / 100;
+  const v = Math.min(255, Math.max(0, Number(value))) / 255;
   const hf = h / 60;
-  const c = s; // value is always full (1.0), so chroma == saturation
+  const c = v * s;
   const x = c * (1 - Math.abs((hf % 2) - 1));
   let r = 0, g = 0, b = 0;
   if (hf < 1) [r, g, b] = [c, x, 0];
@@ -86,9 +101,37 @@ function hueSaturationToHex(hue, saturation) {
   else if (hf < 4) [r, g, b] = [0, x, c];
   else if (hf < 5) [r, g, b] = [x, 0, c];
   else [r, g, b] = [c, 0, x];
-  const m = 1 - c;
+  const m = v - c;
   const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function colorValuePack(value) {
+  return COLOR_VALUE_MARKER | Math.min(255, Math.max(0, Math.round(Number(value))));
+}
+
+function colorValuePresent(packed) {
+  return (Number(packed || 0) & COLOR_VALUE_MARKER) !== 0;
+}
+
+function fireflyMetaPack(scatter, value) {
+  const safeScatter = Math.min(100, Math.max(0, Math.round(Number(scatter))));
+  const safeValue = Math.min(255, Math.max(0, Math.round(Number(value))));
+  return COLOR_VALUE_MARKER | (safeValue << 7) | safeScatter;
+}
+
+function oceanWavelengthSaturationPack(wavelength, saturation) {
+  const safeWavelength = Math.min(OCEAN_WAVELENGTH_MASK, Math.max(0, Math.round(Number(wavelength))));
+  const safeSaturation = Math.min(100, Math.max(0, Number(saturation)));
+  const sat6 = Math.round(safeSaturation * 63 / 100);
+  return safeWavelength | (sat6 << 10);
+}
+
+function oceanAngleValuePack(angle, value) {
+  const safeAngle = Math.round(Number(angle)) & OCEAN_ANGLE_MASK;
+  const safeValue = Math.min(255, Math.max(0, Number(value)));
+  const value6 = Math.round(safeValue * 63 / 255);
+  return COLOR_VALUE_MARKER | (value6 << 9) | safeAngle;
 }
 
 const $ = (selector) => document.querySelector(selector);
@@ -257,13 +300,36 @@ function patternHueFromState() {
 function patternSaturationFromState() {
   const params = state.pattern.params || {};
   if (state.pattern.pattern === "Firefly") {
+    if (colorValuePresent(params.p2) && params.p3 !== undefined) return Math.min(100, Number(params.p3));
     return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS.Firefly.saturation;
+  }
+  if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+    return Math.round(((Number(params.p1) >> 10) & 0x3f) * 100 / 63);
+  }
+  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") &&
+      colorValuePresent(params.p2) && params.p1 !== undefined) {
+    return Math.min(100, Number(params.p1));
   }
   if (params.saturation !== undefined) return Number(params.saturation);
   if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") && params.p1 !== undefined) {
     return Number(params.p1);
   }
   return 100;
+}
+
+function patternValueFromState() {
+  const params = state.pattern.params || {};
+  if (state.pattern.pattern === "Firefly" && colorValuePresent(params.p2)) {
+    return (Number(params.p2) >> 7) & 0xff;
+  }
+  if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+    return Math.round(((Number(params.p2) >> 9) & 0x3f) * 255 / 63);
+  }
+  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") &&
+      colorValuePresent(params.p2)) {
+    return Number(params.p2) & 0xff;
+  }
+  return 255;
 }
 
 function patternPeriodFromState() {
@@ -277,20 +343,30 @@ function patternPeriodFromState() {
 
 function patternScatterFromState() {
   const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Firefly" && params.p2 !== undefined) return Number(params.p2);
+  if (state.pattern.pattern === "Firefly" && params.p2 !== undefined) {
+    if (colorValuePresent(params.p2)) return Number(params.p2) & FIREFLY_SCATTER_MASK;
+    return Number(params.p2);
+  }
   return PATTERN_DEFAULTS.Firefly.scatter;
 }
 
 function patternAngleFromState() {
   const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Ocean Wave" && params.p2 !== undefined) return Number(params.p2);
+  if (state.pattern.pattern === "Ocean Wave" && params.p2 !== undefined) {
+    return colorValuePresent(params.p2) ? Number(params.p2) & OCEAN_ANGLE_MASK : Number(params.p2);
+  }
   return PATTERN_DEFAULTS["Ocean Wave"].angle;
 }
 
 function patternWavelengthFromState() {
   const params = state.pattern.params || {};
   if (params.wavelength !== undefined) return Number(params.wavelength);
-  if ((state.pattern.pattern === "Sweep" || state.pattern.pattern === "Ocean Wave") && params.p1 !== undefined) return Number(params.p1);
+  if ((state.pattern.pattern === "Sweep" || state.pattern.pattern === "Ocean Wave") && params.p1 !== undefined) {
+    if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+      return Number(params.p1) & OCEAN_WAVELENGTH_MASK;
+    }
+    return Number(params.p1);
+  }
   return PATTERN_DEFAULTS[state.pattern.pattern]?.wavelength ?? PATTERN_DEFAULTS.Sweep.wavelength;
 }
 
@@ -308,6 +384,7 @@ function patternDraftFromState() {
     brightness: Number(state.pattern.brightness),
     hue: patternHueFromState(),
     saturation: patternSaturationFromState(),
+    value: patternValueFromState(),
     period: patternPeriodFromState() || defaults.period,
     wavelength: patternWavelengthFromState() || defaults.wavelength,
     spatial: patternSpatialFromState(),
@@ -323,6 +400,7 @@ function patternDraftForSelection(pattern) {
     brightness: Number(patternDraft?.brightness ?? state?.pattern?.brightness ?? 48),
     hue: Number(defaults.hue),
     saturation: Number(defaults.saturation),
+    value: Number(defaults.value),
     period: Number(defaults.period),
     wavelength: Number(defaults.wavelength),
     spatial: Number(defaults.spatial),
@@ -333,7 +411,12 @@ function patternDraftForSelection(pattern) {
 
 function patternParams(draft) {
   if (draft.pattern === "Pulse" || draft.pattern === "Glow") {
-    return { hue: Number(draft.hue), saturation: Number(draft.saturation ?? 100) };
+    return {
+      p0: Number(draft.hue),
+      p1: Number(draft.saturation ?? 100),
+      p2: colorValuePack(draft.value ?? 255),
+      p3: 0,
+    };
   }
   if (draft.pattern === "Sweep") {
     return { period: Number(draft.period), spatial: Number(draft.wavelength) };
@@ -342,21 +425,21 @@ function patternParams(draft) {
     return { period: Number(draft.period), spatial: Number(draft.spatial) };
   }
   if (draft.pattern === "Firefly") {
-    // Positional on the wire: p0=period, p1=hue, p2=scatter, p3=saturation.
+    // Positional on the wire; p2 packs value with scatter to keep four params.
     // (The hue/period aliases would both land on params[0], so send indices.)
     return {
       p0: Number(draft.period),
       p1: Number(draft.hue),
-      p2: Number(draft.scatter ?? 100),
+      p2: fireflyMetaPack(draft.scatter ?? 100, draft.value ?? 255),
       p3: Number(draft.saturation ?? 85),
     };
   }
   if (draft.pattern === "Ocean Wave") {
-    // Positional: p0=period, p1=wavelength, p2=angle, p3=base water hue.
+    // p1/p2 pack saturation/value above wavelength/angle to keep four params.
     return {
       p0: Number(draft.period),
-      p1: Number(draft.wavelength),
-      p2: Number(draft.angle ?? 45),
+      p1: oceanWavelengthSaturationPack(draft.wavelength, draft.saturation ?? 100),
+      p2: oceanAngleValuePack(draft.angle ?? 45, draft.value ?? 255),
       p3: Number(draft.hue),
     };
   }
@@ -375,11 +458,11 @@ function patternStateParams(draft) {
 }
 
 function relevantPatternFields(pattern) {
-  if (pattern === "Pulse" || pattern === "Glow") return ["pattern", "brightness", "hue", "saturation"];
+  if (pattern === "Pulse" || pattern === "Glow") return ["pattern", "brightness", "hue", "saturation", "value"];
   if (pattern === "Sweep") return ["pattern", "brightness", "period", "wavelength"];
   if (pattern === "Palette Drift") return ["pattern", "brightness", "period", "spatial"];
-  if (pattern === "Firefly") return ["pattern", "brightness", "period", "hue", "saturation", "scatter"];
-  if (pattern === "Ocean Wave") return ["pattern", "brightness", "period", "wavelength", "angle", "hue"];
+  if (pattern === "Firefly") return ["pattern", "brightness", "period", "hue", "saturation", "value", "scatter"];
+  if (pattern === "Ocean Wave") return ["pattern", "brightness", "period", "wavelength", "angle", "hue", "saturation", "value"];
   return ["pattern", "brightness"];
 }
 
@@ -406,16 +489,23 @@ function renderPatternControls() {
   $("#scatter-value").textContent = String(Number(patternDraft.scatter ?? 100));
   $("#pattern-angle").value = patternDraft.angle ?? 45;
   $("#angle-value").textContent = String(Number(patternDraft.angle ?? 45));
-  const hue = String(patternDraft.hue);
-  const isFullSaturation = Number(patternDraft.saturation ?? 100) === 100;
-  $$("#hue-picker button").forEach((button) => {
-    button.classList.toggle("active", isFullSaturation && button.dataset.hue === hue);
+  const draftHex = hueSaturationValueToHex(
+    patternDraft.hue,
+    patternDraft.saturation ?? 100,
+    patternDraft.value ?? 255,
+  );
+  $$("#color-presets button").forEach((button) => {
+    button.classList.toggle("active", hexApproxEqual(button.dataset.hex, draftHex));
   });
   const isColorPattern = patternDraft.pattern === "Pulse" || patternDraft.pattern === "Glow" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Ocean Wave";
-  $("#hue-picker").hidden = !isColorPattern;
+  $("#color-presets").hidden = !isColorPattern;
   $("#hex-color-row").hidden = !isColorPattern;
   if (isColorPattern) {
-    const hex = hueSaturationToHex(patternDraft.hue, patternDraft.saturation ?? 100);
+    const hex = hueSaturationValueToHex(
+      patternDraft.hue,
+      patternDraft.saturation ?? 100,
+      patternDraft.value ?? 255,
+    );
     if (document.activeElement !== $("#pattern-hex")) $("#pattern-hex").value = hex;
     $("#pattern-hex").classList.remove("invalid");
     $("#pattern-color-picker").value = hex;
@@ -2130,15 +2220,11 @@ $("#pattern-picker").addEventListener("click", (event) => {
   }
 });
 
-$("#hue-picker").addEventListener("click", (event) => {
-  if (event.target.dataset.hue) {
-    if (!patternDraft && state) patternDraft = patternDraftFromState();
-    if (patternDraft) {
-      patternDraft.hue = Number(event.target.dataset.hue);
-      patternDraft.saturation = 100;
-      renderPatternControls();
-    }
-  }
+$("#color-presets").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-hex]");
+  if (!button) return;
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (patternDraft) applyHexColor(button.dataset.hex);
 });
 
 function applyHexColor(hex) {
@@ -2151,9 +2237,10 @@ function applyHexColor(hex) {
   }
   if (!patternDraft && state) patternDraft = patternDraftFromState();
   if (!patternDraft) return;
-  const { hue, saturation } = rgbToHueSaturation(rgb.r, rgb.g, rgb.b);
+  const { hue, saturation, value } = rgbToHueSaturationValue(rgb.r, rgb.g, rgb.b);
   patternDraft.hue = hue;
   patternDraft.saturation = saturation;
+  patternDraft.value = value;
   renderPatternControls();
 }
 
