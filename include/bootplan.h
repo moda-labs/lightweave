@@ -52,3 +52,13 @@ inline BootPlan bootClassify(bool timer_wake, bool rtc_was_day, int64_t boot_us,
   p.rtc_day_flag = timer_wake ? rtc_was_day : false;
   return p;
 }
+
+// A timer wake is the field's only chance to receive a changed schedule or wake
+// override. Keep the node awake through a bounded rendezvous until either a
+// fresh beacon arrives or the timer-wake holdoff expires. Cold boots already
+// fail awake through their separate boot plan and do not need this gate.
+inline bool bootWakeRendezvousActive(bool timer_wake, uint32_t beacons_rx,
+                                     int64_t now_us,
+                                     int64_t earliest_sleep_us) {
+  return timer_wake && beacons_rx == 0 && now_us < earliest_sleep_us;
+}

@@ -1896,6 +1896,19 @@ void test_boot_timer_wake_without_day_flag_fails_awake() {
   TEST_ASSERT_FALSE(p.rtc_day_flag);
 }
 
+void test_timer_wake_rendezvous_blocks_sleep_until_beacon_or_deadline() {
+  const int64_t deadline = 20 * S;
+
+  TEST_ASSERT_TRUE(bootWakeRendezvousActive(
+      /*timer_wake*/ true, /*beacons_rx*/ 0, deadline - 1, deadline));
+  TEST_ASSERT_FALSE(bootWakeRendezvousActive(
+      /*timer_wake*/ true, /*beacons_rx*/ 1, deadline - 1, deadline));
+  TEST_ASSERT_FALSE(bootWakeRendezvousActive(
+      /*timer_wake*/ true, /*beacons_rx*/ 0, deadline, deadline));
+  TEST_ASSERT_FALSE(bootWakeRendezvousActive(
+      /*timer_wake*/ false, /*beacons_rx*/ 0, deadline - 1, deadline));
+}
+
 void test_boot_serial_seed_expires_longest_grace() {
   // The old inline code subtracted only the dusk grace, silently relying on it
   // being the longer one. Flip the config (nap grace longer) and the seed must
@@ -2045,6 +2058,7 @@ int main(int, char**) {
   RUN_TEST(test_boot_cold_boot_is_awake_and_provisionable);
   RUN_TEST(test_boot_timer_wake_resamples_quickly);
   RUN_TEST(test_boot_timer_wake_without_day_flag_fails_awake);
+  RUN_TEST(test_timer_wake_rendezvous_blocks_sleep_until_beacon_or_deadline);
   RUN_TEST(test_boot_serial_seed_expires_longest_grace);
   return UNITY_END();
 }

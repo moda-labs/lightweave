@@ -699,6 +699,19 @@ preserves the saved LED window; forced wake summons sleeping performers on their
 next configured check; Follow schedule clears both overrides. Serial equivalents
 on the conductor are `sleep on|off` and `wake on|off`.
 
+**Field incident 2026-07-16 — timer wake could miss recovery:** the INA228 node
+did not return after **Wake field**. Conductor-only diagnosis set the sticky wake
+override and observed zero registrations across multiple one-minute sleep checks.
+Root cause: a timer wake restored the prior off/sleep policy from RTC memory, and
+the schedule path could immediately deep-sleep again before receiving a fresh
+beacon. Timer wakes now enforce a bounded 10-second rendezvous: the radio remains
+in initial acquisition until a beacon arrives, and schedule/forced sleep cannot
+re-enter deep sleep before that beacon or the rendezvous deadline. Regression
+coverage is in `test_timer_wake_rendezvous_blocks_sleep_until_beacon_or_deadline`.
+Nodes already stranded on the affected firmware need one physical battery power
+cycle (USB is not required) while the conductor's wake override is on; once they
+register, update the field firmware before relying on remote sleep/wake again.
+
 The photodiode dusk detector below remains off by default as an optional
 fallback/experiment, not the plan of record.
 

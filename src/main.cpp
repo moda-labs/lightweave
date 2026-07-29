@@ -101,6 +101,7 @@ RTC_DATA_ATTR static bool g_rtc_was_day = false;
 RTC_DATA_ATTR static bool g_rtc_have_power_policy = false;
 RTC_DATA_ATTR static PowerPolicy g_rtc_power_policy = {4, 15, 20 * 60, 6 * 60,
                                                        12 * 60, 0, 0};
+static bool g_timer_wake = false;
 
 // Runtime field power policy. The conductor persists these knobs and includes
 // them in every beacon; performers apply the latest received policy directly, so
@@ -2042,19 +2043,19 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.printf("\nDo Baskets Dream — channel %u\n", WIFI_CHANNEL);
-  bool timer_wake = (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER);
+  g_timer_wake = (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER);
 
   configLoad();
   g_policy_clock_set_us = now_us();
   patternConfigLoad();
-  if (timer_wake && g_rtc_have_power_policy) {
+  if (g_timer_wake && g_rtc_have_power_policy) {
     g_power_policy = g_rtc_power_policy;
     powerPolicySanitize(g_power_policy);
     g_policy_base_min = g_power_policy.current_min;
     g_policy_base_epoch_s = g_power_policy.current_epoch_s;
     g_policy_clock_set_us = now_us();
     g_beacon.power = g_power_policy;
-  } else if (!timer_wake) {
+  } else if (!g_timer_wake) {
     g_rtc_have_power_policy = false;
   }
   esp_read_mac(g_mac, ESP_MAC_WIFI_STA);  // stable identity, read from efuse
@@ -2094,12 +2095,12 @@ void setup() {
                                           DUSK_MIN_AWAKE_COLD_US,
                                           DUSK_SERIAL_GRACE_US,
                                           SERIAL_NAP_GRACE_US};
-  BootPlan plan = bootClassify(timer_wake, g_rtc_was_day, boot, BOOT_CFG);
+  BootPlan plan = bootClassify(g_timer_wake, g_rtc_was_day, boot, BOOT_CFG);
   duskInit(g_dusk, plan.dusk_start_day, boot);
   g_dusk_earliest_us = plan.dusk_earliest_us;
   g_rtc_was_day = plan.rtc_day_flag;
   g_last_serial_us = plan.serial_seed_us;
-  if (timer_wake)
+  if (g_timer_wake)
     Serial.println("[dusk] timer wake — re-sampling daylight + listening for FIELD_AWAKE");
   analogSetPinAttenuation(PIN_LDR, ADC_11db);   // full ~0-3.1V range
   analogSetPinAttenuation(PIN_VBAT, ADC_11db);
@@ -2208,6 +2209,8 @@ void loop() {
     PowerPolicy policy = b.power;
     powerPolicySanitize(policy);
     powerPolicyAdvanceToSyncedNow(policy, b, s, t);
+    bool wake_rendezvous = bootWakeRendezvousActive(
+        g_timer_wake, s.beacons_rx, t, g_dusk_earliest_us);
     bool field_awake = powerPolicyForceAwake(policy);
     if (g_ota_write_active && !g_radio_on) radioWake();
     if (field_awake && !g_radio_on) radioWake();
@@ -2224,7 +2227,8 @@ void loop() {
     // Primary field sleep policy: when the broadcast schedule says LEDs are off,
     // clear the pixels and deep-sleep until the next check interval. A recent
     // serial session still wins, so a board on the bench stays reachable.
-    if (powerPolicyShouldDeepSleep(policy, keepAliveEnabled(b.keepalive)) &&
+    if (!wake_rendezvous &&
+        powerPolicyShouldDeepSleep(policy, keepAliveEnabled(b.keepalive)) &&
         t - g_last_serial_us >= DUSK_SERIAL_GRACE_US) {
       duskEnterDeepSleep(powerPolicyDeepSleepUs(policy), policy);
     }
