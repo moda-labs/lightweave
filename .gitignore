@@ -21,6 +21,7 @@ __pycache__/
 .pytest_cache/
 .control_ota/
 .control_patterns/
+.control_calibration/
 
 # OS / editor
 .DS_Store
