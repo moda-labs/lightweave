@@ -11,13 +11,13 @@ conductor without changing the UI/API surface.
 ```
 phone / laptop / agent --HTTP+WS--> API server (FastAPI) --USB serial--> conductor --ESP-NOW--> field
                                     (laptop in dev,
-                                     Pi + its own AP in the field)
+                                     loopback-only Pi behind Cloudflare Tunnel)
 ```
 
 The Pi is a **deployment target, not a dependency** — dev runs the identical
-server on a laptop with the bench conductor on USB. Pi-specific work is pure
-config: AP hotspot, mDNS (`baskets.local`), systemd unit, serial device
-naming.
+server on a laptop with the bench conductor on USB. The field service joins
+Starlink as a client, uses a stable by-path serial device, stores mutable data
+under `/var/lib/lightweave`, and runs as an unprivileged systemd service.
 
 The public-browser deployment over Starlink uses a named Cloudflare Tunnel and
 the control plane's shared-password session boundary rather than a public Pi IP
@@ -460,15 +460,22 @@ position", and table rows not currently registered show as "Not seen".
   maintenance window over the same machine serial protocol; state reports
   `ota.mode`, readiness count, expected count, missing placed lanterns,
   firmware consistency, blockers, and timeout.
-- Firmware artifacts are staged through the API/UI, persisted under
-  `.control_ota/`, validated for `.bin` extension, size, CRC32, and sha256, and
-  chunked at 128 bytes for the serial/ESP-NOW path.
-- Install flow: the API sends `ota_begin`, then every `ota_chunk`, then
+- Firmware artifacts are staged through the API/UI, persisted under the
+  configured data directory's `ota/` store (`.control_ota/` in development),
+  validated for `.bin` extension, size, CRC32, and sha256, and chunked at 128
+  bytes for the serial/ESP-NOW path.
+- Install flow: `POST /api/operations/ota-install` performs bounded readiness
+  preflight, reserves the conductor, starts one server-owned task, and returns
+  `202 Accepted`. `GET /api/operations/ota-install` is the authoritative
+  progress/result surface, so closing the browser cannot cancel the transfer.
+  A duplicate start returns `409`; other serial-backed work returns `423`
+  immediately for the lifetime of the reservation. The worker sends `ota_begin`,
+  then every `ota_chunk`, then
   `ota_end` over USB serial to the conductor. The conductor writes its own OTA
   partition and broadcasts the same begin/chunk/end packets over ESP-NOW. Each
   performer writes the image into its own OTA partition and reboots after a
   successful size/CRC/end check. The UI polls install progress and shows chunk
-  counts, elapsed time, transfer rate, and ETA while the long request streams.
+  counts, elapsed time, transfer rate, and ETA independently of the start request.
   The conductor's `ota_progress` response includes its own write offset plus
   performer status rows; the API samples it every 64 chunks so the UI can show
   node progress during the transfer, and any performer-reported failure aborts
@@ -662,7 +669,8 @@ patterns during it.
 
 ## Deliberately out of scope
 
-- Auth beyond the Pi AP's WPA2 password.
+- Individual operator identities, roles, per-person audit attribution, and
+  Cloudflare Access. The field deployment uses one shared application password.
 - Multi-conductor support.
 - On-device pattern interpretation (a bytecode/expression VM for patterns
   on the ESP32) — patterns stay compiled C++; the authoring workflow above

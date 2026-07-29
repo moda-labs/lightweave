@@ -146,8 +146,14 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(errorMessage(body.detail || response.statusText));
+    const error = new Error(errorMessage(body.detail || response.statusText));
+    error.status = response.status;
+    if (response.status === 401 && path !== "/api/auth/session") {
+      window.location.assign("/login");
+    }
+    throw error;
   }
+  if (response.status === 204) return null;
   return response.json();
 }
 
@@ -159,7 +165,10 @@ async function apiBinary(path, data) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(errorMessage(body.detail || response.statusText));
+    const error = new Error(errorMessage(body.detail || response.statusText));
+    error.status = response.status;
+    if (response.status === 401) window.location.assign("/login");
+    throw error;
   }
   return response.json();
 }
@@ -274,10 +283,10 @@ function render() {
   renderRecovery();
   renderWifi();
   renderPowerMonitor();
-  renderOta();
   renderCalibration();
   renderPowerPolicy();
   renderKeepalive();
+  renderOta();
   renderEvents();
   renderDetailVisibility();
 }
@@ -724,6 +733,11 @@ function renderWifi() {
   status.className = `chip ${connected ? "sync" : available ? "warn" : ""}`;
   $("#wifi-connection").textContent = wifi.connection || wifi.error || "--";
   $("#wifi-address").textContent = (wifi.addresses || []).join(", ") || "--";
+  const allowChanges = wifi.allow_changes !== false;
+  $("#wifi-ssid").disabled = !allowChanges;
+  $("#wifi-password").disabled = !allowChanges;
+  $('[data-action="join-wifi"]').disabled = !allowChanges;
+  $('[data-action="start-hotspot"]').disabled = !allowChanges;
 }
 
 function renderPowerMonitor() {
@@ -804,15 +818,30 @@ function effectiveRecovery() {
         : [{ mac: "", label: "Field update", reason: otaInstall.error, phase: "failed" }],
     };
   }
-  return state.recovery || {};
+  return state?.recovery || {};
+}
+
+function setOtaControlDisabled(button, installing) {
+  if (!button) return;
+  if (installing) {
+    if (button.dataset.otaWasDisabled === undefined) {
+      button.dataset.otaWasDisabled = String(button.disabled);
+    }
+    button.disabled = true;
+    return;
+  }
+  if (button.dataset.otaWasDisabled !== undefined) {
+    button.disabled = button.dataset.otaWasDisabled === "true";
+    delete button.dataset.otaWasDisabled;
+  }
 }
 
 function renderOta() {
-  const ota = state.ota || {};
+  const ota = state?.ota || {};
   const active = Boolean(ota.enabled);
   const ready = Boolean(ota.ready);
   const installing = Boolean(otaInstall?.running);
-  const expected = Number(ota.expected ?? state.summary.total ?? 0);
+  const expected = Number(ota.expected ?? state?.summary?.total ?? 0);
   const readyCount = Number(ota.ready_count ?? 0);
   const timeout = Number(ota.timeout_s ?? 0);
   const blockers = Array.isArray(ota.blocked) ? ota.blocked : [];
@@ -830,11 +859,30 @@ function renderOta() {
     : "No firmware staged.";
   renderOtaProgress();
   renderOtaNodes();
-  const fileInput = $("#ota-file");
-  $('[data-action="stage-ota-artifact"]').disabled = installing || !fileInput?.files?.length;
-  $('[data-action="enter-ota"]').disabled = installing || active;
-  $('[data-action="install-ota"]').disabled = installing || !otaReadyForInstall() || !otaArtifact;
-  $('[data-action="exit-ota"]').disabled = installing || !active;
+  const serialActions = [
+    "identify", "move", "replace", "forget", "broadcast", "blackout",
+    "save-power-policy", "sleep-field", "wake-field", "follow-schedule",
+    "save-power-monitor", "save-keepalive",
+    "enter-ota", "exit-ota", "stage-ota-artifact", "install-ota",
+    "toggle-calibration-mode", "upload-calibration-frames",
+    "save-calibration-proposal",
+  ];
+  serialActions.forEach((action) => {
+    setOtaControlDisabled($(`[data-action="${action}"]`), installing);
+  });
+  $$("[data-pattern]").forEach((button) => {
+    setOtaControlDisabled(button, installing);
+  });
+  $$('[data-pattern-action="broadcast-saved"], [data-power-sync]').forEach((button) => {
+    setOtaControlDisabled(button, installing);
+  });
+  if (!installing) {
+    const fileInput = $("#ota-file");
+    $('[data-action="stage-ota-artifact"]').disabled = !fileInput?.files?.length;
+    $('[data-action="enter-ota"]').disabled = active;
+    $('[data-action="install-ota"]').disabled = !otaReadyForInstall() || !otaArtifact;
+    $('[data-action="exit-ota"]').disabled = !active;
+  }
 }
 
 function otaReadyForInstall() {
@@ -1772,10 +1820,24 @@ async function placeSelectedLantern(clientX, clientY) {
 }
 
 async function refresh() {
-  state = await api("/api/state");
+  otaInstall = (await api("/api/operations/ota-install")).install;
+  try {
+    state = await api("/api/state");
+  } catch (error) {
+    if (error.status === 423) {
+      if (otaInstall?.running) {
+        toast("Firmware installation is running. Waiting for the conductor.");
+        await pollOtaInstallUntilTerminal();
+      } else {
+        toast("Firmware installation is finishing. Waiting for the conductor.");
+        await delay(250);
+      }
+      return refresh();
+    }
+    throw error;
+  }
   savedPatterns = (await api("/api/patterns")).patterns;
   otaArtifact = (await api("/api/operations/ota-artifact")).artifact;
-  otaInstall = (await api("/api/operations/ota-install")).install;
   calibrationFrames = (await api("/api/calibration/frames")).frames || [];
   await refreshWifiStatus({ quiet: true });
   render();
@@ -1788,7 +1850,7 @@ async function refreshSavedPatterns() {
 
 async function refreshOtaInstall() {
   otaInstall = (await api("/api/operations/ota-install")).install;
-  if (state) renderOta();
+  renderOta();
 }
 
 async function refreshWifiStatus({ quiet = false } = {}) {
@@ -1802,17 +1864,12 @@ async function refreshWifiStatus({ quiet = false } = {}) {
   return wifiStatus;
 }
 
-async function pollOtaInstallWhile(installPromise) {
-  let finished = false;
-  installPromise.then(
-    () => { finished = true; },
-    () => { finished = true; },
-  );
-  while (!finished) {
+async function pollOtaInstallUntilTerminal() {
+  do {
     await delay(750);
     await refreshOtaInstall();
-  }
-  await refreshOtaInstall();
+  } while (otaInstall?.running);
+  return otaInstall;
 }
 
 async function locateLantern(mac) {
@@ -1825,6 +1882,11 @@ async function runAction(action) {
   const lantern = selectedLantern();
   if (!lantern && ["identify", "move", "replace", "forget"].includes(action)) return;
   try {
+    if (action === "logout") {
+      await api("/api/auth/logout", { method: "POST" });
+      window.location.assign("/login");
+      return;
+    }
     if (action === "details") {
       const sheet = $("#detail-sheet");
       sheet.classList.toggle("show-details");
@@ -2014,10 +2076,12 @@ async function runAction(action) {
         chunks_total: otaArtifact.chunks,
       };
       renderOta();
-      const installPromise = api("/api/operations/ota-install", { method: "POST" });
-      await pollOtaInstallWhile(installPromise);
-      const ack = await installPromise;
-      toast(ack.message);
+      const ack = await api("/api/operations/ota-install", { method: "POST" });
+      otaInstall = ack.install;
+      renderOta();
+      await pollOtaInstallUntilTerminal();
+      if (otaInstall.error) throw new Error(otaInstall.error);
+      toast("OTA install complete");
       await refresh();
       return;
     }
@@ -2076,7 +2140,11 @@ function connectWebSocket() {
       render();
     }
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (event) => {
+    if (event.code === 4401) {
+      window.location.assign("/login");
+      return;
+    }
     $("#connection-status").textContent = "reconnecting";
     window.setTimeout(connectWebSocket, 1500);
   });

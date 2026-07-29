@@ -18,10 +18,25 @@ dependency stack today.
 Real conductor:
 
 ```bash
+export CONTROL_PASSWORD_HASH="$(
+  .venv/bin/python -m control.auth hash-password
+)"
 CONTROL_CONDUCTOR=serial \
 CONTROL_SERIAL_PORT=/dev/cu.usbserial-XXXX \
-.venv/bin/python -m uvicorn control.app:app --host 127.0.0.1 --port 8000
+CONTROL_DATA_DIR=/tmp/lightweave-control \
+CONTROL_ALLOWED_ORIGINS=https://control.example.com \
+CONTROL_REQUIRE_HTTPS=true \
+CONTROL_ALLOW_NETWORK_CHANGES=false \
+CONTROL_PASSWORD_HASH="$CONTROL_PASSWORD_HASH" \
+.venv/bin/python -m uvicorn control.app:app --host 127.0.0.1 --port 8000 \
+  --workers 1 --no-proxy-headers
 ```
+
+Serial mode deliberately requires the complete authenticated HTTPS deployment
+contract, even when a conductor adapter is injected. Use the named tunnel or a
+reviewed local HTTPS proxy in front of this loopback listener; do not weaken the
+serial-mode boundary for bench convenience. The production environment file and
+service command are documented in [`deploy/pi/`](../deploy/pi/README.md).
 
 By default the serial transport deasserts DTR/RTS after opening so peeking at a
 running conductor does not intentionally reset it. Set
@@ -53,3 +68,6 @@ pio test -e native
 - API-backed Map/Node List/Patterns/Operations UI shell
 - Shared lantern detail sheet
 - Actions for identify, assign, forget, replace, pattern changes, and blackout
+- Shared-password sessions that protect HTTP, previews, uploads, and WebSockets
+- Detached field OTA with prompt `423 Locked` responses for competing serial work
+- Persistent stores rooted by `CONTROL_DATA_DIR`
