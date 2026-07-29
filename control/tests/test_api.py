@@ -1,7 +1,10 @@
 import json
 import subprocess
+import threading
+import time
 
 from fastapi.testclient import TestClient
+import pytest
 
 import control.app as app_module
 from control.adapters import SerialProtocolError
@@ -11,9 +14,95 @@ from control.ota_store import OtaArtifactStore
 from control.pattern_store import PatternStore
 
 
+@pytest.fixture
+def managed_client():
+    clients = []
+
+    def create(app):
+        client = TestClient(app)
+        client.__enter__()
+        clients.append(client)
+        return client
+
+    yield create
+
+    for client in reversed(clients):
+        client.__exit__(None, None, None)
+
+
+def wait_for_ota_terminal(client: TestClient, timeout_s: float = 20) -> dict:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        install = client.get("/api/operations/ota-install").json()["install"]
+        if install.get("running") is not True:
+            return install
+        time.sleep(0.01)
+    raise AssertionError("OTA install did not reach a terminal state")
+
+
 class DownConductor(MockConductor):
     def snapshot(self) -> dict:
         raise SerialProtocolError("timeout waiting for state ack")
+
+
+class BlockingOtaConductor(MockConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ota_started = threading.Event()
+        self.ota_release = threading.Event()
+
+    def ota_begin(self, size: int, crc32: int) -> dict:
+        self.ota_started.set()
+        if not self.ota_release.wait(timeout=10):
+            raise RuntimeError("test OTA release timed out")
+        return super().ota_begin(size, crc32)
+
+
+class BlockingAssignmentOtaConductor(BlockingOtaConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_assign_started = threading.Event()
+        self.assign_release = threading.Event()
+        self.assign_order = []
+
+    def assign(self, mac: str, x: float, y: float) -> dict:
+        self.assign_order.append(mac)
+        if len(self.assign_order) == 1:
+            self.first_assign_started.set()
+            if not self.assign_release.wait(timeout=5):
+                raise RuntimeError("test assignment release timed out")
+        return super().assign(mac, x, y)
+
+
+class BlockingCalibrationOtaConductor(BlockingOtaConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.block_calibration_snapshot = False
+        self.calibration_snapshot_started = threading.Event()
+        self.calibration_snapshot_release = threading.Event()
+        self.calibration_pattern_updated = threading.Event()
+
+    def snapshot(self) -> dict:
+        if (
+            self.block_calibration_snapshot
+            and not self.calibration_snapshot_started.is_set()
+        ):
+            self.calibration_snapshot_started.set()
+            if not self.calibration_snapshot_release.wait(timeout=5):
+                raise RuntimeError("test calibration snapshot release timed out")
+        return super().snapshot()
+
+    def update_pattern(
+        self, pattern: str, brightness: int, params: dict
+    ) -> dict:
+        if pattern == "Calibration":
+            self.calibration_pattern_updated.set()
+        return super().update_pattern(pattern, brightness, params)
+
+
+class ExplodingOtaConductor(MockConductor):
+    def ota_begin(self, _size: int, _crc32: int) -> dict:
+        raise RuntimeError("unexpected worker failure")
 
 
 class RejectingPatternConductor(MockConductor):
@@ -275,6 +364,7 @@ def test_wifi_status_reports_current_connection(monkeypatch) -> None:
         "state": "connected",
         "connection": "Basketnet",
         "addresses": ["10.42.0.1/24"],
+        "allow_changes": True,
     }
 
 
@@ -1002,8 +1092,8 @@ def test_power_monitor_auto_anchors_when_full_voltage_seen() -> None:
     assert sample["soc_percent"] == 100.0
 
 
-def test_ota_mode_update_round_trips_to_state() -> None:
-    client = TestClient(create_app(MockConductor()))
+def test_ota_mode_update_round_trips_to_state(managed_client) -> None:
+    client = managed_client(create_app(MockConductor()))
 
     response = client.post("/api/operations/ota-mode", json={"enabled": True})
     state = client.get("/api/state").json()
@@ -1017,8 +1107,8 @@ def test_ota_mode_update_round_trips_to_state() -> None:
     assert "missing placed lanterns" in state["ota"]["blocked"]
 
 
-def test_ota_artifact_upload_stages_firmware_metadata(tmp_path) -> None:
-    client = TestClient(create_app(MockConductor(), ota_store=OtaArtifactStore(tmp_path)))
+def test_ota_artifact_upload_stages_firmware_metadata(tmp_path, managed_client) -> None:
+    client = managed_client(create_app(MockConductor(), ota_store=OtaArtifactStore(tmp_path)))
 
     response = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1036,7 +1126,7 @@ def test_ota_artifact_upload_stages_firmware_metadata(tmp_path) -> None:
     assert current["artifact"]["sha256"] == artifact["sha256"]
 
 
-def test_ota_artifact_store_reload_preserves_current_artifact(tmp_path) -> None:
+def test_ota_artifact_store_reload_preserves_current_artifact(tmp_path, managed_client) -> None:
     firmware = b"\xe9" + b"\x00" * 4095
     staged = OtaArtifactStore(tmp_path).stage("firmware.bin", firmware)
 
@@ -1047,8 +1137,8 @@ def test_ota_artifact_store_reload_preserves_current_artifact(tmp_path) -> None:
     assert reloaded.artifact().path.read_bytes() == firmware
 
 
-def test_ota_artifact_upload_rejects_non_bin(tmp_path) -> None:
-    client = TestClient(create_app(MockConductor(), ota_store=OtaArtifactStore(tmp_path)))
+def test_ota_artifact_upload_rejects_non_bin(tmp_path, managed_client) -> None:
+    client = managed_client(create_app(MockConductor(), ota_store=OtaArtifactStore(tmp_path)))
 
     response = client.put(
         "/api/operations/ota-artifact?filename=firmware.txt",
@@ -1060,10 +1150,10 @@ def test_ota_artifact_upload_rejects_non_bin(tmp_path) -> None:
     assert response.json()["detail"] == "firmware artifact must be a .bin file"
 
 
-def test_ota_install_requires_staged_artifact(tmp_path) -> None:
+def test_ota_install_requires_staged_artifact(tmp_path, managed_client) -> None:
     conductor = MockConductor()
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
 
     response = client.post("/api/operations/ota-install")
 
@@ -1071,10 +1161,10 @@ def test_ota_install_requires_staged_artifact(tmp_path) -> None:
     assert response.json()["detail"] == "no firmware staged"
 
 
-def test_ota_install_blocks_when_placed_lantern_is_missing(tmp_path) -> None:
+def test_ota_install_blocks_when_placed_lantern_is_missing(tmp_path, managed_client) -> None:
     conductor = MockConductor()
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
         content=b"\xe9" + bytes(range(255)),
@@ -1095,12 +1185,12 @@ def test_ota_install_blocks_when_placed_lantern_is_missing(tmp_path) -> None:
     assert response.json()["detail"] == "OTA not ready: missing placed lanterns"
 
 
-def test_ota_install_streams_staged_artifact_when_ready(tmp_path) -> None:
+def test_ota_install_streams_staged_artifact_when_ready(tmp_path, managed_client) -> None:
     conductor = MockConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 20
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1110,10 +1200,10 @@ def test_ota_install_streams_staged_artifact_when_ready(tmp_path) -> None:
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
-    assert response.json()["message"] == "ota install complete; rebooting"
+    assert response.status_code == 202
+    assert response.json()["message"] == "OTA install accepted"
+    install = wait_for_ota_terminal(client)
     assert conductor.ota_installed_crc32 == stage["artifact"]["crc32"]
-    install = client.get("/api/operations/ota-install").json()["install"]
     assert install["running"] is False
     assert install["complete"] is True
     assert install["chunks_sent"] == stage["artifact"]["chunks"]
@@ -1121,16 +1211,17 @@ def test_ota_install_streams_staged_artifact_when_ready(tmp_path) -> None:
     assert install["elapsed_s"] >= 0
     assert install["bytes_per_s"] >= 0
     assert install["eta_s"] == 0
+    assert install["completed_at"] >= install["started_at"]
     assert {node["phase"] for node in install["nodes"]} == {"complete"}
     ota = client.get("/api/state").json()["ota"]
     assert {node["phase"] for node in ota["nodes"]} == {"complete"}
     assert all(node["offset"] == stage["artifact"]["size"] for node in ota["nodes"])
 
 
-def test_ota_install_scales_to_60_expected_nodes(tmp_path) -> None:
+def test_ota_install_scales_to_60_expected_nodes(tmp_path, managed_client) -> None:
     conductor = make_placed_conductor(60)
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 40
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1144,8 +1235,8 @@ def test_ota_install_scales_to_60_expected_nodes(tmp_path) -> None:
     assert state["summary"]["total"] == 60
     assert state["ota"]["ready"] is True
     assert state["ota"]["ready_count"] == 60
-    assert response.status_code == 200
-    install = client.get("/api/operations/ota-install").json()["install"]
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert install["complete"] is True
     assert install["chunks_sent"] == stage["artifact"]["chunks"]
     assert len(install["nodes"]) == 60
@@ -1153,11 +1244,11 @@ def test_ota_install_scales_to_60_expected_nodes(tmp_path) -> None:
     assert {node["offset"] for node in install["nodes"]} == {stage["artifact"]["size"]}
 
 
-def test_ota_install_60_nodes_falls_back_to_post_reboot_verification_when_status_is_partial(tmp_path) -> None:
+def test_ota_install_60_nodes_falls_back_to_post_reboot_verification_when_status_is_partial(tmp_path, managed_client) -> None:
     conductor = PartialOtaStatusConductor()
     conductor._lanterns = make_placed_conductor(60)._lanterns
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 40
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1167,20 +1258,20 @@ def test_ota_install_60_nodes_falls_back_to_post_reboot_verification_when_status
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
-    install = client.get("/api/operations/ota-install").json()["install"]
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert install["complete"] is True
     assert len(install["nodes"]) == 60
     assert {node["source"] for node in install["nodes"]} == {"post_reboot_state"}
     assert {node["offset"] for node in install["nodes"]} == {stage["artifact"]["size"]}
 
 
-def test_ota_install_retries_transient_chunk_timeout(tmp_path) -> None:
+def test_ota_install_retries_transient_chunk_timeout(tmp_path, managed_client) -> None:
     conductor = DroppingOtaChunkConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1190,21 +1281,21 @@ def test_ota_install_retries_transient_chunk_timeout(tmp_path) -> None:
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert conductor.dropped is True
-    install = client.get("/api/operations/ota-install").json()["install"]
     assert install["complete"] is True
     assert install["chunks_sent"] == stage["artifact"]["chunks"]
     assert install["bytes_sent"] == stage["artifact"]["size"]
     assert install["last_retry"]["error"] == "timeout waiting for ota_chunk ack"
 
 
-def test_ota_install_stops_on_polled_node_failure(tmp_path) -> None:
+def test_ota_install_stops_on_polled_node_failure(tmp_path, managed_client) -> None:
     conductor = ProgressFailedOtaConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 40
     client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1214,21 +1305,20 @@ def test_ota_install_stops_on_polled_node_failure(tmp_path) -> None:
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "ota node failure"
+    assert response.status_code == 202
     assert conductor.ended is False
-    install = client.get("/api/operations/ota-install").json()["install"]
+    install = wait_for_ota_terminal(client)
     assert install["complete"] is False
     assert install["error"] == "ota node failure"
     assert any(node["phase"] == "failed" for node in install["nodes"])
 
 
-def test_ota_install_continues_after_periodic_progress_timeout(tmp_path) -> None:
+def test_ota_install_continues_after_periodic_progress_timeout(tmp_path, managed_client) -> None:
     conductor = ProgressTimeoutConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 40
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1238,21 +1328,21 @@ def test_ota_install_continues_after_periodic_progress_timeout(tmp_path) -> None
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert conductor.progress_timeouts == 1
-    install = client.get("/api/operations/ota-install").json()["install"]
     assert install["complete"] is True
     assert install["error"] is None
     assert install["chunks_sent"] == stage["artifact"]["chunks"]
     assert install["last_progress_error"] == "timeout waiting for ota_progress ack"
 
 
-def test_ota_install_retries_retryable_chunk_nack(tmp_path) -> None:
+def test_ota_install_retries_retryable_chunk_nack(tmp_path, managed_client) -> None:
     conductor = NackingOtaChunkConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1262,20 +1352,20 @@ def test_ota_install_retries_retryable_chunk_nack(tmp_path) -> None:
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert conductor.nacked is True
-    install = client.get("/api/operations/ota-install").json()["install"]
     assert install["complete"] is True
     assert install["chunks_sent"] == stage["artifact"]["chunks"]
     assert install["last_retry"]["error"] == "ota chunk offset mismatch"
 
 
-def test_ota_install_retries_chunk_length_mismatch_without_advancing(tmp_path) -> None:
+def test_ota_install_retries_chunk_length_mismatch_without_advancing(tmp_path, managed_client) -> None:
     conductor = LengthMismatchOtaChunkConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1285,21 +1375,21 @@ def test_ota_install_retries_chunk_length_mismatch_without_advancing(tmp_path) -
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert conductor.nacked is True
-    install = client.get("/api/operations/ota-install").json()["install"]
     assert install["complete"] is True
     assert install["chunks_sent"] == stage["artifact"]["chunks"]
     assert install["bytes_sent"] == stage["artifact"]["size"]
     assert install["last_retry"]["error"] == "ota chunk length mismatch"
 
 
-def test_ota_install_resyncs_after_already_advanced_chunk_nack(tmp_path) -> None:
+def test_ota_install_resyncs_after_already_advanced_chunk_nack(tmp_path, managed_client) -> None:
     conductor = AdvancedThenNackingOtaChunkConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1309,21 +1399,21 @@ def test_ota_install_resyncs_after_already_advanced_chunk_nack(tmp_path) -> None
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert conductor.nacked is True
-    install = client.get("/api/operations/ota-install").json()["install"]
     assert install["complete"] is True
     assert install["chunks_sent"] == stage["artifact"]["chunks"]
     assert install["bytes_sent"] == stage["artifact"]["size"]
     assert install["last_retry"]["error"] == "resynced after ota chunk offset mismatch"
 
 
-def test_ota_install_rejects_partial_offset_resync(tmp_path) -> None:
+def test_ota_install_rejects_partial_offset_resync(tmp_path, managed_client) -> None:
     conductor = PartialAdvancedNackingOtaChunkConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1333,19 +1423,18 @@ def test_ota_install_rejects_partial_offset_resync(tmp_path) -> None:
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == f"ota write offset is not chunk-aligned: {conductor.partial_written}"
-    install = client.get("/api/operations/ota-install").json()["install"]
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert install["complete"] is False
-    assert install["error"] == response.json()["detail"]
+    assert install["error"] == f"ota write offset is not chunk-aligned: {conductor.partial_written}"
 
 
-def test_ota_install_infers_nodes_from_post_reboot_state_when_status_missing(tmp_path) -> None:
+def test_ota_install_infers_nodes_from_post_reboot_state_when_status_missing(tmp_path, managed_client) -> None:
     conductor = NoOtaStatusConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1355,19 +1444,19 @@ def test_ota_install_infers_nodes_from_post_reboot_state_when_status_missing(tmp
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
-    install = client.get("/api/operations/ota-install").json()["install"]
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert install["complete"] is True
     assert {node["source"] for node in install["nodes"]} == {"post_reboot_state"}
     assert all(node["offset"] == stage["artifact"]["size"] for node in install["nodes"])
 
 
-def test_ota_install_treats_final_ack_timeout_as_verify_after_reboot(tmp_path) -> None:
+def test_ota_install_treats_final_ack_timeout_as_verify_after_reboot(tmp_path, managed_client) -> None:
     conductor = FinalAckTimeoutConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 40
     stage = client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1377,22 +1466,22 @@ def test_ota_install_treats_final_ack_timeout_as_verify_after_reboot(tmp_path) -
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
-    assert response.json()["message"] == "ota end ack timed out; verifying post-reboot state"
-    install = client.get("/api/operations/ota-install").json()["install"]
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert install["complete"] is True
     assert install["error"] is None
     assert install["last_finalize_error"] == "timeout waiting for ota_end ack"
+    assert install["message"] == "ota end ack timed out; verifying post-reboot state"
     assert {node["source"] for node in install["nodes"]} == {"post_reboot_state"}
     assert {node["offset"] for node in install["nodes"]} == {stage["artifact"]["size"]}
 
 
-def test_ota_install_retains_nodes_when_performers_do_not_complete_end(tmp_path) -> None:
+def test_ota_install_retains_nodes_when_performers_do_not_complete_end(tmp_path, managed_client) -> None:
     conductor = EndIncompleteOtaConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1402,9 +1491,8 @@ def test_ota_install_retains_nodes_when_performers_do_not_complete_end(tmp_path)
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "ota performers did not complete"
-    install = client.get("/api/operations/ota-install").json()["install"]
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert install["complete"] is False
     assert install["error"] == "ota performers did not complete"
     assert install["nodes"]
@@ -1414,12 +1502,12 @@ def test_ota_install_retains_nodes_when_performers_do_not_complete_end(tmp_path)
     assert {node["source"] for node in failed} == {"ota_end_verification"}
 
 
-def test_ota_install_fails_when_not_all_expected_nodes_verify(tmp_path) -> None:
+def test_ota_install_fails_when_not_all_expected_nodes_verify(tmp_path, managed_client) -> None:
     conductor = OneNodeOnlyOtaStatusConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1429,9 +1517,8 @@ def test_ota_install_fails_when_not_all_expected_nodes_verify(tmp_path) -> None:
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "ota post-reboot verification failed"
-    install = client.get("/api/operations/ota-install").json()["install"]
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
     assert install["complete"] is False
     assert install["error"] == "ota post-reboot verification failed"
     failed = [node for node in install["nodes"] if node["phase"] == "failed"]
@@ -1449,7 +1536,394 @@ def test_ota_install_fails_when_not_all_expected_nodes_verify(tmp_path) -> None:
     assert {node["source"] for node in failed} == {"post_reboot_verification"}
 
 
-def test_ota_install_allows_mixed_firmware_recovery_with_legacy_ready_blocker(tmp_path) -> None:
+def test_ota_reservation_rejects_serial_work_duplicate_start_and_staging(
+    tmp_path, managed_client
+) -> None:
+    conductor = BlockingOtaConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor.set_ota_mode(True)
+    app = create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+    client = managed_client(app)
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9" + bytes(range(255)) * 3,
+        headers={"content-type": "application/octet-stream"},
+    )
+    original_monitor = dict(app.state.power_monitor_config)
+    original_pattern = dict(conductor.pattern)
+    original_power = dict(conductor.power)
+    original_keepalive = dict(conductor.keepalive)
+    original_position = (
+        conductor._lanterns[0].x,
+        conductor._lanterns[0].y,
+    )
+
+    accepted = client.post("/api/operations/ota-install")
+    assert accepted.status_code == 202
+    assert conductor.ota_started.wait(timeout=2)
+
+    started_at = time.monotonic()
+    state = client.get("/api/state")
+    elapsed = time.monotonic() - started_at
+    duplicate = client.post("/api/operations/ota-install")
+    stage = client.put(
+        "/api/operations/ota-artifact?filename=other.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+    mode = client.post("/api/operations/ota-mode", json={"enabled": False})
+    monitor = client.post(
+        "/api/operations/power-monitor",
+        json={"battery_capacity_wh": 100, "full_voltage": 13.8},
+    )
+    serial_responses = [
+        client.post(f"/api/lanterns/{conductor._lanterns[0].mac}/identify"),
+        client.post(
+            f"/api/lanterns/{conductor._lanterns[0].mac}/assign",
+            json={"x": 0.12, "y": 0.34},
+        ),
+        client.post(f"/api/lanterns/{conductor._lanterns[0].mac}/forget"),
+        client.post(
+            "/api/lanterns/replace",
+            json={
+                "old_mac": conductor._lanterns[1].mac,
+                "new_mac": conductor._lanterns[0].mac,
+            },
+        ),
+        client.post(
+            "/api/show/pattern",
+            json={"pattern": "Solid", "brightness": 10, "params": {}},
+        ),
+        client.post("/api/show/blackout"),
+        client.post("/api/operations/calibration-mode", json={"enabled": True}),
+        client.post(
+            "/api/operations/power-policy",
+            json={
+                "light_sleep_check_s": 30,
+                "deep_sleep_check_min": 60,
+                "led_on_start_min": 1140,
+                "led_on_end_min": 300,
+                "schedule_enabled": True,
+                "force_awake": False,
+                "force_sleep": False,
+                "current_min": 720,
+                "current_epoch_s": 1_720_123_456,
+            },
+        ),
+        client.post("/api/operations/field-power", json={"mode": "sleep"}),
+        client.post(
+            "/api/operations/keepalive",
+            json={
+                "enabled": True,
+                "interval_ms": 10000,
+                "pulse_ms": 100,
+                "brightness": 32,
+            },
+        ),
+        client.post(
+            "/api/calibration/apply-proposal",
+            json={
+                "assignments": [
+                    {
+                        "mac": conductor._lanterns[0].mac,
+                        "x": 0.12,
+                        "y": 0.34,
+                    }
+                ]
+            },
+        ),
+        client.post(f"/api/lanterns/{conductor._lanterns[0].mac}/power-sync-full"),
+    ]
+    status = client.get("/api/operations/ota-install")
+
+    assert state.status_code == 423
+    assert elapsed < 0.5
+    assert duplicate.status_code == 409
+    assert stage.status_code == 423
+    assert mode.status_code == 423
+    assert monitor.status_code == 423
+    assert {response.status_code for response in serial_responses} == {423}
+    assert app.state.power_monitor_config == original_monitor
+    assert conductor.pattern == original_pattern
+    assert conductor.power == original_power
+    assert conductor.keepalive == original_keepalive
+    assert (conductor._lanterns[0].x, conductor._lanterns[0].y) == original_position
+    assert status.status_code == 200
+    assert status.json()["install"]["running"] is True
+
+    conductor.ota_release.set()
+    assert wait_for_ota_terminal(client)["complete"] is True
+    assert client.get("/api/state").status_code == 200
+
+
+def test_calibration_batch_finishes_before_ota_can_reserve_conductor(
+    tmp_path, managed_client
+) -> None:
+    conductor = BlockingAssignmentOtaConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor.set_ota_mode(True)
+    client = managed_client(
+        create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+    )
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+    results = {}
+
+    calibration = threading.Thread(
+        target=lambda: results.update(
+            calibration=client.post(
+                "/api/calibration/apply-proposal",
+                json={
+                    "assignments": [
+                        {"mac": conductor._lanterns[0].mac, "x": 0.12, "y": 0.34},
+                        {"mac": conductor._lanterns[1].mac, "x": 0.56, "y": 0.78},
+                    ]
+                },
+            )
+        )
+    )
+    calibration.start()
+    assert conductor.first_assign_started.wait(timeout=2)
+    ota = threading.Thread(
+        target=lambda: results.update(
+            ota=client.post("/api/operations/ota-install")
+        )
+    )
+    ota.start()
+    time.sleep(0.1)
+    assert ota.is_alive()
+    assert conductor.ota_started.is_set() is False
+
+    conductor.assign_release.set()
+    calibration.join(timeout=3)
+    ota.join(timeout=3)
+
+    assert results["calibration"].status_code == 200
+    assert len(results["calibration"].json()["saved"]) == 2
+    assert conductor.assign_order == [
+        conductor._lanterns[0].mac,
+        conductor._lanterns[1].mac,
+    ]
+    assert results["ota"].status_code == 202
+    assert conductor.ota_started.wait(timeout=2)
+    conductor.ota_release.set()
+    assert wait_for_ota_terminal(client)["complete"] is True
+
+
+def test_calibration_mode_toggle_finishes_before_ota_can_reserve_conductor(
+    tmp_path, managed_client
+) -> None:
+    conductor = BlockingCalibrationOtaConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor.set_ota_mode(True)
+    client = managed_client(
+        create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+    )
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+    conductor.block_calibration_snapshot = True
+    results = {}
+    calibration = threading.Thread(
+        target=lambda: results.update(
+            calibration=client.post(
+                "/api/operations/calibration-mode",
+                json={"enabled": True},
+            )
+        )
+    )
+    calibration.start()
+    assert conductor.calibration_snapshot_started.wait(timeout=2)
+    ota = threading.Thread(
+        target=lambda: results.update(
+            ota=client.post("/api/operations/ota-install")
+        )
+    )
+    ota.start()
+    time.sleep(0.1)
+    assert ota.is_alive()
+    assert conductor.ota_started.is_set() is False
+
+    conductor.calibration_snapshot_release.set()
+    calibration.join(timeout=3)
+    ota.join(timeout=3)
+
+    assert results["calibration"].status_code == 200
+    assert conductor.calibration_pattern_updated.is_set()
+    assert results["ota"].status_code == 202
+    assert conductor.ota_started.wait(timeout=2)
+    conductor.ota_release.set()
+    assert wait_for_ota_terminal(client)["complete"] is True
+
+
+def test_failed_calibration_restore_keeps_previous_pattern_for_retry() -> None:
+    app = create_app(RejectingPatternConductor())
+    previous = {"pattern": "Sweep", "brightness": 72, "params": {"period": 4000}}
+    app.state.calibration_previous_pattern = dict(previous)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/operations/calibration-mode",
+        json={"enabled": False},
+    )
+
+    assert response.status_code == 400
+    assert app.state.calibration_previous_pattern == previous
+
+
+def test_ota_start_returns_before_maintenance_settle_delay(
+    tmp_path, managed_client
+) -> None:
+    conductor = MockConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor.set_ota_mode(True)
+    app = create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+    app.state.ota_mode_started_at = time.time()
+    client = managed_client(app)
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    started_at = time.monotonic()
+    accepted = client.post("/api/operations/ota-install")
+    elapsed = time.monotonic() - started_at
+
+    assert accepted.status_code == 202
+    assert elapsed < 0.5
+    assert accepted.json()["install"]["running"] is True
+    assert conductor.ota_installed_crc32 is None
+
+
+def test_ota_accepts_before_slow_artifact_read_finishes(
+    tmp_path, managed_client, monkeypatch
+) -> None:
+    conductor = MockConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor.set_ota_mode(True)
+    store = OtaArtifactStore(tmp_path)
+    client = managed_client(create_app(conductor, ota_store=store))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+    artifact = store.artifact()
+    assert artifact is not None
+    original_read_bytes = type(artifact.path).read_bytes
+    read_started = threading.Event()
+    read_release = threading.Event()
+
+    def slow_read(path):
+        if path == artifact.path:
+            read_started.set()
+            assert read_release.wait(timeout=3)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(type(artifact.path), "read_bytes", slow_read)
+    started_at = time.monotonic()
+    accepted = client.post("/api/operations/ota-install")
+    elapsed = time.monotonic() - started_at
+
+    assert accepted.status_code == 202
+    assert elapsed < 0.5
+    assert read_started.wait(timeout=2)
+    read_release.set()
+    assert wait_for_ota_terminal(client)["complete"] is True
+
+
+def test_ota_worker_converts_unexpected_exception_to_terminal_state(
+    tmp_path, managed_client
+) -> None:
+    conductor = ExplodingOtaConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor.set_ota_mode(True)
+    client = managed_client(
+        create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+    )
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    accepted = client.post("/api/operations/ota-install")
+    install = wait_for_ota_terminal(client)
+
+    assert accepted.status_code == 202
+    assert install["running"] is False
+    assert install["complete"] is False
+    assert install["error"] == "unexpected worker failure"
+    assert install["completed_at"] >= install["started_at"]
+    assert client.get("/api/state").status_code == 200
+
+
+def test_ota_graceful_shutdown_marks_running_job_interrupted(tmp_path) -> None:
+    conductor = BlockingOtaConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor.set_ota_mode(True)
+    app = create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+
+    with TestClient(app) as client:
+        client.put(
+            "/api/operations/ota-artifact?filename=firmware.bin",
+            content=b"\xe9\x00",
+            headers={"content-type": "application/octet-stream"},
+        )
+        assert client.post("/api/operations/ota-install").status_code == 202
+        assert conductor.ota_started.wait(timeout=2)
+        threading.Timer(0.1, conductor.ota_release.set).start()
+
+    assert app.state.ota_install["running"] is False
+    assert app.state.ota_install["complete"] is False
+    assert app.state.ota_install["error"] == "ota install interrupted by service shutdown"
+    assert app.state.ota_install["completed_at"] >= app.state.ota_install["started_at"]
+    assert app.state.ota_reserved is False
+
+
+def test_ota_abrupt_restart_uses_persisted_artifact_and_live_recovery(
+    tmp_path, managed_client
+) -> None:
+    store = OtaArtifactStore(tmp_path)
+    staged = store.stage("firmware.bin", b"\xe9\x00")
+    conductor = MockConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor._lanterns[0].firmware = {
+        "version": "0.3.0-mismatch",
+        "proto": 7,
+        "build_id": 0x44D028FD,
+        "build_label": "44d028fd",
+        "dirty": False,
+    }
+
+    restarted = managed_client(
+        create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+    )
+    artifact = restarted.get("/api/operations/ota-artifact").json()["artifact"]
+    install = restarted.get("/api/operations/ota-install").json()["install"]
+    recovery = restarted.get("/api/state").json()["recovery"]
+
+    assert artifact["sha256"] == staged["sha256"]
+    assert install == {"running": False, "complete": False, "error": None}
+    assert recovery["status"] == "mixed_firmware"
+    assert recovery["ready"] is False
+
+
+def test_ota_install_allows_mixed_firmware_recovery_with_legacy_ready_blocker(tmp_path, managed_client) -> None:
     conductor = LegacyMixedFirmwareOtaConductor()
     missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
     missing.status = "alive"
@@ -1461,7 +1935,7 @@ def test_ota_install_allows_mixed_firmware_recovery_with_legacy_ready_blocker(tm
         "dirty": False,
     }
     conductor.set_ota_mode(True)
-    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 3
     client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
@@ -1476,8 +1950,10 @@ def test_ota_install_allows_mixed_firmware_recovery_with_legacy_ready_blocker(tm
 
     response = client.post("/api/operations/ota-install")
 
-    assert response.status_code == 200
-    assert response.json()["message"] == "ota install complete; rebooting"
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
+    assert install["complete"] is True
+    assert install["message"] == "ota install complete; rebooting"
 
 
 def test_assign_endpoint_updates_lantern_position() -> None:

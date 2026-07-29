@@ -1,0 +1,42 @@
+[Unit]
+Description=Lightweave field control plane
+Documentation=https://github.com/underminedsk/lightweave/tree/main/deploy/pi
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=lightweave
+Group=lightweave
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/lightweave
+EnvironmentFile=/etc/lightweave/control.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/lightweave/.venv/bin/uvicorn control.app:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=180
+
+StateDirectory=lightweave
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/lightweave
+UMask=0077
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

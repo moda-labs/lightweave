@@ -1,6 +1,6 @@
 # Remote administration
 
-> **Status:** Approved
+> **Status:** Building
 > **Tracking issue:** underminedsk/lightweave#3 · **Created:** 2026-07-22 · **Last amended:** 2026-07-23 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -212,86 +212,86 @@ Alternatives considered:
 
 ## Phases
 
-### Phase 1 - Authenticate and lock the public request boundary
+### Phase 1 - Authenticate and lock the public request boundary `[x]`
 
-- [ ] Add dependency-free `control/auth.py` using `hashlib.scrypt` with
+- [x] Add dependency-free `control/auth.py` using `hashlib.scrypt` with
   `n=131072`, `r=8`, `p=1`, `dklen=32`, `maxmem=268435456`, a random 16-byte
   salt, at most 1024 UTF-8 password bytes, and `hmac.compare_digest`. Encode only
   `scrypt$n=131072,r=8,p=1$<unpadded-base64url-salt>$<unpadded-base64url-digest>`
   and reject every other algorithm, parameter set, salt/digest length, padding,
   or malformed encoding at startup.
-- [ ] Implement `python -m control.auth hash-password` with two matching
+- [x] Implement `python -m control.auth hash-password` with two matching
   `getpass` prompts and a 12-character generation minimum. Never accept a
   password on argv/stdin, use a fast general-purpose hash, log the password/hash,
   or commit a deployment hash.
-- [ ] Add an explicit auth-manager dependency to `create_app`. The module-level
+- [x] Add an explicit auth-manager dependency to `create_app`. The module-level
   app requires `CONTROL_PASSWORD_HASH` whenever `CONTROL_CONDUCTOR=serial`; the
   default mock app and tests inject a disabled/test manager. An injected conductor
   never disables auth implicitly, and no environment flag can disable auth in
   serial mode.
-- [ ] Add `GET /login`, `POST /api/auth/login`, `GET /api/auth/session`, and
+- [x] Add `GET /login`, `POST /api/auth/login`, `GET /api/auth/session`, and
   authenticated `POST /api/auth/logout`. Login accepts only
   `{"password":"..."}`, returns generic JSON `401` on bad credentials, or creates
   a 256-bit opaque session with a 12-hour absolute lifetime and sets
   `__Host-lightweave_session` as `Secure`, `HttpOnly`, `SameSite=Strict`,
   `Path=/`, with no `Domain`. Logout deletes the session, clears the cookie with
   matching attributes, and returns `204`.
-- [ ] Enforce a 2 KiB login-request limit in ASGI receive handling before JSON
+- [x] Enforce a 2 KiB login-request limit in ASGI receive handling before JSON
   parsing, including missing, falsified, or chunked `Content-Length`; return `413`,
   count the attempt, and never invoke scrypt for oversized or malformed bodies.
-- [ ] Reserve attempts atomically before verification. Allow five failed attempts
+- [x] Reserve attempts atomically before verification. Allow five failed attempts
   per canonical client IP in a rolling five-minute window, with no attacker-
   triggered global lockout. Run scrypt through `asyncio.to_thread` behind one
   nonblocking verification slot; return `429` without hashing when that slot or
   the client limit is occupied. This bounds scrypt memory to one 128 MiB job and
   keeps the event loop/WebSocket responsive.
-- [ ] Start Uvicorn with `--no-proxy-headers`. Trust a strictly parsed
+- [x] Start Uvicorn with `--no-proxy-headers`. Trust a strictly parsed
   `CF-Connecting-IP` and exact `X-Forwarded-Proto` only when the unchanged socket
   peer is loopback; otherwise use the peer IP and disregard forwarded headers.
   With `CONTROL_REQUIRE_HTTPS=true` required in serial mode, refuse to render or
   accept login unless the trusted external scheme is `https`.
-- [ ] Default-deny the application boundary. Public routes are exactly
+- [x] Default-deny the application boundary. Public routes are exactly
   `GET /login`, `GET /static/login.js`, `GET /static/login.css`,
   `GET /api/auth/session` (boolean only), and `POST /api/auth/login`. Every other
   HTTP route, including `/`, ordinary `/static/*`, `/api/*`, `/preview*`,
   `/review*`, `/docs`, `/redoc`, and `/openapi.json`, requires a live session;
   APIs return JSON `401`, while browser pages use a relative `303 /login`. Deny
   unauthenticated `/ws` before acceptance.
-- [ ] Associate each accepted WebSocket with its session. Close its sockets
+- [x] Associate each accepted WebSocket with its session. Close its sockets
   immediately on logout and from a lifecycle expiry reaper at the 12-hour
   deadline; revalidate before every publish so an expired session receives no
   later state. The main UI treats any `401` or authenticated socket closure as a
   transition to `/login`, not a toast/reconnect loop.
 
-- [ ] Add strict environment parsing for `CONTROL_ALLOWED_ORIGINS`,
+- [x] Add strict environment parsing for `CONTROL_ALLOWED_ORIGINS`,
   `CONTROL_ALLOW_NETWORK_CHANGES`, and `CONTROL_REQUIRE_HTTPS` in
   `control/app.py`. Parse the comma-separated origin list into exact
   `scheme://host[:port]` values, reject malformed values, and accept only explicit
   true/false spellings for booleans.
-- [ ] Make field/serial startup fail closed: require at least one allowed origin,
+- [x] Make field/serial startup fail closed: require at least one allowed origin,
   require HTTPS, default network mutation off, and reject a missing or malformed
   required field setting. Preserve current mock/bench behavior only through
   explicit injected dependencies or development configuration.
-- [ ] Reject malformed, `null`, and unapproved `Origin` values on `POST`, `PUT`,
+- [x] Reject malformed, `null`, and unapproved `Origin` values on `POST`, `PUT`,
   `PATCH`, and `DELETE`; continue allowing non-browser clients that omit `Origin`
   and do not enable permissive CORS.
-- [ ] Validate the WebSocket `Origin` before `accept()` and deny an unapproved
+- [x] Validate the WebSocket `Origin` before `accept()` and deny an unapproved
   browser origin without exposing an accepted socket.
-- [ ] Emit `Content-Security-Policy: frame-ancestors 'none'` and
+- [x] Emit `Content-Security-Policy: frame-ancestors 'none'` and
   `X-Frame-Options: DENY` on UI/API responses, plus
   `Strict-Transport-Security: max-age=31536000` on externally HTTPS responses.
-- [ ] Include `allow_changes` in `GET /api/network/wifi`, return `403` from both
+- [x] Include `allow_changes` in `GET /api/network/wifi`, return `403` from both
   network mutation endpoints when disabled, and hide or disable their UI actions.
-- [ ] Add unit/API tests for the exact hash format and bounds, correct/incorrect
+- [x] Add unit/API tests for the exact hash format and bounds, correct/incorrect
   passwords, malformed/missing field hash, wire-level body limits, generic
   failures, per-client throttling, concurrent verification, cookie flags, expiry,
   logout, service restart, trusted/untrusted proxy headers, HTTPS enforcement,
   and authenticated/unauthenticated HTTP and WebSocket access.
-- [ ] Add a registered-route inventory regression proving the public allowlist is
+- [x] Add a registered-route inventory regression proving the public allowlist is
   exact, and tests proving logout and clock-driven expiry close an already-open
   authenticated WebSocket before any later publish. Cover every Origin, strict
   boolean, clickjacking/HSTS header, and network-mutation case.
-- [ ] Preserve the existing test suite by injecting the disabled/test auth manager
+- [x] Preserve the existing test suite by injecting the disabled/test auth manager
   explicitly. Use an HTTPS `TestClient` for auth cookie tests and pass its session
   cookie explicitly to `websocket_connect`; Starlette's default `ws://testserver`
   test handshake does not carry the Secure cookie.
@@ -299,59 +299,59 @@ Alternatives considered:
 **Validation gate** - do not exit this phase until every line passes; if a
 command fails, fix the cause and re-run.
 
-- [ ] `.venv/bin/python -m pytest control/tests/test_auth.py control/tests/test_api.py -k 'auth or origin or websocket or wifi or hotspot'`
-- [ ] `.venv/bin/python -m pytest control/tests`
-- [ ] With a mock Uvicorn server, a configured same-origin browser can load state
+- [x] `.venv/bin/python -m pytest control/tests/test_auth.py control/tests/test_api.py -k 'auth or origin or websocket or wifi or hotspot'`
+- [x] `.venv/bin/python -m pytest control/tests`
+- [x] With a mock Uvicorn server, a configured same-origin browser can load state
   and WebSocket updates through an HTTPS `TestClient`, while a foreign Origin
   cannot mutate or read `/ws`; a mock HTTP request proves field login is rejected.
   Public-hostname browser proof belongs exclusively to Phase 4.
 
-### Phase 2 - Detach OTA from the browser request
+### Phase 2 - Detach OTA from the browser request `[x]`
 
-- [ ] Split `POST /api/operations/ota-install` into bounded synchronous preflight
+- [x] Split `POST /api/operations/ota-install` into bounded synchronous preflight
   and a worker coroutine. Missing artifact, invalid job snapshot, and immediate
   readiness failures remain synchronous `400`/`503`; artifact reads, maintenance
   settle waits, transfer, reboot, and verification run only in the worker.
-- [ ] Under one OTA-start lock, atomically re-check that no job is active, publish
+- [x] Under one OTA-start lock, atomically re-check that no job is active, publish
   the accepted in-memory state, retain a strong reference to the worker task, and
   then return `202 {"install": <accepted snapshot>}`. A concurrent start returns
   `409` and never invokes the adapter.
-- [ ] Make the worker own every terminal transition and consume its exception.
+- [x] Make the worker own every terminal transition and consume its exception.
   Success records `running=false`, `complete=true`, message, and `completed_at`;
   any post-acceptance failure records `running=false`, `complete=false`, error,
   and `completed_at`. `GET /api/operations/ota-install` remains `200` and is the
   authoritative terminal-result surface.
-- [ ] Reserve conductor access for the OTA worker without allowing ordinary
+- [x] Reserve conductor access for the OTA worker without allowing ordinary
   calls to queue. While reserved, return `423 Locked` immediately from every
   other serial-backed route, skip ticker serial polls, and reject artifact staging
   or OTA-mode changes. The OTA worker's own readiness and verification calls must
   use an explicit internal path that cannot deadlock on its reservation.
-- [ ] Apply the OTA-availability precondition before any handler mutates local
+- [x] Apply the OTA-availability precondition before any handler mutates local
   state and then calls or publishes through the conductor. In particular,
   `POST /api/operations/power-monitor` must return `423` without changing its
   in-memory configuration. Tests prove both adapter calls and local state remain
   unchanged for every rejected route.
-- [ ] Disable serial-backed actions and artifact/OTA mode controls in the UI while
+- [x] Disable serial-backed actions and artifact/OTA mode controls in the UI while
   the job is active; continue polling `GET /api/operations/ota-install` and render
   the explicit busy response if another browser has already reserved the
   conductor. Session status, logout, static UI, and OTA install status remain
   available during the reservation.
-- [ ] Keep OTA job state process-local. Cancel and await the task on graceful
+- [x] Keep OTA job state process-local. Cancel and await the task on graceful
   shutdown, mark the in-memory job interrupted, and document that an abrupt
   process restart returns to the existing persisted-artifact/live-firmware
   recovery flow rather than restoring or resuming the job.
-- [ ] Change the UI to start once and poll GET until a terminal state independent
+- [x] Change the UI to start once and poll GET until a terminal state independent
   of the POST connection; surface the recorded terminal message/error. Preserve
   HTTP status in the API helper so `401`, `423`, and ordinary failures are
   distinguishable.
-- [ ] Make a fresh authenticated page opened mid-install treat `/api/state` `423`
+- [x] Make a fresh authenticated page opened mid-install treat `/api/state` `423`
   as OTA-busy, fetch and poll the install endpoint, render progress, and disable
   serial actions instead of aborting refresh before OTA status loads.
-- [ ] Run every OTA test inside a lifespan-managed `with TestClient(app)` block
+- [x] Run every OTA test inside a lifespan-managed `with TestClient(app)` block
   and use one bounded `wait_for_ota_terminal()` helper so the detached task is not
   canceled when the per-request portal closes. Preserve all retry, alignment,
   missing-node, node-failure, finalize-timeout, and post-reboot assertions.
-- [ ] Add regressions for immediate `202` before maintenance settling, duplicate
+- [x] Add regressions for immediate `202` before maintenance settling, duplicate
   `409`, initiator disconnect, task exception capture, shutdown interruption, and
   all terminal GET fields. For each OTA-busy route, assert `423` and prove its
   adapter method was never called and its local state did not change. Add a fresh-
@@ -359,49 +359,49 @@ command fails, fix the cause and re-run.
 
 **Validation gate**
 
-- [ ] `.venv/bin/python -m pytest control/tests/test_api.py -k ota`
-- [ ] `.venv/bin/python -m pytest control/tests`
-- [ ] Start an OTA against the mock server, terminate the initiating browser
+- [x] `.venv/bin/python -m pytest control/tests/test_api.py -k ota`
+- [x] `.venv/bin/python -m pytest control/tests`
+- [x] Start an OTA against the mock server, terminate the initiating browser
   request, reconnect, and observe the same job reach one terminal result through
   GET without a second `ota_begin`; opening a second fresh page mid-transfer also
   reaches that job despite `/api/state` returning `423`.
 
-### Phase 3 - Package the Pi and tunnel deployment
+### Phase 3 - Package the Pi and tunnel deployment `[x]`
 
-- [ ] Add `CONTROL_DATA_DIR` and construct `OtaArtifactStore`, `PatternStore`, and
+- [x] Add `CONTROL_DATA_DIR` and construct `OtaArtifactStore`, `PatternStore`, and
   `CalibrationStore` at `<dir>/ota`, `<dir>/patterns`, and `<dir>/calibration`;
   explicit injected stores override those defaults. Test exact paths and
   persistence across app restart so production never requires a writable checkout.
-- [ ] Target the current Raspberry Pi OS Lite 64-bit Trixie image for Pi Zero 2 W
+- [x] Target the current Raspberry Pi OS Lite 64-bit Trixie image for Pi Zero 2 W
   in the runbook. Document Python 3.13 virtualenv setup and keep every dependency
   pinned; actual ARM64 installation and reboot proof belongs to Phase 4.
-- [ ] Add `deploy/pi/lightweave-control.service` for code and virtualenv under
+- [x] Add `deploy/pi/lightweave-control.service` for code and virtualenv under
   `/opt/lightweave`, state under `/var/lib/lightweave` via
   `StateDirectory=lightweave`, `StateDirectoryMode=0700`, and a required
   root-owned mode-0600
   `EnvironmentFile=/etc/lightweave/control.env`.
-- [ ] Run exactly one loopback-bound Uvicorn worker as unprivileged user
+- [x] Run exactly one loopback-bound Uvicorn worker as unprivileged user
   `lightweave` with `dialout` group access, `Restart=on-failure`, `RestartSec=5`,
   `TimeoutStopSec=180`, `NoNewPrivileges=true`, `UMask=0077`,
   `ProtectSystem=strict`, and no sudo grant. Limit writes to the state directory.
   Use exact `ExecStart=/opt/lightweave/.venv/bin/uvicorn control.app:app --host
   127.0.0.1 --port 8000 --workers 1 --no-proxy-headers`.
-- [ ] Add `deploy/pi/lightweave.env.example` with
+- [x] Add `deploy/pi/lightweave.env.example` with
   `CONTROL_CONDUCTOR=serial`, a `/dev/serial/by-path` conductor path,
   `CONTROL_SERIAL_RESET_ON_OPEN=0`, `CONTROL_DATA_DIR=/var/lib/lightweave`, exact
   HTTPS field origin, `CONTROL_REQUIRE_HTTPS=true`, a placeholder
   `CONTROL_PASSWORD_HASH`, and disabled network mutation; do not commit the
   deployment hash, tunnel credentials, or tokens.
-- [ ] Add `deploy/pi/README.md` with install/upgrade/rollback commands, Starlink
+- [x] Add `deploy/pi/README.md` with install/upgrade/rollback commands, Starlink
   client setup, stable serial discovery, Cloudflare named-tunnel route setup,
   password-hash generation and rotation, service/log inspection, and recovery
   through a local console or SSH from the Starlink LAN during a physical visit.
   Rotation replaces the hash and restarts the service, invalidating every session.
-- [ ] Before publishing the Cloudflare route, verify locally that unauthenticated
+- [x] Before publishing the Cloudflare route, verify locally that unauthenticated
   HTTP and WebSocket requests are denied and, through an HTTPS `TestClient`, that
   valid login/logout works. The tunnel publishes only the authenticated loopback
   service; no Cloudflare Access policy is part of this release.
-- [ ] Require `cloudflared >= 2025.4.0`. Store the remotely managed tunnel token
+- [x] Require `cloudflared >= 2025.4.0`. Store the remotely managed tunnel token
   at `/etc/cloudflared/lightweave.token`, owned `root:cloudflared` mode 0640, and
   install the reviewed service as `cloudflared.service` with exact
   `ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run --token-file
@@ -410,25 +410,25 @@ command fails, fix the cause and re-run.
   `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, and
   `PrivateTmp=true`. Never place the token in argv, shell history, or the
   application environment.
-- [ ] Document that rollout must create a host-specific Cloudflare HTTP-to-HTTPS
+- [x] Document that rollout must create a host-specific Cloudflare HTTP-to-HTTPS
   redirect for `$CONTROL_HOST` before exposing the route; zone-wide Always Use
   HTTPS is not part of this release. Include tunnel token routine/compromise
   rotation, connector deletion, and verification that only the expected connector
   is active; actual account configuration and proof belong to Phase 4.
-- [ ] Create `docs/REMOTE_ADMIN.md` as stable architecture and operator guidance
+- [x] Create `docs/REMOTE_ADMIN.md` as stable architecture and operator guidance
   that links this plan for execution status and contains no phase/status copy.
-- [ ] Update `control/README.md`, `docs/CONTROLPLANE.md`, and
+- [x] Update `control/README.md`, `docs/CONTROLPLANE.md`, and
   `docs/ARCHITECTURE.md` to point to the deployed shape without claiming hardware
   verification before it occurs.
 
 **Validation gate**
 
-- [ ] `git diff --check`
-- [ ] `.venv/bin/python -m pytest control/tests`
-- [ ] `pio test -e native`
-- [ ] A controlled app restart preserves staged OTA artifact, saved patterns, and
+- [x] `git diff --check`
+- [x] `.venv/bin/python -m pytest control/tests`
+- [x] `pio test -e native`
+- [x] A controlled app restart preserves staged OTA artifact, saved patterns, and
   calibration beneath `/var/lib/lightweave`; `/opt/lightweave` remains read-only.
-- [ ] Static review confirms both service units use the exact commands, required
+- [x] Static review confirms both service units use the exact commands, required
   environment/token files, least-privilege settings, and restart behavior above;
   installed-unit and reboot proof belongs to Phase 4.
 

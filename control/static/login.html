@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Do Baskets Dream</title>
+  <link rel="stylesheet" href="/static/login.css">
+  <script src="/static/login.js" defer></script>
+</head>
+<body>
+  <main class="login-shell">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="field-mark" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+
+      <p class="eyebrow">Field control</p>
+      <h1 id="login-title">Do Baskets Dream</h1>
+      <p class="intro">Sign in to manage lanterns, patterns, and field operations.</p>
+
+      <form id="login-form">
+        <label for="password">Shared password</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+          autofocus
+        >
+        <button class="primary" id="submit-button" type="submit">Sign in</button>
+      </form>
+
+      <p class="status" id="login-status" role="status" aria-live="polite" aria-atomic="true"></p>
+    </section>
+  </main>
+</body>
+</html>

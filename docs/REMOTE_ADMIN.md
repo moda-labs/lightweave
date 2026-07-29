@@ -2,6 +2,8 @@
 
 This document records the stable production architecture and operator contract for remote administration.
 Execution status and implementation gates live in [`plans/remote-administration.md`](../plans/remote-administration.md).
+Installation, upgrade, rollback, and recovery commands live in
+[`deploy/pi/README.md`](../deploy/pi/README.md).
 
 ## Runtime boundary
 

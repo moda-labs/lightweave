@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -12,16 +13,23 @@ from typing import Any, Literal
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi import Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .adapters import ConductorAdapter, JsonLineSerialConductor, SerialProtocolError
+from .auth import AuthManager, AuthStatus, canonicalize_client_ip
 from .calibration import CalibrationError, CalibrationStore, calibration_code_plan
 from .mock_conductor import MockConductor
 from .ota_store import OtaArtifactError, OtaArtifactStore
 from .pattern_store import PatternStore, PatternStoreError
 from .preview import parse_params, render_preview_data, render_preview_frames, render_preview_png, review_preview
+from .remote_config import (
+    RemoteSettings,
+    load_remote_settings,
+    select_client_ip,
+    select_external_scheme,
+)
 from .serial_transport import PySerialTransport
 
 
@@ -32,6 +40,16 @@ OTA_PROGRESS_POLL_CHUNKS = 64
 POWER_SAMPLE_STALE_S = 5 * 60
 DEFAULT_BATTERY_CAPACITY_WH = 384.0
 DEFAULT_FULL_VOLTAGE = 14.4
+SESSION_COOKIE = "__Host-lightweave_session"
+LOGIN_BODY_LIMIT = 2 * 1024
+PUBLIC_HTTP_ROUTES = {
+    ("GET", "/login"),
+    ("GET", "/static/login.js"),
+    ("GET", "/static/login.css"),
+    ("GET", "/api/auth/session"),
+    ("POST", "/api/auth/login"),
+}
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OTA_CHUNK_RETRYABLE_ERRORS = {
     "bad ota chunk data",
     "ota chunk length mismatch",
@@ -202,7 +220,20 @@ def create_app(
     ota_store: OtaArtifactStore | None = None,
     pattern_store: PatternStore | None = None,
     calibration_store: CalibrationStore | None = None,
+    auth_manager: AuthManager | None = None,
+    settings: RemoteSettings | None = None,
 ) -> FastAPI:
+    resolved_settings = settings or load_remote_settings(os.environ)
+    resolved_auth = auth_manager
+    if resolved_auth is None:
+        resolved_auth = (
+            AuthManager.from_encoded_hash(resolved_settings.password_hash)
+            if resolved_settings.password_hash is not None
+            else AuthManager.disabled()
+        )
+    if resolved_settings.serial_mode and not resolved_auth.enabled:
+        raise RuntimeError("authentication cannot be disabled when CONTROL_CONDUCTOR=serial")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async def ticker() -> None:
@@ -211,24 +242,63 @@ def create_app(
                 try:
                     await conductor_call("tick")
                     await publish({"type": "state", "action": "tick", "state": await conductor_call("snapshot")})
+                except HTTPException as error:
+                    if error.status_code != 423:
+                        raise
                 except SerialProtocolError:
                     await publish({"type": "error", "action": "tick", "message": "conductor serial timeout"})
 
-        task = asyncio.create_task(ticker())
-        app.state.ticker_task = task
+        async def session_reaper() -> None:
+            while True:
+                await asyncio.sleep(1)
+                expired = set(app.state.auth_manager.reap_expired_sessions())
+                app.state.auth_manager.reap_stale_failures()
+                if expired:
+                    await close_session_websockets(expired)
+
+        ticker_task = asyncio.create_task(ticker())
+        reaper_task = asyncio.create_task(session_reaper())
+        app.state.ticker_task = ticker_task
+        app.state.session_reaper_task = reaper_task
         try:
             yield
         finally:
-            task.cancel()
+            ota_task = app.state.ota_task
+            if ota_task is not None and not ota_task.done():
+                ota_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ota_task
+                app.state.ota_install.update({
+                    "running": False,
+                    "complete": False,
+                    "error": "ota install interrupted by service shutdown",
+                    "completed_at": time.time(),
+                })
+                app.state.ota_reserved = False
+            ticker_task.cancel()
+            reaper_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
+                await ticker_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await reaper_task
+            revoked = set(app.state.auth_manager.revoke_all_sessions())
+            if revoked:
+                await close_session_websockets(revoked)
 
     app = FastAPI(title="Do Baskets Dream Control Plane", lifespan=lifespan)
+    app.state.settings = resolved_settings
+    app.state.auth_manager = resolved_auth
     app.state.conductor = conductor or create_default_conductor()
-    app.state.ota_store = ota_store or OtaArtifactStore()
-    app.state.pattern_store = pattern_store or PatternStore()
-    app.state.calibration_store = calibration_store or CalibrationStore()
+    data_dir = resolved_settings.data_dir
+    app.state.ota_store = ota_store or OtaArtifactStore(data_dir / "ota" if data_dir else ".control_ota")
+    app.state.pattern_store = pattern_store or PatternStore(data_dir / "patterns" if data_dir else ".control_patterns")
+    app.state.calibration_store = calibration_store or CalibrationStore(
+        data_dir / "calibration" if data_dir else ".control_calibration"
+    )
     app.state.ota_install = {"running": False, "complete": False, "error": None}
+    app.state.ota_reserved = False
+    app.state.ota_task: asyncio.Task[None] | None = None
+    app.state.ota_start_lock = asyncio.Lock()
     app.state.calibration_previous_pattern = None
     app.state.power_monitor_config = {
         "battery_capacity_wh": float(os.getenv("CONTROL_BATTERY_CAPACITY_WH", DEFAULT_BATTERY_CAPACITY_WH)),
@@ -237,9 +307,88 @@ def create_app(
     app.state.power_full_anchors = {}
     app.state.ota_mode_started_at = None
     app.state.conductor_lock = asyncio.Lock()
-    app.state.ws_clients: set[WebSocket] = set()
+    app.state.ws_clients: dict[WebSocket, str] = {}
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    def socket_peer_ip(scope: dict[str, Any]) -> str:
+        client = scope.get("client")
+        raw = client[0] if isinstance(client, (tuple, list)) and client else "127.0.0.1"
+        if raw == "testclient":
+            return "127.0.0.1"
+        return canonicalize_client_ip(str(raw))
+
+    def request_client_ip(request: Request) -> str:
+        peer = socket_peer_ip(request.scope)
+        return select_client_ip(peer, request.headers.get("cf-connecting-ip"))
+
+    def external_scheme(scope: dict[str, Any], headers: Any) -> str:
+        return select_external_scheme(
+            socket_peer_ip(scope),
+            str(scope.get("scheme") or "http"),
+            headers.get("x-forwarded-proto"),
+        )
+
+    def allowed_origin(origin: str, scope: dict[str, Any], headers: Any) -> bool:
+        configured = app.state.settings.allowed_origins
+        if configured:
+            return origin in configured
+        host = headers.get("host")
+        scheme = external_scheme(scope, headers)
+        return bool(host) and origin == f"{scheme}://{host}"
+
+    def live_session(token: str | None):
+        return app.state.auth_manager.lookup_session(token) if token else None
+
+    def secure_response(response: Response, scheme: str) -> Response:
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["X-Frame-Options"] = "DENY"
+        if scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        return response
+
+    async def close_session_websockets(tokens: set[str]) -> None:
+        for ws, token in list(app.state.ws_clients.items()):
+            if token not in tokens:
+                continue
+            app.state.ws_clients.pop(ws, None)
+            with contextlib.suppress(RuntimeError):
+                await ws.close(code=4401, reason="session expired")
+
+    @app.middleware("http")
+    async def remote_boundary(request: Request, call_next):
+        path = request.url.path
+        method = request.method.upper()
+        scheme = external_scheme(request.scope, request.headers)
+        public = (method, path) in PUBLIC_HTTP_ROUTES
+
+        if app.state.settings.require_https and scheme != "https":
+            if path in {"/login", "/api/auth/login"}:
+                return secure_response(
+                    JSONResponse({"detail": "HTTPS is required"}, status_code=400),
+                    scheme,
+                )
+
+        if method in MUTATING_METHODS:
+            origin = request.headers.get("origin")
+            if origin is not None and not allowed_origin(origin, request.scope, request.headers):
+                return secure_response(
+                    JSONResponse({"detail": "origin not allowed"}, status_code=403),
+                    scheme,
+                )
+
+        if app.state.auth_manager.enabled and not public:
+            token = request.cookies.get(SESSION_COOKIE)
+            if live_session(token) is None:
+                if path.startswith("/api/"):
+                    return secure_response(
+                        JSONResponse({"detail": "authentication required"}, status_code=401),
+                        scheme,
+                    )
+                return secure_response(RedirectResponse("/login", status_code=303), scheme)
+
+        response = await call_next(request)
+        return secure_response(response, scheme)
 
     def ota_install_progress(install: dict[str, Any]) -> dict[str, Any]:
         progress = dict(install)
@@ -455,8 +604,12 @@ def create_app(
             and int(ota.get("missing") or 0) == 0
         )
 
-    async def conductor_call(method: str, *args: Any) -> Any:
+    async def conductor_call(method: str, *args: Any, ota_internal: bool = False) -> Any:
+        if app.state.ota_reserved and not ota_internal:
+            raise HTTPException(status_code=423, detail="OTA install owns the conductor")
         async with app.state.conductor_lock:
+            if app.state.ota_reserved and not ota_internal:
+                raise HTTPException(status_code=423, detail="OTA install owns the conductor")
             result = await asyncio.to_thread(getattr(app.state.conductor, method), *args)
         if method == "snapshot" and isinstance(result, dict):
             return enrich_state(result)
@@ -471,18 +624,25 @@ def create_app(
     async def publish(event: dict[str, Any]) -> None:
         event = {"ts": time.time(), **event}
         dead: list[WebSocket] = []
-        for ws in list(app.state.ws_clients):
+        for ws, token in list(app.state.ws_clients.items()):
+            if app.state.auth_manager.enabled and live_session(token) is None:
+                dead.append(ws)
+                with contextlib.suppress(RuntimeError):
+                    await ws.close(code=4401, reason="session expired")
+                continue
             try:
                 await ws.send_json(event)
             except (RuntimeError, WebSocketDisconnect):
                 dead.append(ws)
         for ws in dead:
-            app.state.ws_clients.discard(ws)
+            app.state.ws_clients.pop(ws, None)
 
     async def publish_state(action: str) -> None:
         try:
             state = await conductor_call("snapshot")
-        except SerialProtocolError as error:
+        except (SerialProtocolError, HTTPException) as error:
+            if isinstance(error, HTTPException) and error.status_code == 423:
+                return
             await publish({"type": "error", "action": action, "message": str(error)})
             return
         await publish({"type": "state", "action": action, "state": state})
@@ -495,48 +655,58 @@ def create_app(
         )
 
     async def set_live_calibration_mode(enabled: bool) -> dict[str, Any]:
-        state = await conductor_call("snapshot")
-        if enabled:
-            current = state.get("pattern") or {}
-            if current.get("pattern") != "Calibration":
-                app.state.calibration_previous_pattern = {
-                    "pattern": str(current.get("pattern") or "Glow"),
-                    "brightness": int(current.get("brightness") or 48),
-                    "params": dict(current.get("params") or {}),
-                }
-            plan = calibration_mode_plan(state)
-            ack = await conductor_call(
-                "update_pattern",
-                "Calibration",
-                96,
-                {
-                    "p0": 1000,
-                    "p1": int(plan["bit_count"]),
-                    "p2": int(plan["first_code"]),
-                    "p3": int(plan["min_hamming_distance"]),
-                },
+        if app.state.ota_reserved:
+            raise HTTPException(status_code=423, detail="OTA install owns the conductor")
+        async with app.state.conductor_lock:
+            if app.state.ota_reserved:
+                raise HTTPException(status_code=423, detail="OTA install owns the conductor")
+            state = await asyncio.to_thread(app.state.conductor.snapshot)
+            if enabled:
+                current = state.get("pattern") or {}
+                previous = None
+                if current.get("pattern") != "Calibration":
+                    previous = {
+                        "pattern": str(current.get("pattern") or "Glow"),
+                        "brightness": int(current.get("brightness") or 48),
+                        "params": dict(current.get("params") or {}),
+                    }
+                plan = calibration_mode_plan(state)
+                ack = await asyncio.to_thread(
+                    app.state.conductor.update_pattern,
+                    "Calibration",
+                    96,
+                    {
+                        "p0": 1000,
+                        "p1": int(plan["bit_count"]),
+                        "p2": int(plan["first_code"]),
+                        "p3": int(plan["min_hamming_distance"]),
+                    },
+                )
+                if ack.get("ok"):
+                    if previous is not None:
+                        app.state.calibration_previous_pattern = previous
+                    ack["plan"] = plan
+                return ack
+            previous = app.state.calibration_previous_pattern or {
+                "pattern": "Glow",
+                "brightness": 48,
+                "params": {"hue": 40, "saturation": 100},
+            }
+            ack = await asyncio.to_thread(
+                app.state.conductor.update_pattern,
+                previous["pattern"],
+                previous["brightness"],
+                previous["params"],
             )
             if ack.get("ok"):
-                ack["plan"] = plan
+                app.state.calibration_previous_pattern = None
             return ack
-        previous = app.state.calibration_previous_pattern or {
-            "pattern": "Glow",
-            "brightness": 48,
-            "params": {"hue": 40, "saturation": 100},
-        }
-        app.state.calibration_previous_pattern = None
-        return await conductor_call(
-            "update_pattern",
-            previous["pattern"],
-            previous["brightness"],
-            previous["params"],
-        )
 
     async def infer_ota_complete_nodes(size: int, crc32: int) -> list[dict[str, Any]]:
         for _ in range(4):
             await asyncio.sleep(3)
             try:
-                state = await conductor_call("snapshot")
+                state = await conductor_call("snapshot", ota_internal=True)
             except SerialProtocolError:
                 continue
             summary = state.get("summary") or {}
@@ -746,6 +916,81 @@ def create_app(
         connection = os.getenv("CONTROL_HOTSPOT_CONNECTION", "BasketsSetup")
         subprocess.run(sudo_command([nmcli, "con", "up", connection]), check=True, capture_output=True, text=True, timeout=30)
 
+    @app.get("/login")
+    async def login_page() -> FileResponse:
+        return FileResponse(STATIC_DIR / "login.html")
+
+    @app.get("/api/auth/session")
+    async def auth_session(request: Request) -> dict[str, bool]:
+        token = request.cookies.get(SESSION_COOKIE)
+        return {"authenticated": live_session(token) is not None}
+
+    @app.post("/api/auth/login")
+    async def auth_login(request: Request) -> Response:
+        client_ip = request_client_ip(request)
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > LOGIN_BODY_LIMIT:
+                    app.state.auth_manager.record_failed_attempt(client_ip)
+                    return JSONResponse({"detail": "request body too large"}, status_code=413)
+            except ValueError:
+                app.state.auth_manager.record_failed_attempt(client_ip)
+                return JSONResponse({"detail": "invalid credentials"}, status_code=401)
+
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > LOGIN_BODY_LIMIT:
+                app.state.auth_manager.record_failed_attempt(client_ip)
+                return JSONResponse({"detail": "request body too large"}, status_code=413)
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            app.state.auth_manager.record_failed_attempt(client_ip)
+            return JSONResponse({"detail": "invalid credentials"}, status_code=401)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"password"}
+            or not isinstance(payload["password"], str)
+        ):
+            app.state.auth_manager.record_failed_attempt(client_ip)
+            return JSONResponse({"detail": "invalid credentials"}, status_code=401)
+
+        outcome = await app.state.auth_manager.authenticate(client_ip, payload["password"])
+        if outcome.status in {AuthStatus.RATE_LIMITED, AuthStatus.BUSY}:
+            return JSONResponse({"detail": "try again later"}, status_code=429)
+        if not outcome.authenticated or outcome.token is None:
+            return JSONResponse({"detail": "invalid credentials"}, status_code=401)
+
+        response = JSONResponse({"ok": True})
+        response.set_cookie(
+            SESSION_COOKIE,
+            outcome.token,
+            max_age=int(app.state.auth_manager.session_lifetime_s),
+            secure=True,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+        return response
+
+    @app.post("/api/auth/logout", status_code=204)
+    async def auth_logout(request: Request) -> Response:
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            app.state.auth_manager.revoke_session(token)
+            await close_session_websockets({token})
+        response = Response(status_code=204)
+        response.delete_cookie(
+            SESSION_COOKIE,
+            secure=True,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+        return response
+
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
@@ -766,10 +1011,14 @@ def create_app(
 
     @app.get("/api/network/wifi")
     async def get_wifi_status() -> dict[str, Any]:
-        return {"wifi": await asyncio.to_thread(wifi_status)}
+        status = await asyncio.to_thread(wifi_status)
+        status["allow_changes"] = app.state.settings.allow_network_changes
+        return {"wifi": status}
 
     @app.post("/api/network/wifi")
     async def join_wifi(request: WifiJoinRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+        if not app.state.settings.allow_network_changes:
+            raise HTTPException(status_code=403, detail="network changes are disabled")
         if not request.ssid.strip():
             raise HTTPException(status_code=400, detail="SSID is required")
         if not nmcli_path() and not Path(os.getenv("CONTROL_WIFI_JOIN_COMMAND", "/usr/local/bin/lightweave-wifi-home")).exists():
@@ -783,6 +1032,8 @@ def create_app(
 
     @app.post("/api/network/hotspot")
     async def start_hotspot(background_tasks: BackgroundTasks) -> dict[str, Any]:
+        if not app.state.settings.allow_network_changes:
+            raise HTTPException(status_code=403, detail="network changes are disabled")
         if not nmcli_path():
             raise HTTPException(status_code=503, detail="Wi-Fi management is not available on this host")
         connection = os.getenv("CONTROL_HOTSPOT_CONNECTION", "BasketsSetup")
@@ -966,25 +1217,35 @@ def create_app(
     async def apply_calibration_proposal(request: CalibrationApplyRequest) -> dict[str, Any]:
         saved = []
         failed = []
-        for assignment in request.assignments:
-            try:
-                ack = await conductor_call("assign", assignment.mac, assignment.x, assignment.y)
-            except SerialProtocolError as error:
-                failed.append({"mac": assignment.mac, "error": str(error)})
-                continue
-            if ack.get("ok"):
-                saved.append({
-                    "mac": assignment.mac,
-                    "x": assignment.x,
-                    "y": assignment.y,
-                    "code": assignment.code,
-                    "bits": assignment.bits,
-                })
-            else:
-                failed.append({
-                    "mac": assignment.mac,
-                    "error": str(ack.get("error") or "assign failed"),
-                })
+        if app.state.ota_reserved:
+            raise HTTPException(status_code=423, detail="OTA install owns the conductor")
+        async with app.state.conductor_lock:
+            if app.state.ota_reserved:
+                raise HTTPException(status_code=423, detail="OTA install owns the conductor")
+            for assignment in request.assignments:
+                try:
+                    ack = await asyncio.to_thread(
+                        app.state.conductor.assign,
+                        assignment.mac,
+                        assignment.x,
+                        assignment.y,
+                    )
+                except SerialProtocolError as error:
+                    failed.append({"mac": assignment.mac, "error": str(error)})
+                    continue
+                if ack.get("ok"):
+                    saved.append({
+                        "mac": assignment.mac,
+                        "x": assignment.x,
+                        "y": assignment.y,
+                        "code": assignment.code,
+                        "bits": assignment.bits,
+                    })
+                else:
+                    failed.append({
+                        "mac": assignment.mac,
+                        "error": str(ack.get("error") or "assign failed"),
+                    })
         if saved:
             await publish_state("calibration-apply")
         skipped = list(request.missing) + list(request.ambiguous)
@@ -1409,7 +1670,12 @@ def create_app(
 
     @app.post("/api/operations/power-monitor")
     async def update_power_monitor(request: PowerMonitorUpdate) -> dict[str, Any]:
-        app.state.power_monitor_config = request.model_dump()
+        if app.state.ota_reserved:
+            raise HTTPException(status_code=423, detail="OTA install owns the conductor")
+        async with app.state.conductor_lock:
+            if app.state.ota_reserved:
+                raise HTTPException(status_code=423, detail="OTA install owns the conductor")
+            app.state.power_monitor_config = request.model_dump()
         await publish_state("power-monitor")
         return {"ok": True, "message": "power monitor settings changed", "power_monitor": app.state.power_monitor_config}
 
@@ -1449,11 +1715,14 @@ def create_app(
 
     @app.put("/api/operations/ota-artifact")
     async def stage_ota_artifact(request: Request, filename: str = "firmware.bin") -> dict[str, Any]:
-        data = await request.body()
-        try:
-            artifact = await asyncio.to_thread(app.state.ota_store.stage, filename, data)
-        except OtaArtifactError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
+        async with app.state.ota_start_lock:
+            if app.state.ota_reserved:
+                raise HTTPException(status_code=423, detail="OTA install owns the conductor")
+            data = await request.body()
+            try:
+                artifact = await asyncio.to_thread(app.state.ota_store.stage, filename, data)
+            except OtaArtifactError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
         await publish({"type": "ack", "action": "ota-artifact", "artifact": artifact})
         return {"ok": True, "message": "firmware staged", "artifact": artifact}
 
@@ -1466,36 +1735,15 @@ def create_app(
                 install.update({"nodes": nodes})
         return {"install": ota_install_progress(app.state.ota_install)}
 
-    @app.post("/api/operations/ota-install")
-    async def install_ota_artifact() -> dict[str, Any]:
-        artifact = app.state.ota_store.artifact()
-        if artifact is None:
-            raise HTTPException(status_code=400, detail="no firmware staged")
-        try:
-            state = await conductor_call("snapshot")
-        except SerialProtocolError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
-        ota = state.get("ota") or {}
-        if not ota_ready_for_install(state):
-            blockers = ", ".join(ota.get("blocked") or ["field is not OTA-ready"])
-            raise HTTPException(status_code=400, detail=f"OTA not ready: {blockers}")
+    async def perform_ota_install(
+        artifact: Any,
+        state: dict[str, Any],
+        data: bytes,
+    ) -> dict[str, Any]:
         expected_lanterns = expected_ota_lanterns(state)
         expected_macs = set(expected_lanterns)
         await wait_for_maintenance_settle(state)
 
-        data = await asyncio.to_thread(artifact.path.read_bytes)
-        app.state.ota_install = {
-            "running": True,
-            "complete": False,
-            "error": None,
-            "filename": artifact.filename,
-            "size": artifact.size,
-            "crc32": artifact.crc32,
-            "bytes_sent": 0,
-            "chunks_sent": 0,
-            "chunks_total": artifact.chunks,
-            "started_at": time.time(),
-        }
         ack: dict[str, Any] | None = None
         try:
             async with app.state.conductor_lock:
@@ -1665,29 +1913,125 @@ def create_app(
             "running": False,
             "complete": True,
             "error": None,
+            "message": ack.get("message", "ota install complete"),
             "nodes": nodes,
             "completed_at": time.time(),
         })
         await publish({"type": "ack", "action": "ota-install", "artifact": artifact.as_dict(), "ack": ack})
         return {"ok": True, "message": ack.get("message", "ota install complete"), "artifact": artifact.as_dict()}
 
+    async def ota_install_worker(artifact: Any, state: dict[str, Any]) -> None:
+        try:
+            data = await asyncio.to_thread(artifact.path.read_bytes)
+            await perform_ota_install(artifact, state, data)
+        except asyncio.CancelledError:
+            app.state.ota_install.update({
+                "running": False,
+                "complete": False,
+                "error": "ota install interrupted by service shutdown",
+                "completed_at": time.time(),
+            })
+            raise
+        except HTTPException as error:
+            app.state.ota_install.update({
+                "running": False,
+                "complete": False,
+                "error": str(error.detail),
+                "completed_at": app.state.ota_install.get("completed_at") or time.time(),
+            })
+        except Exception as error:
+            app.state.ota_install.update({
+                "running": False,
+                "complete": False,
+                "error": str(error) or type(error).__name__,
+                "completed_at": time.time(),
+            })
+        finally:
+            app.state.ota_reserved = False
+
+    @app.post("/api/operations/ota-install", status_code=202)
+    async def install_ota_artifact() -> dict[str, Any]:
+        async with app.state.ota_start_lock:
+            if app.state.ota_reserved:
+                raise HTTPException(status_code=409, detail="OTA install already running")
+            artifact = app.state.ota_store.artifact()
+            if artifact is None:
+                raise HTTPException(status_code=400, detail="no firmware staged")
+            try:
+                async with app.state.conductor_lock:
+                    if app.state.ota_reserved:
+                        raise HTTPException(status_code=409, detail="OTA install already running")
+                    state = await asyncio.to_thread(app.state.conductor.snapshot)
+                    state = enrich_state(state)
+                    ota = state.get("ota") or {}
+                    if not ota_ready_for_install(state):
+                        blockers = ", ".join(ota.get("blocked") or ["field is not OTA-ready"])
+                        raise HTTPException(status_code=400, detail=f"OTA not ready: {blockers}")
+                    app.state.ota_reserved = True
+            except SerialProtocolError as error:
+                raise HTTPException(status_code=503, detail=str(error)) from error
+
+            app.state.ota_install = {
+                "running": True,
+                "complete": False,
+                "error": None,
+                "filename": artifact.filename,
+                "size": artifact.size,
+                "crc32": artifact.crc32,
+                "bytes_sent": 0,
+                "chunks_sent": 0,
+                "chunks_total": artifact.chunks,
+                "started_at": time.time(),
+            }
+            task = asyncio.create_task(ota_install_worker(artifact, state))
+            app.state.ota_task = task
+            return {
+                "ok": True,
+                "message": "OTA install accepted",
+                "install": ota_install_progress(app.state.ota_install),
+            }
+
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:
+        token = ws.cookies.get(SESSION_COOKIE)
+        session = live_session(token)
+        origin = ws.headers.get("origin")
+        if app.state.settings.require_https and external_scheme(ws.scope, ws.headers) != "https":
+            await ws.close(code=4403)
+            return
+        if app.state.auth_manager.enabled and session is None:
+            await ws.close(code=4401)
+            return
+        if origin is not None and not allowed_origin(origin, ws.scope, ws.headers):
+            await ws.close(code=4403)
+            return
+        if token is None:
+            token = "disabled-auth"
         await ws.accept()
-        app.state.ws_clients.add(ws)
+        app.state.ws_clients[ws] = token
         try:
             state = await conductor_call("snapshot")
-        except SerialProtocolError as error:
+        except (SerialProtocolError, HTTPException) as error:
+            if app.state.auth_manager.enabled and live_session(token) is None:
+                app.state.ws_clients.pop(ws, None)
+                with contextlib.suppress(RuntimeError):
+                    await ws.close(code=4401, reason="session expired")
+                return
             try:
                 await ws.send_json({"type": "error", "message": str(error), "ts": time.time()})
             except (RuntimeError, WebSocketDisconnect):
-                app.state.ws_clients.discard(ws)
+                app.state.ws_clients.pop(ws, None)
                 return
         else:
+            if app.state.auth_manager.enabled and live_session(token) is None:
+                app.state.ws_clients.pop(ws, None)
+                with contextlib.suppress(RuntimeError):
+                    await ws.close(code=4401, reason="session expired")
+                return
             try:
                 await ws.send_json({"type": "state", "state": state, "ts": time.time()})
             except (RuntimeError, WebSocketDisconnect):
-                app.state.ws_clients.discard(ws)
+                app.state.ws_clients.pop(ws, None)
                 return
         try:
             while True:
@@ -1695,7 +2039,7 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
-            app.state.ws_clients.discard(ws)
+            app.state.ws_clients.pop(ws, None)
 
     return app
 

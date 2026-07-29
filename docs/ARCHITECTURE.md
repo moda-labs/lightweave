@@ -195,7 +195,7 @@ from the spare's serial `info`, or label spares with their MAC, or let the
 conductor surface "new unknown MAC seen." Only worth a full re-calibration if many
 nodes move at once.
 
-### 5.2 Control plane — operator/admin interface **[planned]**
+### 5.2 Control plane - operator/admin interface **[done; Pi rollout pending]**
 
 The conductor stores the authoritative **routing table** (§5) *and* **show
 program** (§4.1) in NVS and runs the field with **no laptop present**. The laptop
@@ -220,17 +220,17 @@ acks/errors so a program can drive the conductor reliably.
 **Not a runtime dependency:** unplug the admin host and the conductor + field
 continue on their stored table and program.
 
-**Deployment (no router/internet):** the admin host is a **Raspberry Pi** cabled
-to the conductor over USB. The Pi runs as its **own Wi-Fi access point** (hotspot
-via NetworkManager / RaspAP), so a phone joins the Pi's SSID directly and browses
-the UI (`http://baskets.local` or the AP IP) — no router, no internet, works on the
-playa. Set a WPA2 password. The Pi can also run the calibration CV (§6) on-site, so
-no separate laptop is needed. The Pi is a permanent convenience but **stays
-non-essential to runtime** — the authoritative table + show program live in the
-conductor's NVS, so the field survives the Pi being removed or failing.
+**Deployment:** the admin host is a **Raspberry Pi** cabled to the conductor over
+USB. The reviewed remote shape makes the Pi a normal Starlink Wi-Fi client,
+publishes only a loopback Uvicorn listener through a named Cloudflare Tunnel, and
+protects HTTP and WebSocket traffic with one application session boundary. The
+Pi can also run calibration CV (§6) on-site. It is a permanent convenience but
+**stays non-essential to runtime** - the authoritative table and active field
+configuration live in conductor NVS, so the field survives loss of the Pi,
+Starlink, Cloudflare, or the browser.
 
 ```
-phone --WiFi--> Pi (AP + web UI + CV + serial bridge) --USB--> conductor --ESP-NOW--> field
+browser --HTTPS/tunnel--> Pi (web UI + CV + serial bridge) --USB--> conductor --ESP-NOW--> field
 ```
 
 An internet-connected deployment variant using Starlink Wi-Fi, a named
@@ -436,7 +436,7 @@ not required for the main installation behavior.
 | Refactor — symmetric runtime role + NVS pattern persistence + rainbow drift pattern | ✅ done, hardware-verified |
 | Protocol foundation, Half 1 — typed header, MAC identity, bidirectional ESP-NOW, registration + roster | ✅ done, hardware-verified |
 | Protocol foundation, Half 2 — MAC→(x,y) layout table broadcast + NVS cache (`assign`/`table`/`forget`) | ✅ done, hardware-verified |
-| Control plane — structured machine Pi↔conductor serial (bulk table/show-program) | ✅ done for dev laptop UI/API; Pi packaging still planned |
+| Control plane - structured machine Pi↔conductor serial (bulk table/show-program) | ✅ UI/API, authenticated remote boundary, and Pi packaging done; physical Pi/tunnel rollout pending |
 | Auto-calibration — register / roster / blink + laptop CV | 📐 planned |
 | 3 — power management (radio duty-cycle, schedule deep-sleep, optional LDR fallback, INA228 energy monitor) | 🛠 in progress — Lever 1 Stage A (performer radio duty-cycle) ✅ done + host-tested + hardware-verified + measured (85→~55 mA @ 12V); Stage B (CPU light-sleep between work, `napsched.h`) ✅ hardware-verified on bench 2026-07-03 (power re-measure owed); schedule-driven deep sleep ✅ code-complete + host-tested + UI/API built, hardware verification owed; photodiode dusk sensing is now optional/fallback; INA228 instrumentation (§4.2) ✅ firmware done + host-tested (`powermon.h`, `MSG_POWER`), awaiting the chip |
 | 4 — battery power + ET900 draw measurement (go/no-go) | 📐 planned |
