@@ -233,6 +233,12 @@ conductor's NVS, so the field survives the Pi being removed or failing.
 phone --WiFi--> Pi (AP + web UI + CV + serial bridge) --USB--> conductor --ESP-NOW--> field
 ```
 
+An internet-connected deployment variant using Starlink Wi-Fi, a named
+Cloudflare Tunnel, and application-authenticated browser sessions is specified
+in [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md). It preserves the same non-dependency
+rule: loss of the internet-facing admin path does not affect conductor or
+performer runtime.
+
 ## 6. Auto-calibration — drone + computer vision **[planned]**
 
 Goal: build the `MAC → (x,y)` table by **survey**, not by hand (manual surveying of

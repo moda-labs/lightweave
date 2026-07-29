@@ -32,7 +32,7 @@ Current behaviors need explicit handling before publishing the service:
 - `control/app.py:install_ota_artifact` holds one HTTP request open for the
   complete field transfer, while `control/static/app.js:pollOtaInstallWhile`
   ties browser polling to that promise. A roughly 6-minute bench transfer was
-  operator-observed during planning, longer than Cloudflare's normal 120-second
+  operator-observed during planning, longer than Cloudflare's normal 125-second
   proxy read timeout.
 - The OTA handler holds `app.state.conductor_lock` for the transfer. Every normal
   serial-backed route enters that same lock through `conductor_call`, so a command

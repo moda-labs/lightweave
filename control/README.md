@@ -33,6 +33,12 @@ Open:
 - UI: <http://127.0.0.1:8000/>
 - OpenAPI: <http://127.0.0.1:8000/docs>
 
+Production remote administration uses a loopback-only service behind a named
+Cloudflare Tunnel and the control plane's shared-password session boundary.
+See [`docs/REMOTE_ADMIN.md`](../docs/REMOTE_ADMIN.md) for the stable deployment
+contract and [`plans/remote-administration.md`](../plans/remote-administration.md)
+for implementation status.
+
 ## Test
 
 ```bash

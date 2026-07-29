@@ -19,6 +19,12 @@ server on a laptop with the bench conductor on USB. Pi-specific work is pure
 config: AP hotspot, mDNS (`baskets.local`), systemd unit, serial device
 naming.
 
+The public-browser deployment over Starlink uses a named Cloudflare Tunnel and
+the control plane's shared-password session boundary rather than a public Pi IP
+or router port forwarding. Stable architecture and operator guidance are in
+[`REMOTE_ADMIN.md`](REMOTE_ADMIN.md); implementation status remains in
+[`plans/remote-administration.md`](../plans/remote-administration.md).
+
 ## Architecture principles
 
 1. **API-first.** The web UI is a pure client of the same HTTP + WebSocket
