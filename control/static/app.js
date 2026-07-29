@@ -747,8 +747,8 @@ function renderPowerMonitor() {
     ? "--"
     : `${Number(fieldDraw).toFixed(1)} W`;
   $("#power-monitor-draw").className = `ops-value ${fieldDraw === null || fieldDraw === undefined ? "" : "sync"}`;
-  $("#battery-capacity").value = monitor.battery_capacity_wh ?? 153.6;
-  $("#battery-full-voltage").value = monitor.full_voltage ?? 14.6;
+  $("#battery-capacity").value = monitor.battery_capacity_wh ?? 384;
+  $("#battery-full-voltage").value = monitor.full_voltage ?? 14.4;
 
   const sampleBox = $("#power-samples");
   if (!samples.length) {
@@ -1933,8 +1933,8 @@ async function runAction(action) {
       const ack = await api("/api/operations/power-monitor", {
         method: "POST",
         body: JSON.stringify({
-          battery_capacity_wh: Number($("#battery-capacity").value || 153.6),
-          full_voltage: Number($("#battery-full-voltage").value || 14.6),
+          battery_capacity_wh: Number($("#battery-capacity").value || 384),
+          full_voltage: Number($("#battery-full-voltage").value || 14.4),
         }),
       });
       toast(ack.message);

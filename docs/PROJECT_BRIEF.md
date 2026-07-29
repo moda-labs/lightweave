@@ -26,7 +26,7 @@ prove it first, in isolation.
 | Dusk sensor | LDR + 10kΩ divider | **GPIO34** (ADC1) |
 | Battery sense (coarse) | 47kΩ/10kΩ divider off the 12V line | **GPIO35** (ADC1) — cheap voltage-only backup |
 | Power monitor (precise) | **INA228** breakout (15mΩ shunt on-board, hardware energy/charge accumulation) | I2C: VCC→3.3V, GND→GND, SDA/SCL→ESP32 I2C pins; wired in series between battery+ and buck input |
-| Power | 12V LiFePO4 (TalentCell 12Ah) → buck → 5V | 5V to ESP32 VIN + ring; common ground |
+| Power | KUNLUN model 1230, 12.8 V 30 Ah (384 Wh) LiFePO4 → buck → 5V | M8 terminals; 5V to ESP32 VIN + ring; common ground |
 
 **Hard pin/ADC constraint:** the LDR and battery sense **must** use ADC1 pins
 (GPIO 32–39). ADC2 pins stop working whenever the WiFi/ESP-NOW radio is active —
@@ -155,9 +155,10 @@ synced time + (x,y).
 
 - Brightness tier: **gentle** (slow fades, low brightness) — fits the aesthetic and the
   battery budget. ~0.7W LEDs.
-- Per-node nightly energy ≈ **11 Wh** (10h run) → 12Ah LiFePO4 gives ~12–13 nights,
-  clearing a 10-night target with buffer. Keeping the ESP32 efficient is what protects
-  this margin.
+- Per-node nightly energy ≈ **11 Wh** (10h run) → the 384 Wh pack gives roughly
+  **32–35 nights** before derating, comfortably clearing the 10-night target.
+  Keeping the ESP32 efficient protects cold-weather, aging, and incomplete-charge
+  margin.
 - Field: ~50–60 nodes; ESP-NOW single-hop from a centrally-placed (ideally elevated)
   conductor. Enable ESP-NOW long-range mode + max TX power if range testing demands it.
 

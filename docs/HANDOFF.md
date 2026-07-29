@@ -135,9 +135,9 @@ begin/writing/complete OTA status so future failures expose their offset/error.
 Previous latest: **12 V power monitoring is code-complete in firmware/API/UI** —
 the conductor retains the latest `MSG_POWER` sample per metered MAC and exposes it
 in `/api/state`; Operations estimates field draw and per-node SOC from sparse
-INA228 reference nodes, defaulting to the 153.6 Wh TalentCell pack. SOC is based
+INA228 reference nodes, defaulting to the 384 Wh KUNLUN model 1230 pack. SOC is based
 on Wh used since a full-charge anchor, not a voltage curve: voltage at or above
-the configured full threshold (default 14.6 V) can auto-anchor a metered node to
+the configured full threshold (default 14.4 V) can auto-anchor a metered node to
 100%, and each metered node has a manual **Sync to 100%** button after charging.
 Previous latest: **runtime power schedule is
 code-complete** — Operations can set light-sleep/radio check interval,
@@ -230,6 +230,15 @@ Priority order:
    more MCUs or committing to enclosure geometry. The pilot FireBeetles already
    ordered are DFR0654-F onboard-antenna boards; buried-box deployment likely
    needs external-antenna ESP32-UE boards plus above-grade antennas.
+
+**Battery selection update (2026-07-25):** production now uses the KUNLUN model
+1230 12.8 V 30 Ah / 384 Wh LiFePO4 pack (eBay item `357870398757`), replacing the
+TalentCell LF120A1 as the plan of record. The control-plane defaults are 384 Wh
+capacity and 14.4 V full-charge anchoring. Pack label limits: 14.4 V charge
+(14.6 V max), ≤20 A charging, 0–45 °C charging temperature, and M8 terminals.
+The older 12 Ah/138 Wh measurements and Amazon receipt below remain as historical
+bench/pilot records. The production BOM contains the fleet charging topology and
+revised cost roll-up.
 
 ---
 
@@ -431,7 +440,7 @@ conductor self-log on the tested scheduler). What landed:
   the elapsed anchor.
 - Control plane (2026-07-06): `/api/state` includes `power_monitor` summary from
   sparse reference-node samples. Operators can configure battery capacity
-  (default 153.6 Wh) and the full-voltage threshold (default 14.6 V), see
+  (default 384 Wh) and the full-voltage threshold (default 14.4 V), see
   estimated field draw / node SOC in Operations, and click **Sync to 100%** per
   metered node after charging to anchor that node's current Wh as full.
 

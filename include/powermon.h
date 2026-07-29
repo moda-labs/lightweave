@@ -47,7 +47,7 @@ inline float powerAvgW(float joules, uint32_t elapsed_s) {
 // A broken sensor / wiring fault / garbled packet should be LOGGED but flagged,
 // never trusted into the power budget. Bounds are generous — they only exist to
 // catch NaN/inf and orders-of-magnitude nonsense, not to police real readings.
-// (138 Wh battery ≈ 0.5 MJ; 12 Ah ≈ 43 kC; 12 V LiFePO4 tops out ~14.6 V.)
+// (384 Wh battery ≈ 1.4 MJ; 30 Ah = 108 kC; 12 V LiFePO4 tops out ~14.6 V.)
 static constexpr float POWER_MAX_ENERGY_J  = 5.0e6f;   // ~1.4 kWh — way past any night
 static constexpr float POWER_MAX_CHARGE_C  = 5.0e5f;   // ~139 Ah
 static constexpr float POWER_MAX_BUS_V     = 30.0f;    // divider/wiring fault above

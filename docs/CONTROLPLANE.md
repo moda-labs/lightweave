@@ -121,8 +121,8 @@ Snapshot shape:
     }
   ],
   "power_monitor": {
-    "battery_capacity_wh": 153.6,
-    "full_voltage": 14.6,
+    "battery_capacity_wh": 384.0,
+    "full_voltage": 14.4,
     "sample_count": 2,
     "usable_sample_count": 2,
     "estimated_node_soc_percent": 99.7,
@@ -190,7 +190,7 @@ The map renders only positioned lanterns.
 - `POST /api/show/blackout`
 - `POST /api/operations/power-policy` with the runtime sleep/check policy.
 - `POST /api/operations/power-monitor` with
-  `{"battery_capacity_wh":153.6,"full_voltage":14.6}` -> update the SOC
+  `{"battery_capacity_wh":384.0,"full_voltage":14.4}` -> update the SOC
   estimate capacity and full-charge voltage anchor.
 - `POST /api/lanterns/{mac}/power-sync-full` -> manually anchor that metered
   node's current Wh reading as 100% SOC.

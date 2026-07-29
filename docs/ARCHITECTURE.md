@@ -132,10 +132,10 @@ elapsed time.
 4. **Future field diagnostic (optional):** expose the current Wh reading over BLE
    for a phone-app spot-check, independent of the conductor link.
 
-SOC is energy-counter based, not voltage-curve based: the TalentCell pack default
-is **153.6 Wh**, and the control plane computes `100% - Wh used since full /
+SOC is energy-counter based, not voltage-curve based: the KUNLUN model 1230 pack
+default is **384 Wh**, and the control plane computes `100% - Wh used since full /
 capacity`. Voltage is used only as a full-charge anchor: a sample at or above the
-configured full-voltage threshold (default **14.6 V**) resets that node's SOC
+configured full-voltage threshold (default **14.4 V**) resets that node's SOC
 anchor to 100%. Operators can also click **Sync to 100%** per metered node after
 charging. This is a representative-sample tool for sizing Milestone 3's power
 levers (§8.1, Lever 2 below), not a requirement to install INA228 on every node.

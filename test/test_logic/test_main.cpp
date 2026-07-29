@@ -1333,7 +1333,7 @@ void test_power_unit_conversions() {
   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, powerWh(3600.0f));    // 3600 J = 1 Wh
   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 11.0f, powerWh(39600.0f));  // a target night
   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, powerMah(3.6f));      // 3.6 C = 1 mAh
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 12000.0f, powerMah(43200.0f));  // 12 Ah battery
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 30000.0f, powerMah(108000.0f));  // 30 Ah battery
 }
 
 void test_power_avg_watts() {

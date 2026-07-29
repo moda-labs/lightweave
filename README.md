@@ -155,7 +155,7 @@ batch notes.
   saved.
 - Operations view for firmware consistency, recovery state, OTA staging/install,
   runtime power policy, and sparse power monitoring. Battery capacity defaults
-  to the 153.6 Wh TalentCell pack and can be changed in the UI; metered nodes can
+  to the 384 Wh KUNLUN pack and can be changed in the UI; metered nodes can
   be manually synced to 100% after charging.
 
 ## Quick start

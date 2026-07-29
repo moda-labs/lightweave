@@ -232,7 +232,8 @@ def test_state_endpoint_returns_mock_state() -> None:
     assert body["summary"]["firmware"]["consistent"] is True
     assert body["power"]["light_sleep_check_s"] == 4
     assert body["keepalive"] == {"enabled": False, "interval_ms": 10000, "pulse_ms": 100, "brightness": 64}
-    assert body["power_monitor"]["battery_capacity_wh"] == 153.6
+    assert body["power_monitor"]["battery_capacity_wh"] == 384.0
+    assert body["power_monitor"]["full_voltage"] == 14.4
     assert body["power_monitor"]["sample_count"] == 2
     assert body["power_monitor"]["usable_sample_count"] == 2
     assert body["power_monitor"]["estimated_node_soc_percent"] > 99
