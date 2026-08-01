@@ -647,6 +647,8 @@ pio device monitor -p /dev/cu.usbserial-XXXX        # provision + watch
 ```
 Reading serial without resetting the board: see the pyserial snippet in
 `FLASHING.md` (opening the port auto-resets; wait ~2 s before typing commands).
+Raspberry Pi shell access and recovery: see `SSH_ACCESS.md`; the current LAN
+command is `ssh baskets@baskets.local`.
 
 ---
 

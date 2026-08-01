@@ -6,7 +6,9 @@ It is the implementation guide for the stable contract in
 hardware proof remain in
 [`plans/remote-administration.md`](../../plans/remote-administration.md), Phase 4.
 After the first installation, normal updates follow the pull-based release
-procedure in [`docs/RELEASING.md`](../../docs/RELEASING.md).
+procedure in [`docs/RELEASING.md`](../../docs/RELEASING.md). Operator shell
+access, key enrollment, and connection recovery are documented in
+[`docs/SSH_ACCESS.md`](../../docs/SSH_ACCESS.md).
 
 The production shape is deliberately narrow:
 

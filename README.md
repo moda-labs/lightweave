@@ -43,7 +43,8 @@ Production Pi updates use a pull-based, hash-pinned release channel with health
 checks and automatic code rollback. Each promoted release stages its immutable
 firmware artifact, but an operator still explicitly starts field OTA. The UI
 shows separate web-control and field-firmware versions and changelogs. See
-[docs/RELEASING.md](docs/RELEASING.md) for the release procedure.
+[docs/RELEASING.md](docs/RELEASING.md) for the release procedure and
+[docs/SSH_ACCESS.md](docs/SSH_ACCESS.md) for Raspberry Pi shell access.
 
 ## System overview
 
