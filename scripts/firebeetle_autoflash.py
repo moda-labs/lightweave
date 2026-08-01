@@ -461,7 +461,8 @@ def process_port(
         device_state = "known"
     elif device_state == "erase_pending":
         raise RuntimeError(
-            "prior factory erase has an ambiguous result; authorize this ROM MAC before retrying"
+            f"prior factory erase has an ambiguous result for {probe['mac']}; "
+            f"run: {Path(__file__).name} retry-factory {probe['mac']}"
         )
     if before is None and device_state not in {"known", "erase_authorized"} and not factory_authorized:
         raise RuntimeError(

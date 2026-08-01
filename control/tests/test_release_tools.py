@@ -244,8 +244,10 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
     with pytest.raises(RuntimeError, match="erase failure"):
         call()
     assert autoflash.load_device_registry(registry) == {mac: "erase_pending"}
-    with pytest.raises(RuntimeError, match="ambiguous result"):
+    with pytest.raises(RuntimeError) as error:
         call()
+    assert f"ambiguous result for {mac}" in str(error.value)
+    assert f"retry-factory {mac}" in str(error.value)
     assert erase_calls == ["failed"]
     assert flash_calls == []
 
