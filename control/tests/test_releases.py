@@ -91,6 +91,16 @@ def test_release_manifest_requires_immutable_tag_commit_and_hashed_firmware() ->
     with pytest.raises(ReleaseMetadataError, match="immutable tag"):
         parse_release_manifest(bad)
 
+    bad = manifest()
+    bad["firmware"]["url"] = "https://example.com/lightweave-field-v0.3.0.bin"
+    with pytest.raises(ReleaseMetadataError, match="firmware URL is not canonical"):
+        parse_release_manifest(bad)
+
+    bad = manifest()
+    bad["serial_flash"]["filename"] = "serial.zip"
+    with pytest.raises(ReleaseMetadataError, match="serial flash filename is not canonical"):
+        parse_release_manifest(bad)
+
 
 def test_release_channel_is_disabled_or_points_to_one_hashed_https_manifest() -> None:
     disabled = {

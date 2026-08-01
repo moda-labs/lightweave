@@ -112,6 +112,48 @@ def _https_url(value: Any, name: str) -> str:
     return url
 
 
+def canonical_release_asset_url(repository: str, release: str, filename: str) -> str:
+    repository_url = _https_url(repository, "release repository")
+    parsed = urlsplit(repository_url)
+    path_parts = parsed.path.removeprefix("/").split("/")
+    if (
+        parsed.hostname != "github.com"
+        or parsed.port is not None
+        or parsed.query
+        or len(path_parts) != 2
+        or not path_parts[0]
+        or not path_parts[1].endswith(".git")
+        or not path_parts[1].removesuffix(".git")
+    ):
+        raise ReleaseMetadataError("release repository must be a canonical GitHub HTTPS Git URL")
+    owner, repository_name = path_parts[0], path_parts[1].removesuffix(".git")
+    return (
+        f"https://github.com/{owner}/{repository_name}/releases/download/"
+        f"{release}/{filename}"
+    )
+
+
+def release_from_manifest_url(url: str, repository: str) -> str:
+    manifest_url = _https_url(url, "release channel.manifest_url")
+    placeholder = canonical_release_asset_url(
+        repository, "v0.0.0", "lightweave-release.json"
+    )
+    repository_base = placeholder.removesuffix("/v0.0.0/lightweave-release.json")
+    prefix = f"{repository_base}/"
+    if not manifest_url.startswith(prefix):
+        raise ReleaseMetadataError("release channel manifest URL is not canonical")
+    suffix = manifest_url.removeprefix(prefix)
+    parts = suffix.split("/")
+    if len(parts) != 2 or parts[1] != "lightweave-release.json":
+        raise ReleaseMetadataError("release channel manifest URL is not canonical")
+    release = parts[0]
+    if not release.startswith("v") or not SEMVER_RE.fullmatch(release[1:]):
+        raise ReleaseMetadataError("release channel manifest URL is not canonical")
+    if manifest_url != canonical_release_asset_url(repository, release, parts[1]):
+        raise ReleaseMetadataError("release channel manifest URL is not canonical")
+    return release
+
+
 def _iso_timestamp(value: Any, name: str) -> str:
     timestamp = _string(value, name)
     try:
@@ -198,6 +240,8 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
     ref = _string(manifest["ref"], "release manifest.ref")
     if ref != f"refs/tags/{release}":
         raise ReleaseMetadataError("release manifest.ref must name its immutable tag")
+    repository = _https_url(manifest["repository"], "release manifest.repository")
+    canonical_release_asset_url(repository, release, "lightweave-release.json")
     commit = _string(manifest["commit"], "release manifest.commit").lower()
     if not COMMIT_RE.fullmatch(commit):
         raise ReleaseMetadataError("release manifest.commit must be a full Git SHA")
@@ -207,8 +251,12 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
     firmware = _object(manifest["firmware"], "release manifest.firmware")
     _exact_keys(firmware, {"filename", "url", "sha256", "size", "crc32"}, "release manifest.firmware")
     filename = _string(firmware["filename"], "release manifest.firmware.filename")
-    if Path(filename).name != filename or not filename.endswith(".bin"):
-        raise ReleaseMetadataError("firmware filename must be a basename ending in .bin")
+    expected_filename = f"lightweave-field-{release}.bin"
+    if filename != expected_filename:
+        raise ReleaseMetadataError("firmware filename is not canonical for this release")
+    firmware_url = _https_url(firmware["url"], "release manifest.firmware.url")
+    if firmware_url != canonical_release_asset_url(repository, release, filename):
+        raise ReleaseMetadataError("firmware URL is not canonical for this release")
     sha256 = _string(firmware["sha256"], "release manifest.firmware.sha256").lower()
     if not SHA256_RE.fullmatch(sha256):
         raise ReleaseMetadataError("firmware sha256 must be 64 lowercase hex characters")
@@ -227,8 +275,12 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
     serial_filename = _string(
         serial_flash["filename"], "release manifest.serial_flash.filename"
     )
-    if Path(serial_filename).name != serial_filename or not serial_filename.endswith(".zip"):
-        raise ReleaseMetadataError("serial flash filename must be a basename ending in .zip")
+    expected_serial_filename = f"lightweave-serial-flash-{release}.zip"
+    if serial_filename != expected_serial_filename:
+        raise ReleaseMetadataError("serial flash filename is not canonical for this release")
+    serial_url = _https_url(serial_flash["url"], "release manifest.serial_flash.url")
+    if serial_url != canonical_release_asset_url(repository, release, serial_filename):
+        raise ReleaseMetadataError("serial flash URL is not canonical for this release")
     serial_sha256 = _string(
         serial_flash["sha256"], "release manifest.serial_flash.sha256"
     ).lower()
@@ -240,21 +292,21 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
     return ReleaseManifest(
         release=release,
         version=version,
-        repository=_https_url(manifest["repository"], "release manifest.repository"),
+        repository=repository,
         ref=ref,
         commit=commit,
         published_at=_iso_timestamp(manifest["published_at"], "release manifest.published_at"),
         notes=notes,
         firmware={
             "filename": filename,
-            "url": _https_url(firmware["url"], "release manifest.firmware.url"),
+            "url": firmware_url,
             "sha256": sha256,
             "size": size,
             "crc32": crc32,
         },
         serial_flash={
             "filename": serial_filename,
-            "url": _https_url(serial_flash["url"], "release manifest.serial_flash.url"),
+            "url": serial_url,
             "sha256": serial_sha256,
             "size": serial_size,
         },

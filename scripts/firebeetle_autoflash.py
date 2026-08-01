@@ -460,8 +460,9 @@ def process_port(
         write_device_state(device_registry, probe["mac"], "known")
         device_state = "known"
     elif device_state == "erase_pending":
+        retry_python = stable_platformio_python(Path(sys.executable))
         retry_command = shlex.join(
-            [sys.executable, str(Path(__file__).resolve()), "retry-factory", probe["mac"]]
+            [str(retry_python), str(Path(__file__).resolve()), "retry-factory", probe["mac"]]
         )
         raise RuntimeError(
             f"prior factory erase has an ambiguous result for {probe['mac']}; "

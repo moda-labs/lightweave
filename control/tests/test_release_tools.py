@@ -219,6 +219,14 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
 ) -> None:
     registry = tmp_path / "devices.json"
     mac = "C0:CD:D6:C8:03:E0"
+    homebrew = tmp_path / "homebrew"
+    versioned_python = homebrew / "Cellar/platformio/6.1.19/libexec/bin/python"
+    versioned_python.parent.mkdir(parents=True)
+    versioned_python.write_text("")
+    stable_python = homebrew / "opt/platformio/libexec/bin/python"
+    stable_python.parent.mkdir(parents=True)
+    stable_python.symlink_to(versioned_python)
+    monkeypatch.setattr(autoflash.sys, "executable", str(versioned_python))
     monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(autoflash, "probe_board", lambda _port: {"mac": mac})
     monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
@@ -248,7 +256,12 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
         call()
     assert f"ambiguous result for {mac}" in str(error.value)
     retry_command = autoflash.shlex.join(
-        [sys.executable, str(Path(autoflash.__file__).resolve()), "retry-factory", mac]
+        [
+            str(stable_python),
+            str(Path(autoflash.__file__).resolve()),
+            "retry-factory",
+            mac,
+        ]
     )
     assert f"run: {retry_command}" in str(error.value)
     assert erase_calls == ["failed"]

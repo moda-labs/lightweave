@@ -24,6 +24,15 @@ gitops = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = gitops
 SPEC.loader.exec_module(gitops)
 
+RELEASE = "v0.3.0"
+RELEASE_BASE = (
+    "https://github.com/underminedsk/lightweave/releases/download/"
+    f"{RELEASE}"
+)
+MANIFEST_URL = f"{RELEASE_BASE}/lightweave-release.json"
+FIRMWARE_URL = f"{RELEASE_BASE}/lightweave-field-{RELEASE}.bin"
+SERIAL_FLASH_URL = f"{RELEASE_BASE}/lightweave-serial-flash-{RELEASE}.zip"
+
 
 def release_manifest(data: bytes = b"firmware") -> dict:
     version = "0.3.0"
@@ -43,15 +52,15 @@ def release_manifest(data: bytes = b"firmware") -> dict:
             "firmware_changes": ["Firmware change"],
         },
         "firmware": {
-            "filename": "field.bin",
-            "url": "https://github.com/example/field.bin",
+            "filename": f"lightweave-field-{RELEASE}.bin",
+            "url": FIRMWARE_URL,
             "sha256": hashlib.sha256(data).hexdigest(),
             "size": len(data),
             "crc32": zlib.crc32(data) & 0xFFFFFFFF,
         },
         "serial_flash": {
-            "filename": "serial.zip",
-            "url": "https://github.com/example/serial.zip",
+            "filename": f"lightweave-serial-flash-{RELEASE}.zip",
+            "url": SERIAL_FLASH_URL,
             "sha256": hashlib.sha256(b"serial bundle").hexdigest(),
             "size": len(b"serial bundle"),
         },
@@ -63,7 +72,7 @@ def channel(manifest_bytes: bytes) -> bytes:
         {
             "schema_version": 1,
             "enabled": True,
-            "manifest_url": "https://github.com/example/release.json",
+            "manifest_url": MANIFEST_URL,
             "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         }
     ).encode()
@@ -159,7 +168,7 @@ def test_manifest_hash_is_verified_before_parsing_or_git(tmp_path: Path) -> None
         {
             "schema_version": 1,
             "enabled": True,
-            "manifest_url": "https://github.com/example/release.json",
+            "manifest_url": MANIFEST_URL,
             "manifest_sha256": "0" * 64,
         }
     ).encode()
@@ -172,9 +181,66 @@ def test_manifest_hash_is_verified_before_parsing_or_git(tmp_path: Path) -> None
         reconciler.desired_manifest()
 
 
+def test_noncanonical_manifest_url_is_rejected_before_download(tmp_path: Path) -> None:
+    manifest_bytes = json.dumps(release_manifest()).encode()
+    channel_bytes = json.dumps(
+        {
+            "schema_version": 1,
+            "enabled": True,
+            "manifest_url": "https://example.com/lightweave-release.json",
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        }
+    ).encode()
+    requested = []
+
+    def get(url: str, _maximum: int) -> bytes:
+        requested.append(url)
+        return channel_bytes
+
+    configuration = config(tmp_path)
+    reconciler = gitops.GitOpsReconciler(configuration, http_get=get)
+    with pytest.raises(ValueError, match="manifest URL is not canonical"):
+        reconciler.desired_manifest()
+
+    assert requested == [configuration.channel_url]
+
+
+def test_manifest_release_must_match_canonical_url(tmp_path: Path) -> None:
+    document = release_manifest()
+    document["release"] = "v0.3.1"
+    document["version"] = "0.3.1"
+    document["ref"] = "refs/tags/v0.3.1"
+    document["notes"]["version"] = "0.3.1"
+    document["firmware"]["filename"] = "lightweave-field-v0.3.1.bin"
+    document["firmware"]["url"] = (
+        "https://github.com/underminedsk/lightweave/releases/download/"
+        "v0.3.1/lightweave-field-v0.3.1.bin"
+    )
+    document["serial_flash"]["filename"] = "lightweave-serial-flash-v0.3.1.zip"
+    document["serial_flash"]["url"] = (
+        "https://github.com/underminedsk/lightweave/releases/download/"
+        "v0.3.1/lightweave-serial-flash-v0.3.1.zip"
+    )
+    manifest_bytes = json.dumps(document).encode()
+    channel_bytes = channel(manifest_bytes)
+    configuration = config(tmp_path)
+
+    def get(url: str, _maximum: int) -> bytes:
+        return channel_bytes if url == configuration.channel_url else manifest_bytes
+
+    reconciler = gitops.GitOpsReconciler(configuration, http_get=get)
+    with pytest.raises(gitops.ReconcileError, match="does not match its canonical URL"):
+        reconciler.desired_manifest()
+
+
 def test_unapproved_repository_is_rejected(tmp_path: Path) -> None:
     document = release_manifest()
     document["repository"] = "https://github.com/attacker/repository.git"
+    attacker_base = "https://github.com/attacker/repository/releases/download/v0.3.0"
+    document["firmware"]["url"] = f"{attacker_base}/{document['firmware']['filename']}"
+    document["serial_flash"]["url"] = (
+        f"{attacker_base}/{document['serial_flash']['filename']}"
+    )
     manifest_bytes = json.dumps(document).encode()
     channel_bytes = channel(manifest_bytes)
 
@@ -262,8 +328,8 @@ def fake_responses(configuration, firmware=b"firmware"):
     manifest_bytes = json.dumps(release_manifest(firmware), sort_keys=True).encode()
     return {
         configuration.channel_url: channel(manifest_bytes),
-        "https://github.com/example/release.json": manifest_bytes,
-        "https://github.com/example/field.bin": firmware,
+        MANIFEST_URL: manifest_bytes,
+        FIRMWARE_URL: firmware,
     }
 
 
@@ -306,7 +372,8 @@ def test_current_release_is_a_noop_only_when_staged_firmware_is_verified(tmp_pat
     firmware_path.unlink()
     result = reconciler.reconcile()
     assert result["status"] == "deployed"
-    assert firmware_path.read_bytes() == b"firmware"
+    record = json.loads(reconciler._current_record_path().read_text())
+    assert Path(record["firmware_local_path"]).read_bytes() == b"firmware"
 
 
 def test_dirty_checkout_fails_before_deployment(tmp_path: Path) -> None:

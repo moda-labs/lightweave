@@ -226,6 +226,9 @@ class GitOpsReconciler:
         channel = self.releases.parse_release_channel(channel_document)
         if not channel["enabled"]:
             return None
+        expected_release = self.releases.release_from_manifest_url(
+            channel["manifest_url"], self.config.allowed_repository
+        )
         manifest_bytes, manifest_document = self._json_download(
             channel["manifest_url"],
             MAX_MANIFEST_BYTES,
@@ -236,6 +239,8 @@ class GitOpsReconciler:
         manifest = self.releases.parse_release_manifest(manifest_document)
         if manifest.repository != self.config.allowed_repository:
             raise ReconcileError("release manifest repository is not allowed")
+        if manifest.release != expected_release:
+            raise ReconcileError("release manifest does not match its canonical URL")
         return manifest
 
     def _current_record_path(self) -> Path:
