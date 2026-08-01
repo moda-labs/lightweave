@@ -116,6 +116,9 @@ static int64_t     g_ota_maintenance_until_us = 0;
 static constexpr int64_t OTA_WINDOW_US = 15LL * 60LL * 1000000LL;
 static constexpr uint32_t OTA_FINALIZE_WAIT_MS = 30000;
 static constexpr int64_t OTA_STATUS_FRESH_US = 30000000LL;
+// REGISTER arrives every 10 s. Three intervals distinguish an online performer
+// from a stale roster row without making one dropped registration flap it.
+static constexpr int64_t OTA_COHORT_FRESH_US = 3 * REGISTER_INTERVAL_US;
 static bool        g_ota_write_active = false;
 static uint32_t    g_ota_write_size = 0;
 static uint32_t    g_ota_write_written = 0;
@@ -124,6 +127,7 @@ static uint32_t    g_ota_write_expected_crc = 0;
 static bool        g_ota_finalize_pending = false;
 static bool        g_ota_reboot_pending = false;
 static OtaStatusTable g_ota_status;
+static OtaCohort      g_ota_cohort;
 static portMUX_TYPE   g_ota_status_mux = portMUX_INITIALIZER_UNLOCKED;
 static OtaStatusMsg   g_ota_status_pending = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_STATUS},
                                                {0}, OTA_PHASE_IDLE, OTA_ERR_NONE, 0, 0};
@@ -1194,30 +1198,28 @@ static void printOtaJson(uint8_t expected, uint8_t placed_alive,
                          uint8_t firmware_matching, bool firmware_mixed,
                          int64_t t) {
   bool active = otaMaintenanceActive(t);
-  uint8_t missing = expected > placed_alive ? expected - placed_alive : 0;
-  bool ready = active && expected > 0 && missing == 0;
+  uint8_t deferred = expected > placed_alive ? expected - placed_alive : 0;
+  bool ready = active && placed_alive > 0;
   long timeout_s = active && g_ota_maintenance_until_us > t
                        ? (long)((g_ota_maintenance_until_us - t) / 1000000LL)
                        : 0;
   Serial.printf("\"ota\":{\"mode\":\"%s\",\"enabled\":%s,\"ready\":%s,"
                 "\"ready_count\":%u,\"expected\":%u,\"missing\":%u,"
+                "\"deferred\":%u,"
                 "\"firmware_consistent\":%s,\"timeout_s\":%ld,\"blocked\":[",
                 active ? "maintenance" : "idle", active ? "true" : "false",
-                ready ? "true" : "false", placed_alive, expected, missing,
+                ready ? "true" : "false", placed_alive, expected, deferred,
+                deferred,
                 firmware_mixed ? "false" : "true", timeout_s);
   bool first = true;
   if (!active) {
     Serial.print("\"not in maintenance mode\"");
     first = false;
   }
-  if (expected == 0) {
+  if (placed_alive == 0) {
     if (!first) Serial.print(",");
-    Serial.print("\"no placed lanterns\"");
-    first = false;
-  }
-  if (missing > 0) {
-    if (!first) Serial.print(",");
-    Serial.print("\"missing placed lanterns\"");
+    Serial.print(expected == 0 ? "\"no placed lanterns\""
+                               : "\"no placed lanterns online\"");
     first = false;
   }
   if (firmware_mixed && !ready) {
@@ -1237,6 +1239,7 @@ static void otaWriteAbort() {
   g_ota_write_crc = 0;
   g_ota_write_expected_crc = 0;
   g_ota_finalize_pending = false;
+  otaCohortInit(g_ota_cohort);
 }
 
 static void otaSetLocalStatus(uint8_t phase, uint8_t error, uint32_t offset,
@@ -1386,16 +1389,8 @@ static bool otaExpectedPerformersComplete(uint32_t size, uint32_t crc32) {
   status = g_ota_status;
   portEXIT_CRITICAL(&g_ota_status_mux);
 
-  int64_t t = now_us();
-  for (uint8_t i = 0; i < g_table.count; i++) {
-    const uint8_t* mac = g_table.entries[i].mac;
-    if (memcmp(mac, g_mac, 6) == 0) continue;
-    if (!otaStatusCompleteForMac(status, mac, size, crc32, t,
-                                 OTA_STATUS_FRESH_US)) {
-      return false;
-    }
-  }
-  return true;
+  return otaCohortComplete(status, g_ota_cohort, size, crc32, now_us(),
+                           OTA_STATUS_FRESH_US);
 }
 
 static bool otaWaitForExpectedPerformers(uint32_t size, uint32_t crc32,
@@ -1418,7 +1413,31 @@ static void handleOtaBegin(const SerialJsonCommand& cmd) {
     return;
   }
   otaWriteAbort();
+  Roster roster;
+  portENTER_CRITICAL(&g_roster_mux);
+  roster = g_roster;
+  portEXIT_CRITICAL(&g_roster_mux);
+  int64_t t = now_us();
+  for (uint8_t i = 0; i < g_table.count; i++) {
+    const uint8_t* mac = g_table.entries[i].mac;
+    if (memcmp(mac, g_mac, 6) == 0) continue;
+    int r = rosterFind(roster, mac);
+    if (r >= 0 && otaSeenRecently(roster.entries[r].last_us, t,
+                                  OTA_COHORT_FRESH_US)) {
+      otaCohortAdd(g_ota_cohort, mac);
+    }
+  }
+  if (g_ota_cohort.count == 0) {
+    jsonError(cmd.id, "no placed lanterns online");
+    return;
+  }
+  // A retry of the same artifact must earn fresh acknowledgements. Otherwise a
+  // recent complete row with the same size/CRC could satisfy this new cohort.
+  portENTER_CRITICAL(&g_ota_status_mux);
+  otaStatusInit(g_ota_status);
+  portEXIT_CRITICAL(&g_ota_status_mux);
   if (!Update.begin(cmd.ota_size, U_FLASH)) {
+    otaCohortInit(g_ota_cohort);
     jsonError(cmd.id, "ota begin failed");
     return;
   }
@@ -1428,7 +1447,14 @@ static void handleOtaBegin(const SerialJsonCommand& cmd) {
   g_ota_write_crc = 0;
   g_ota_write_expected_crc = cmd.ota_crc32;
   otaBroadcastBegin(cmd.ota_size, cmd.ota_crc32);
-  jsonOk(cmd.id, "ota write started");
+  Serial.printf("{\"id\":%lu,\"ok\":true,\"message\":\"ota write started\","
+                "\"targets\":[", (unsigned long)cmd.id);
+  for (uint8_t i = 0; i < g_ota_cohort.count; i++) {
+    char mac[18];
+    if (i) Serial.print(",");
+    Serial.printf("\"%s\"", macStr(g_ota_cohort.macs[i], mac));
+  }
+  Serial.print("]}\n");
 }
 
 static void handleOtaChunk(const SerialJsonCommand& cmd) {
@@ -1596,6 +1622,10 @@ static void printMachineState(uint32_t id) {
   bool firmware_mixed = false;
   for (uint8_t i = 0; i < g_table.count; i++) {
     int r = rosterFind(g_state_roster_snapshot, g_table.entries[i].mac);
+    if (r >= 0 && !otaSeenRecently(g_state_roster_snapshot.entries[r].last_us,
+                                   t, OTA_COHORT_FRESH_US)) {
+      r = -1;
+    }
     if (r < 0) {
       attention++;
     } else {
@@ -1610,6 +1640,10 @@ static void printMachineState(uint32_t id) {
     }
   }
   for (uint8_t i = 0; i < g_state_roster_snapshot.count; i++) {
+    if (!otaSeenRecently(g_state_roster_snapshot.entries[i].last_us, t,
+                         OTA_COHORT_FRESH_US)) {
+      continue;
+    }
     FirmwareVersion fw = rosterEntryFirmware(g_state_roster_snapshot.entries[i]);
     if (tableFind(g_table, g_state_roster_snapshot.entries[i].mac) < 0) attention++;
     if (!firmwareSame(conductor_fw, fw)) firmware_mixed = true;
@@ -1649,6 +1683,10 @@ static void printMachineState(uint32_t id) {
   for (uint8_t i = 0; i < g_table.count; i++) {
     const TableEntry& row = g_table.entries[i];
     int r = rosterFind(g_state_roster_snapshot, row.mac);
+    if (r >= 0 && !otaSeenRecently(g_state_roster_snapshot.entries[r].last_us,
+                                   t, OTA_COHORT_FRESH_US)) {
+      r = -1;
+    }
     char label[16];
     if (r >= 0 && g_state_roster_snapshot.entries[r].id) {
       snprintf(label, sizeof(label), "#%u", g_state_roster_snapshot.entries[r].id);
@@ -1673,6 +1711,7 @@ static void printMachineState(uint32_t id) {
   }
   for (uint8_t i = 0; i < g_state_roster_snapshot.count; i++) {
     const RosterEntry& row = g_state_roster_snapshot.entries[i];
+    if (!otaSeenRecently(row.last_us, t, OTA_COHORT_FRESH_US)) continue;
     if (tableFind(g_table, row.mac) >= 0) continue;
     char label[16];
     if (row.id) snprintf(label, sizeof(label), "#%u", row.id);
@@ -2063,6 +2102,7 @@ void setup() {
   rosterInit(g_roster);
   powerTableInit(g_power_table);
   otaStatusInit(g_ota_status);
+  otaCohortInit(g_ota_cohort);
   tableLoad();
   if (!identityProvisioned(g_id))
     Serial.println("  (unprovisioned — set 'role …', 'id <n>', 'pos <x> <y>')");

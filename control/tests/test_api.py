@@ -1190,8 +1190,9 @@ def test_ota_mode_update_round_trips_to_state(managed_client) -> None:
     assert state["ota"]["enabled"] is True
     assert state["ota"]["expected"] == 9
     assert state["ota"]["missing"] == 1
-    assert state["ota"]["ready"] is False
-    assert "missing placed lanterns" in state["ota"]["blocked"]
+    assert state["ota"]["deferred"] == 1
+    assert state["ota"]["ready"] is True
+    assert state["ota"]["blocked"] == []
 
 
 def test_ota_artifact_upload_stages_firmware_metadata(tmp_path, managed_client) -> None:
@@ -1248,7 +1249,7 @@ def test_ota_install_requires_staged_artifact(tmp_path, managed_client) -> None:
     assert response.json()["detail"] == "no firmware staged"
 
 
-def test_ota_install_blocks_when_placed_lantern_is_missing(tmp_path, managed_client) -> None:
+def test_ota_install_updates_online_cohort_and_defers_missing_lantern(tmp_path, managed_client) -> None:
     conductor = MockConductor()
     conductor.set_ota_mode(True)
     client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
@@ -1266,10 +1267,19 @@ def test_ota_install_blocks_when_placed_lantern_is_missing(tmp_path, managed_cli
         {"mac": "A0:B7:65:11:44:91", "label": "#18", "reason": "not seen"}
     ]
     assert state["ota"]["enabled"] is True
-    assert state["ota"]["ready"] is False
-    assert "missing placed lanterns" in state["ota"]["blocked"]
-    assert response.status_code == 400
-    assert response.json()["detail"] == "OTA not ready: missing placed lanterns"
+    assert state["ota"]["ready"] is True
+    assert state["ota"]["ready_count"] == 8
+    assert state["ota"]["deferred"] == 1
+    assert state["ota"]["blocked"] == []
+    assert response.status_code == 202
+    install = wait_for_ota_terminal(client)
+    assert install["complete"] is True
+    assert install["target_count"] == 8
+    assert install["deferred_count"] == 1
+    assert install["deferred"] == [
+        {"mac": "A0:B7:65:11:44:91", "label": "#18"}
+    ]
+    assert {node["mac"] for node in install["nodes"]} == set(install["target_macs"])
 
 
 def test_ota_install_streams_staged_artifact_when_ready(tmp_path, managed_client) -> None:
@@ -1540,8 +1550,6 @@ def test_ota_install_infers_nodes_from_post_reboot_state_when_status_missing(tmp
 
 def test_ota_install_treats_final_ack_timeout_as_verify_after_reboot(tmp_path, managed_client) -> None:
     conductor = FinalAckTimeoutConductor()
-    missing = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
-    missing.status = "alive"
     conductor.set_ota_mode(True)
     client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     firmware = b"\xe9" + bytes(range(255)) * 40
@@ -1559,6 +1567,8 @@ def test_ota_install_treats_final_ack_timeout_as_verify_after_reboot(tmp_path, m
     assert install["error"] is None
     assert install["last_finalize_error"] == "timeout waiting for ota_end ack"
     assert install["message"] == "ota end ack timed out; verifying post-reboot state"
+    assert install["target_count"] == 8
+    assert install["deferred_count"] == 1
     assert {node["source"] for node in install["nodes"]} == {"post_reboot_state"}
     assert {node["offset"] for node in install["nodes"]} == {stage["artifact"]["size"]}
 

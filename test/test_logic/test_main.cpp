@@ -15,6 +15,7 @@
 #include "keepalive.h"
 #include "macaddr.h"
 #include "napsched.h"
+#include "ota_update.h"
 #include "pattern_ids.h"
 #include "pattern_math.h"
 #include "power_table.h"
@@ -894,6 +895,50 @@ void test_ota_status_complete_requires_matching_fresh_complete() {
   TEST_ASSERT_FALSE(otaStatusCompleteForMac(t, a, 1000, 43, 1000, 200));
   TEST_ASSERT_FALSE(otaStatusCompleteForMac(t, b, 1000, 42, 1000, 200));
   TEST_ASSERT_FALSE(otaStatusCompleteForMac(t, a, 1000, 42, 1200, 200));
+}
+
+void test_ota_cohort_freezes_online_targets_and_ignores_offline_rows() {
+  OtaCohort cohort;
+  otaCohortInit(cohort);
+  const uint8_t online[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t offline[6] = {1, 2, 3, 4, 5, 7};
+
+  TEST_ASSERT_TRUE(otaCohortAdd(cohort, online));
+  TEST_ASSERT_EQUAL_UINT8(1, cohort.count);
+  TEST_ASSERT_TRUE(otaCohortContains(cohort, online));
+  TEST_ASSERT_FALSE(otaCohortContains(cohort, offline));
+
+  OtaStatusTable status;
+  otaStatusInit(status);
+  TEST_ASSERT_TRUE(otaStatusUpsert(status, online, OTA_PHASE_COMPLETE,
+                                   OTA_ERR_NONE, 1000, 42, 900));
+  TEST_ASSERT_TRUE(otaCohortComplete(status, cohort, 1000, 42, 1000, 200));
+}
+
+void test_ota_cohort_requires_every_frozen_target_to_complete() {
+  OtaCohort cohort;
+  otaCohortInit(cohort);
+  const uint8_t first[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t second[6] = {1, 2, 3, 4, 5, 7};
+  otaCohortAdd(cohort, first);
+  otaCohortAdd(cohort, second);
+
+  OtaStatusTable status;
+  otaStatusInit(status);
+  otaStatusUpsert(status, first, OTA_PHASE_COMPLETE, OTA_ERR_NONE,
+                  1000, 42, 900);
+  TEST_ASSERT_FALSE(otaCohortComplete(status, cohort, 1000, 42, 1000, 200));
+  otaStatusUpsert(status, second, OTA_PHASE_COMPLETE, OTA_ERR_NONE,
+                  1000, 42, 900);
+  TEST_ASSERT_TRUE(otaCohortComplete(status, cohort, 1000, 42, 1000, 200));
+}
+
+void test_ota_online_freshness_has_explicit_boundary() {
+  TEST_ASSERT_TRUE(otaSeenRecently(900, 1000, 100));
+  TEST_ASSERT_TRUE(otaSeenRecently(1000, 1000, 100));
+  TEST_ASSERT_FALSE(otaSeenRecently(899, 1000, 100));
+  TEST_ASSERT_FALSE(otaSeenRecently(1001, 1000, 100));
+  TEST_ASSERT_FALSE(otaSeenRecently(0, 1000, 100));
 }
 
 // ---- Layout table: authoritative MAC -> (x,y) -------------------------------
@@ -2075,6 +2120,9 @@ int main(int, char**) {
   RUN_TEST(test_ota_expected_chunk_len_uses_full_chunks_until_tail);
   RUN_TEST(test_ota_status_table_upserts_by_mac);
   RUN_TEST(test_ota_status_complete_requires_matching_fresh_complete);
+  RUN_TEST(test_ota_cohort_freezes_online_targets_and_ignores_offline_rows);
+  RUN_TEST(test_ota_cohort_requires_every_frozen_target_to_complete);
+  RUN_TEST(test_ota_online_freshness_has_explicit_boundary);
   RUN_TEST(test_table_set_and_lookup);
   RUN_TEST(test_table_set_updates_in_place);
   RUN_TEST(test_table_remove);

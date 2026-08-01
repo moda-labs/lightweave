@@ -68,6 +68,48 @@ struct OtaStatusTable {
   uint8_t count;
 };
 
+// The performers required to acknowledge one specific OTA install. The
+// conductor freezes this set from fresh, placed roster entries at ota_begin;
+// layout rows that are offline at that moment are deferred to a later run.
+struct OtaCohort {
+  uint8_t macs[OTA_STATUS_MAX][6];
+  uint8_t count;
+};
+
+inline void otaCohortInit(OtaCohort& c) { c.count = 0; }
+
+inline int otaCohortFind(const OtaCohort& c, const uint8_t mac[6]) {
+  for (int i = 0; i < c.count; i++) {
+    bool same = true;
+    for (uint8_t j = 0; j < 6; j++) {
+      if (c.macs[i][j] != mac[j]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) return i;
+  }
+  return -1;
+}
+
+inline bool otaCohortContains(const OtaCohort& c, const uint8_t mac[6]) {
+  return otaCohortFind(c, mac) >= 0;
+}
+
+inline bool otaCohortAdd(OtaCohort& c, const uint8_t mac[6]) {
+  if (otaCohortContains(c, mac)) return true;
+  if (c.count >= OTA_STATUS_MAX) return false;
+  for (uint8_t j = 0; j < 6; j++) c.macs[c.count][j] = mac[j];
+  c.count++;
+  return true;
+}
+
+inline bool otaSeenRecently(int64_t last_us, int64_t now_us,
+                            int64_t max_age_us) {
+  if (last_us <= 0 || now_us < last_us || max_age_us < 0) return false;
+  return now_us - last_us <= max_age_us;
+}
+
 inline void otaStatusInit(OtaStatusTable& t) { t.count = 0; }
 
 inline int otaStatusFind(const OtaStatusTable& t, const uint8_t mac[6]) {
@@ -123,6 +165,22 @@ inline bool otaStatusCompleteForMac(const OtaStatusTable& t,
   if (i < 0) return false;
   return otaStatusEntryComplete(t.entries[i], expected_size, expected_crc32,
                                 now_us, max_age_us);
+}
+
+inline bool otaCohortComplete(const OtaStatusTable& status,
+                              const OtaCohort& cohort,
+                              uint32_t expected_size,
+                              uint32_t expected_crc32,
+                              int64_t now_us,
+                              int64_t max_age_us) {
+  if (cohort.count == 0) return false;
+  for (uint8_t i = 0; i < cohort.count; i++) {
+    if (!otaStatusCompleteForMac(status, cohort.macs[i], expected_size,
+                                 expected_crc32, now_us, max_age_us)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 inline const char* otaPhaseName(uint8_t phase) {

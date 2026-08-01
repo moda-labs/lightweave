@@ -8,11 +8,24 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**142 pass**) is green; control tests (**215 pass**) are green; all four
-device envs (`devkitc` / `firebeetle` / `field-devkitc` /
-`field-firebeetle`) build clean.
+(**145 pass**) is green; control tests (**216 pass**) are green; all three
+device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-07-31): **the first ring-addressable show pattern is
+Latest locally (2026-08-01): **manual OTA now treats the online field as a
+frozen required cohort instead of requiring every layout row to be present.**
+The conductor considers a performer online after a registration within the
+last 30 seconds, snapshots all fresh placed MACs at `ota_begin`, returns that
+target list to the control plane, and requires fresh exact-size/exact-CRC
+completion from every target before rebooting. Offline placed rows are shown as
+deferred and do not block the run; a later manual maintenance run catches them
+up. This is still one field-wide ESP-NOW broadcast, not selected-node or
+opportunistic OTA. The API persists the target/deferred lists and verifies only
+the frozen target set after a final-ack timeout. Hardware rollout is still
+pending; the existing conductor firmware predates cohorts, so the first remote
+upgrade must temporarily narrow and then restore the saved layout table (or use
+a direct USB flash) before later updates gain native partial-online behavior.
+
+Previous latest (2026-07-31): **the first ring-addressable show pattern is
 code-complete and ready for bench tuning.** `FIRE_FLICKER` (`pattern 9`) keeps
 the compact clock+config broadcast but evaluates
 `f(x,y,pixel_index,t)` locally, giving all 16 LEDs a deterministic shared
@@ -36,7 +49,7 @@ roster. Its placement table is also empty, so no OTA was started; the temporary
 field-awake override was restored to off. Power down one conductor before OTA
 so readiness and completion status have one authoritative controller. No
 performers were flashed, and nothing was saved or broadcast. Native tests are 142/142, control
-tests 215/215, and all four firmware environments build. Hardware verification
+tests 215/215, and the then-current firmware environments built. Hardware verification
 still owed: establish the intended conductor/performer identities, flash the
 same build to all bench performers before broadcasting Fire, then tune
 period/texture/color against the actual diffuser and ring orientation.
@@ -217,8 +230,8 @@ and Palette Drift uses period+spatial spread. Same-session review fixes moved
 blocking serial calls off the FastAPI event loop and cleaned WebSocket disconnect
 handling. Previous latest: **review-debt paydown** — the
 host-unreachable logic extracted out of `main.cpp` into pure tested headers
-(`macaddr.h`, `table_wire.h`, `bootplan.h`, `patternBootSafe`), `field-*` build
-envs (`-D HEARTBEAT_LED=0`), and the table rebroadcast stretched 5 s → 60 s
+(`macaddr.h`, `table_wire.h`, `bootplan.h`, `patternBootSafe`), the `field` build
+(`-D HEARTBEAT_LED=0`), and the table rebroadcast stretched 5 s → 60 s
 steady-state with **targeted single-row replies to needy REGISTERs** (the
 initial new-MAC-burst design was replaced the same day after an 8-angle
 adversarial review confirmed three delivery holes in it — see "Self
@@ -263,8 +276,9 @@ Priority order:
 6. **Scale-harden OTA when more boards exist:** manual maintenance OTA and
    same-protocol mixed-firmware recovery are hardware-verified on the 3-board
    bench. The updater retries serial chunk timeouts/NACKs, rejects unsafe resume
-   offsets and wrong-length chunks, waits for maintenance readiness, and verifies
-   every expected placed performer after reboot before declaring success. Defer
+   offsets and wrong-length chunks, freezes the fresh online cohort at begin,
+   reports offline rows as deferred, and verifies every targeted performer after
+   reboot before declaring success. Defer
    explicit per-node chunk ACK/retry until a larger bench/field test shows
    repeated ESP-NOW chunk loss that the current 3x broadcast repetition cannot
    cover.
@@ -311,10 +325,10 @@ pattern persistence → protocol foundation Half 1 & 2 → battery go/no-go + wo
 power measurement):
 - **One firmware image for every node** (`src/main.cpp`); role is a runtime NVS
   value (default performer), set over serial. Build envs: `devkitc`, `firebeetle`,
-  `native`, plus `field-devkitc` / `field-firebeetle` — identical firmware with
+  `native`, plus one canonical cross-board `field` image with
   `-D HEARTBEAT_LED=0` (the onboard blink is invisible inside an opaque lantern,
   burns LED current, and caps every Stage-B nap at 500 ms). Bench flashes keep
-  the heartbeat; flash `field-*` for deployment.
+  the heartbeat; flash `field` for deployment.
 - **Sync:** conductor broadcasts a clock beacon; performers lock an offset and
   render against synced time; **free-run on missed beacon** (no blackout), re-lock
   on return. Verified: `LOCKED`, stable offset ~±100 µs, `gaps=0`.
@@ -855,8 +869,8 @@ within 5 min of serial activity — **hit Enter on a monitor to revive a quiet
 node's diag** (headless nodes no longer burn ~13 ms/s of UART drain).
 
 **Debt PAID 2026-07-04 (the review-debt session):**
-- ✅ **Field build envs** `field-devkitc` / `field-firebeetle` (`extends` the
-  bench envs + `-D HEARTBEAT_LED=0`; see "Build envs" near the top and
+- ✅ **Field build env** `field` (one canonical ESP32 profile +
+  `-D HEARTBEAT_LED=0`; see "Build envs" near the top and
   FLASHING.md's env table).
 - ✅ **Table rebroadcast stretched** 5 s → 60 s steady-state backstop
   (`TABLE_INTERVAL_US`); targeted delivery is a **single-row MSG_TABLE reply
@@ -887,7 +901,7 @@ hold-off to miss). Also fixed from the review: `parseMac` trailing-garbage
 acceptance (empirically confirmed — `forget <EUI-64 paste>` would have
 operated on the wrong lantern), the `role` round-trip resuming a stale table
 schedule (now file-scope `g_next_table_us`, zeroed on role change), FLASHING.md
-missing the field-* envs, and the field envs copy-pasting instead of
+missing the field envs, and the field envs copy-pasting instead of
 `extends`-ing the bench envs.
 
 **Known debt (deliberate, not yet done):**

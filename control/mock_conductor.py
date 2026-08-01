@@ -329,7 +329,14 @@ class MockConductor:
             for item in self._lanterns
             if item.status == "alive" and item.x is not None and item.y is not None
         }
-        return {"ok": True, "message": "ota write started"}
+        if not self._ota_nodes:
+            self._ota_write = None
+            return {"ok": False, "error": "no placed lanterns online"}
+        return {
+            "ok": True,
+            "message": "ota write started",
+            "targets": list(self._ota_nodes),
+        }
 
     def ota_chunk(self, offset: int, data: bytes) -> dict[str, Any]:
         if self._ota_write is None:
@@ -438,18 +445,16 @@ class MockConductor:
         positioned = [item for item in lanterns if item["position"] == "Set" and item["status"] == "alive"]
         firmware_summary = firmware_summary or self._firmware_summary(lanterns, table_rows)
         active = self.ota_started_at is not None
-        missing = max(0, table_rows - len(positioned))
+        deferred = max(0, table_rows - len(positioned))
         blocked: list[str] = []
         if not active:
             blocked.append("not in maintenance mode")
-        if table_rows == 0:
-            blocked.append("no placed lanterns")
-        if missing:
-            blocked.append("missing placed lanterns")
-        firmware_recovery_ready = active and table_rows > 0 and missing == 0
+        if not positioned:
+            blocked.append("no placed lanterns" if table_rows == 0 else "no placed lanterns online")
+        firmware_recovery_ready = active and bool(positioned)
         if not firmware_summary["consistent"] and not firmware_recovery_ready:
             blocked.append("firmware mismatch")
-        ready = active and table_rows > 0 and missing == 0
+        ready = active and bool(positioned)
         timeout_s = max(0, int(OTA_WINDOW_S - (now - self.ota_started_at))) if active else 0
         return {
             "mode": "maintenance" if active else "idle",
@@ -457,7 +462,8 @@ class MockConductor:
             "ready": ready,
             "ready_count": len(positioned),
             "expected": table_rows,
-            "missing": missing,
+            "missing": deferred,
+            "deferred": deferred,
             "firmware_consistent": firmware_summary["consistent"],
             "timeout_s": timeout_s,
             "blocked": blocked,

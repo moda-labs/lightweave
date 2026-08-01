@@ -37,7 +37,7 @@ def test_firmware_mismatch_is_attention() -> None:
     assert snapshot["recovery"]["mismatched"][0]["mac"] == "8C:94:DF:8F:71:50"
 
 
-def test_ota_readiness_requires_maintenance_mode_and_full_present_field() -> None:
+def test_ota_readiness_updates_online_performers_and_defers_missing_rows() -> None:
     conductor = MockConductor()
 
     idle = conductor.snapshot()["ota"]
@@ -48,8 +48,10 @@ def test_ota_readiness_requires_maintenance_mode_and_full_present_field() -> Non
     conductor.set_ota_mode(True)
     missing = conductor.snapshot()["ota"]
     assert missing["mode"] == "maintenance"
-    assert missing["ready"] is False
-    assert "missing placed lanterns" in missing["blocked"]
+    assert missing["ready"] is True
+    assert missing["ready_count"] == 8
+    assert missing["deferred"] == 1
+    assert missing["blocked"] == []
     assert conductor.snapshot()["recovery"]["status"] == "missing_nodes"
 
     replacement = next(item for item in conductor._lanterns if item.mac == "A0:B7:65:11:44:91")
@@ -72,6 +74,21 @@ def test_ota_readiness_requires_maintenance_mode_and_full_present_field() -> Non
     assert recovery_ready["ota"]["ready"] is True
     assert recovery_ready["ota"]["blocked"] == []
     assert recovery_ready["recovery"]["status"] == "mixed_firmware"
+
+
+def test_ota_readiness_blocks_when_no_placed_performer_is_online() -> None:
+    conductor = MockConductor()
+    for lantern in conductor._lanterns:
+        if lantern.x is not None and lantern.y is not None:
+            lantern.status = "missing"
+
+    conductor.set_ota_mode(True)
+    ota = conductor.snapshot()["ota"]
+
+    assert ota["ready"] is False
+    assert ota["ready_count"] == 0
+    assert ota["deferred"] == ota["expected"]
+    assert ota["blocked"] == ["no placed lanterns online"]
 
 
 def test_recovery_summary_reports_failed_ota_node() -> None:

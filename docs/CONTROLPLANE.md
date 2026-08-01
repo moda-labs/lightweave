@@ -452,15 +452,19 @@ position", and table rows not currently registered show as "Not seen".
 ### 8. OTA (Milestone 5)
 
 - Manual maintenance-mode OTA only. No autonomous/opportunistic updates.
-- Field-wide firmware updates only. No selected-node OTA; mixed firmware is a
-  recovery state, not a supported operating mode.
+- Field-wide broadcast only. No operator-selected node OTA. At `ota_begin` the
+  conductor freezes every fresh, placed performer into the required cohort;
+  placed performers that are offline are reported as deferred and catch up in a
+  later manual maintenance run. Mixed firmware remains a recovery state, not a
+  supported show state.
 - Built foundation: REGISTER reports release version + protocol + build id +
   dirty flag, the control-plane state exposes per-node and conductor firmware
   versions, and Operations shows version consistency with linked commits.
 - Built updater: Operations can enter/exit a 15-minute
   maintenance window over the same machine serial protocol; state reports
-  `ota.mode`, readiness count, expected count, missing placed lanterns,
-  firmware consistency, blockers, and timeout.
+  `ota.mode`, online readiness count, total placed count, deferred count,
+  firmware consistency, blockers, and timeout. At least one placed performer
+  must be online; offline placed rows no longer block the online cohort.
 - Firmware artifacts are staged through the API/UI, persisted under the
   configured data directory's `ota/` store (`.control_ota/` in development),
   validated for `.bin` extension, size, CRC32, and sha256, and chunked at 128
@@ -473,7 +477,8 @@ position", and table rows not currently registered show as "Not seen".
   immediately for the lifetime of the reservation. The worker sends `ota_begin`,
   then every `ota_chunk`, then
   `ota_end` over USB serial to the conductor. The conductor writes its own OTA
-  partition and broadcasts the same begin/chunk/end packets over ESP-NOW. Each
+  partition, returns its frozen target MACs to the control plane, and broadcasts
+  the same begin/chunk/end packets over ESP-NOW. Each
   performer writes the image into its own OTA partition and reboots after a
   successful size/CRC/end check. The UI polls install progress and shows chunk
   counts, elapsed time, transfer rate, and ETA independently of the start request.
@@ -532,18 +537,18 @@ position", and table rows not currently registered show as "Not seen".
   firmware, and failed OTA nodes into one Operations card. A failed install from
   `/api/operations/ota-install` also drives that card so the operator sees the
   reset-and-rerun path immediately. Same-protocol mixed firmware is allowed to
-  enter maintenance install as its recovery action once all placed nodes are
-  present. A 2026-07-06 recovery dry-run found that old performer firmware
+  enter maintenance install as its recovery action when at least one placed
+  performer is online. A 2026-07-06 recovery dry-run found that old performer firmware
   aborted on repeated already-written OTA chunks; the fixed receiver now treats
   those duplicates as no-ops and OTA maintenance keeps performer radios awake.
   A subsequent fixed-receiver recovery rerun exposed the unsafe partial-write
-  case above and a false-success API path; the API now requires all expected
-  placed performers to report complete or verify from post-reboot field firmware
-  consistency before returning success. The latest mixed-firmware recovery run
+  case above and a false-success API path; the API now requires every performer
+  in the frozen online cohort to report complete or verify from post-reboot
+  firmware state before returning success. The latest mixed-firmware recovery run
   intentionally restored performer #1 from `0.3.0-mismatch` to `0.3.0`.
-  Missing placed lanterns now block install while listing the missing lantern in
-  Recovery, and post-reboot verification failures synthesize per-node failed OTA
-  rows for any expected performer that did not verify. Remaining reliability work
+  Missing placed lanterns stay listed in Recovery but remain deferred instead of
+  blocking the online cohort, and post-reboot verification failures synthesize
+  per-node failed OTA rows for any targeted performer that did not verify. Remaining reliability work
   before trusting a 60-node deployment: decide whether field scale needs explicit
   performer ACK/retry beyond the current status reporting.
 

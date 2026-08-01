@@ -868,17 +868,20 @@ function renderOta() {
   const installing = Boolean(otaInstall?.running);
   const expected = Number(ota.expected ?? state?.summary?.total ?? 0);
   const readyCount = Number(ota.ready_count ?? 0);
+  const deferred = Number(ota.deferred ?? ota.missing ?? Math.max(0, expected - readyCount));
   const timeout = Number(ota.timeout_s ?? 0);
   const blockers = Array.isArray(ota.blocked) ? ota.blocked : [];
   $("#ota-mode").textContent = active ? "maintenance" : "idle";
   $("#ota-mode").className = `chip ${active ? "sync" : ""}`;
-  $("#ota-readiness").textContent = ready ? `${readyCount} / ${expected} ready` : `${readyCount} / ${expected} ready`;
+  $("#ota-readiness").textContent = `${readyCount} online · ${deferred} deferred`;
   $("#ota-readiness").className = `ops-value ${ready ? "ok" : "warn"}`;
   $("#ota-timeout").textContent = active ? `${Math.max(0, Math.floor(timeout / 60))}m ${timeout % 60}s` : "closed";
   $("#ota-timeout").className = `ops-value ${active ? "ok" : ""}`;
   $("#ota-blockers").textContent = blockers.length
     ? `Blocked: ${blockers.join(", ")}.`
-    : "Ready for the next firmware upload step.";
+    : deferred > 0
+      ? "Ready. Offline lanterns will stay deferred for a later maintenance run."
+      : "Ready for the next firmware upload step.";
   $("#ota-artifact").innerHTML = otaArtifact
     ? `Staged ${escapeHtml(otaArtifact.filename)} · ${formatBytes(otaArtifact.size)} · ${otaArtifact.chunks} chunks · sha256 <span class="mono">${escapeHtml(shortHash(otaArtifact.sha256))}</span>`
     : "No firmware staged.";
@@ -928,6 +931,8 @@ function renderOtaProgress() {
   const running = Boolean(otaInstall?.running);
   const complete = Boolean(otaInstall?.complete);
   const error = otaInstall?.error;
+  const targetCount = Number(otaInstall?.target_count || 0);
+  const deferredCount = Number(otaInstall?.deferred_count || 0);
   const show = running || complete || error;
   progress.hidden = !show;
   if (!show) return;
@@ -940,7 +945,7 @@ function renderOtaProgress() {
   const label = error
     ? `Install failed: ${error}`
     : complete
-      ? "Install complete; boards rebooting"
+      ? `Install complete for ${targetCount || "online"} performer${targetCount === 1 ? "" : "s"}; ${deferredCount} deferred`
       : `Installing ${otaInstall?.filename || "firmware"}`;
   $("#ota-progress-label").textContent = label;
   $("#ota-progress-count").textContent = total > 0

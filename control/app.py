@@ -595,13 +595,9 @@ def create_app(
         ota = state.get("ota") or {}
         if ota.get("ready") is True:
             return True
-        recovery = state.get("recovery") or recovery_summary(state)
-        if recovery.get("status") not in {"mixed_firmware", "ota_failed"}:
-            return False
         return (
             ota.get("enabled") is True
-            and int(ota.get("expected") or 0) > 0
-            and int(ota.get("missing") or 0) == 0
+            and int(ota.get("ready_count") or 0) > 0
         )
 
     async def conductor_call(method: str, *args: Any, ota_internal: bool = False) -> Any:
@@ -702,34 +698,47 @@ def create_app(
                 app.state.calibration_previous_pattern = None
             return ack
 
-    async def infer_ota_complete_nodes(size: int, crc32: int) -> list[dict[str, Any]]:
+    async def infer_ota_complete_nodes(
+        size: int,
+        crc32: int,
+        expected_macs: set[str],
+    ) -> list[dict[str, Any]]:
+        if not expected_macs:
+            return []
         for _ in range(4):
             await asyncio.sleep(3)
             try:
                 state = await conductor_call("snapshot", ota_internal=True)
             except SerialProtocolError:
                 continue
-            summary = state.get("summary") or {}
-            firmware = summary.get("firmware") or {}
-            if summary.get("alive") != summary.get("total"):
-                continue
-            if firmware.get("consistent") is not True:
-                continue
+            conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
             nodes = []
             for lantern in state.get("lanterns") or []:
-                if lantern.get("status") != "alive" or lantern.get("position") != "Set":
+                mac = str(lantern.get("mac") or "")
+                if mac not in expected_macs or lantern.get("status") != "alive":
+                    continue
+                performer_firmware = lantern.get("firmware") or {}
+                comparable = ("version", "proto", "build_id", "dirty")
+                if any(performer_firmware.get(key) != conductor_firmware.get(key) for key in comparable):
                     continue
                 nodes.append({
-                    "mac": lantern.get("mac"),
+                    "mac": mac,
                     "phase": "complete",
                     "error": "none",
                     "offset": size,
                     "crc32": crc32,
                     "source": "post_reboot_state",
                 })
-            if nodes:
+            if {str(node["mac"]) for node in nodes} == expected_macs:
                 return nodes
         return []
+
+    def placed_ota_lanterns(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {
+            str(lantern.get("mac")): lantern
+            for lantern in state.get("lanterns") or []
+            if lantern.get("position") == "Set" and lantern.get("mac")
+        }
 
     def expected_ota_lanterns(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
         return {
@@ -1738,7 +1747,11 @@ def create_app(
     async def get_ota_install() -> dict[str, Any]:
         install = app.state.ota_install
         if install.get("complete") is True and not install.get("nodes") and install.get("size"):
-            nodes = await infer_ota_complete_nodes(int(install["size"]), int(install.get("crc32") or 0))
+            nodes = await infer_ota_complete_nodes(
+                int(install["size"]),
+                int(install.get("crc32") or 0),
+                {str(mac) for mac in install.get("target_macs") or []},
+            )
             if nodes:
                 install.update({"nodes": nodes})
         return {"install": ota_install_progress(app.state.ota_install)}
@@ -1748,7 +1761,9 @@ def create_app(
         state: dict[str, Any],
         data: bytes,
     ) -> dict[str, Any]:
-        expected_lanterns = expected_ota_lanterns(state)
+        preflight_lanterns = expected_ota_lanterns(state)
+        placed_lanterns = placed_ota_lanterns(state)
+        expected_lanterns = dict(preflight_lanterns)
         expected_macs = set(expected_lanterns)
         await wait_for_maintenance_settle(state)
 
@@ -1760,6 +1775,34 @@ def create_app(
                 if not ack["ok"]:
                     app.state.ota_install.update({"running": False, "error": ack["error"]})
                     raise HTTPException(status_code=400, detail=ack["error"])
+                reported_targets = [
+                    str(mac)
+                    for mac in ack.get("targets") or []
+                    if str(mac) in placed_lanterns
+                ]
+                expected_macs = set(reported_targets) or set(preflight_lanterns)
+                if not expected_macs:
+                    error = "no placed lanterns online"
+                    app.state.ota_install.update({"running": False, "error": error})
+                    raise HTTPException(status_code=400, detail=error)
+                expected_lanterns = {
+                    mac: placed_lanterns.get(mac, {"mac": mac, "label": mac})
+                    for mac in expected_macs
+                }
+                deferred = [
+                    {
+                        "mac": mac,
+                        "label": lantern.get("label") or mac,
+                    }
+                    for mac, lantern in sorted(placed_lanterns.items())
+                    if mac not in expected_macs
+                ]
+                app.state.ota_install.update({
+                    "target_macs": sorted(expected_macs),
+                    "target_count": len(expected_macs),
+                    "deferred": deferred,
+                    "deferred_count": len(deferred),
+                })
                 offset = 0
                 while offset < len(data):
                     chunk = data[offset : offset + artifact.chunk_size]
@@ -1898,7 +1941,11 @@ def create_app(
             if node.get("phase") == "complete" and node.get("mac")
         }
         if not expected_macs or not expected_macs.issubset(completed_macs):
-            inferred_nodes = await infer_ota_complete_nodes(artifact.size, artifact.crc32)
+            inferred_nodes = await infer_ota_complete_nodes(
+                artifact.size,
+                artifact.crc32,
+                expected_macs,
+            )
             if inferred_nodes:
                 nodes = inferred_nodes
         verified_macs = {
