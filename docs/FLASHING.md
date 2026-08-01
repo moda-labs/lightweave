@@ -250,15 +250,22 @@ If GitHub is temporarily unavailable it retains the last verified cache.
 After a release is promoted:
 
 ```bash
-python3 scripts/firebeetle_autoflash.py install
+python3 scripts/firebeetle_autoflash.py install --factory
 tail -f ~/Library/Logs/lightweave-firebeetle-autoflash.log
 ```
+
+`--factory` is the explicit authorization to erase a previously unseen board
+that still has no valid Lightweave identity after a non-destructive ROM reset.
+Omit it for an update-only station; unrecognized hardware then fails closed
+without any flash write. Before a factory erase, the watcher durably records the
+ROM MAC, so an interrupted write can retry without erasing that board again.
 
 Plug FireBeetles in one at a time with a direct data cable. The watcher accepts
 the WCH `1A86:7522` port, confirms ESP32-D0WD-V3/40 MHz/4 MB through the ROM,
 skips the current clean build, preserves Lightweave NVS, and full-erases only a
-board with no valid Lightweave `info` response. It verifies the production build
-and preserved role/ID/position after flashing.
+previously unseen board in explicit factory mode after both normal and post-reset
+`info` attempts fail. It verifies the production build and preserved
+role/ID/position after flashing.
 
 The USB/chip signature is a strong fleet check, not a unique board-model ID; do
 not attach unrelated CH340 ESP32 hardware while enabled. A failure is retried

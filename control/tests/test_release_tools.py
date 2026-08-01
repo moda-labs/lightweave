@@ -99,10 +99,124 @@ def test_autoflash_erases_only_unrecognized_firmware_and_skips_approved_clean_bu
         "PERFORMER", 0, "C0:CD:D6:C8:03:E0", 0.0, 0.0, "0.4.0", 7, "abcdef12", True
     )
 
-    assert autoflash.should_erase(None) is True
-    assert autoflash.should_erase(current) is False
+    assert autoflash.should_erase(None, known_device=False, factory_authorized=False) is False
+    assert autoflash.should_erase(None, known_device=False, factory_authorized=True) is True
+    assert autoflash.should_erase(None, known_device=True, factory_authorized=True) is False
+    assert autoflash.should_erase(
+        current, known_device=False, factory_authorized=True
+    ) is False
     assert autoflash.should_skip(current, manifest) is True
     assert autoflash.should_skip(dirty, manifest) is False
+
+
+@pytest.mark.parametrize(
+    ("wakes_after_probe", "factory_authorized", "expected_erase"),
+    [(True, False, False), (False, True, True)],
+)
+def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wakes_after_probe: bool,
+    factory_authorized: bool,
+    expected_erase: bool,
+) -> None:
+    manifest = {"commit": "a" * 40}
+    prior = autoflash.DeviceInfo(
+        "PERFORMER", 4, "C0:CD:D6:C8:03:E0", 0.3, 0.45, "0.3.0", 7, "b" * 8, False
+    )
+    flashed = autoflash.DeviceInfo(
+        "PERFORMER", 4, "C0:CD:D6:C8:03:E0", 0.3, 0.45, "0.4.0", 7, "a" * 8, False
+    )
+    responses = iter([None, prior if wakes_after_probe else None, flashed])
+    erase_decisions = []
+
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(
+        autoflash,
+        "probe_board",
+        lambda _port: {"mac": "C0:CD:D6:C8:03:E0"},
+    )
+    monkeypatch.setattr(autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []})
+    monkeypatch.setattr(
+        autoflash,
+        "flash_board",
+        lambda _port, _plan, _work, erase: erase_decisions.append(erase),
+    )
+    monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
+
+    result = autoflash.process_port(
+        "/dev/cu.usbserial-test",
+        manifest,
+        tmp_path / "bundle.zip",
+        tmp_path / "work",
+        device_registry=tmp_path / "devices.json",
+        factory_authorized=factory_authorized,
+    )
+
+    assert erase_decisions == [expected_erase]
+    assert "role/position verified" in result
+
+
+def test_autoflash_unrecognized_board_fails_closed_without_factory_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        autoflash,
+        "probe_board",
+        lambda _port: {"mac": "C0:CD:D6:C8:03:E0"},
+    )
+    monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
+    flashed = []
+    monkeypatch.setattr(autoflash, "flash_board", lambda *_args, **_kwargs: flashed.append(True))
+
+    with pytest.raises(RuntimeError, match="explicit factory authorization"):
+        autoflash.process_port(
+            "/dev/cu.usbserial-test",
+            {"commit": "a" * 40},
+            tmp_path / "bundle.zip",
+            tmp_path / "work",
+            device_registry=tmp_path / "devices.json",
+            factory_authorized=False,
+        )
+
+    assert flashed == []
+    assert not (tmp_path / "devices.json").exists()
+
+
+def test_autoflash_remembers_rom_mac_before_factory_mutation_and_never_reerases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "devices.json"
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        autoflash,
+        "probe_board",
+        lambda _port: {"mac": "C0:CD:D6:C8:03:E0"},
+    )
+    monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []})
+
+    erase_decisions = []
+
+    def fail_after_record(_port, _plan, _work, erase):
+        erase_decisions.append(erase)
+        assert autoflash.load_known_devices(registry) == {"C0:CD:D6:C8:03:E0"}
+        raise RuntimeError("simulated interrupted flash")
+
+    monkeypatch.setattr(autoflash, "flash_board", fail_after_record)
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="interrupted flash"):
+            autoflash.process_port(
+                "/dev/cu.usbserial-test",
+                {"commit": "a" * 40},
+                tmp_path / "bundle.zip",
+                tmp_path / "work",
+                device_registry=registry,
+                factory_authorized=True,
+            )
+
+    assert erase_decisions == [True, False]
 
 
 def test_autoflash_reuses_only_hash_verified_cached_bundle(tmp_path: Path) -> None:
@@ -156,13 +270,46 @@ def test_autoflash_refreshes_only_canonical_hash_pinned_release(
         manifest_url: manifest_data,
         manifest["serial_flash"]["url"]: bundle_data,
     }
-    monkeypatch.setattr(autoflash, "_download", lambda url, _limit: downloads[url])
+    requested = []
+
+    def download(url, _limit):
+        requested.append(url)
+        return downloads[url]
+
+    monkeypatch.setattr(autoflash, "_download", download)
 
     loaded, bundle_path = autoflash.refresh_artifact(channel_url, tmp_path / "cache")
 
     assert loaded["commit"] == "a" * 40
     assert bundle_path.read_bytes() == bundle_data
     assert autoflash.load_cached_artifact(tmp_path / "cache") == (loaded, bundle_path)
+    assert autoflash.refresh_artifact(channel_url, tmp_path / "cache") == (loaded, bundle_path)
+    assert requested == [
+        channel_url,
+        manifest_url,
+        manifest["serial_flash"]["url"],
+        channel_url,
+    ]
+
+    bad_channel = json.loads(channel_data)
+    bad_channel["manifest_url"] = "https://example.com/not-canonical.json"
+    downloads[channel_url] = json.dumps(bad_channel).encode()
+    with pytest.raises(ValueError, match="manifest URL is not canonical"):
+        autoflash.refresh_artifact(channel_url, tmp_path / "cache")
+
+
+def test_autoflash_uses_stable_homebrew_platformio_interpreter(tmp_path: Path) -> None:
+    prefix = tmp_path / "homebrew"
+    versioned = prefix / "Cellar/platformio/6.1.19/libexec/bin/python"
+    versioned.parent.mkdir(parents=True)
+    versioned.write_text("")
+    stable = prefix / "opt/platformio/libexec/bin/python"
+    stable.parent.mkdir(parents=True)
+    stable.symlink_to(versioned)
+    pio = tmp_path / "pio"
+    pio.write_text(f"#!{versioned}\n")
+
+    assert autoflash.stable_pio_python(pio) == stable
 
 
 def test_autoflash_honors_disabled_production_channel(

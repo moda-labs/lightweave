@@ -8,6 +8,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,7 @@ FIRMWARE_RE = re.compile(
 )
 SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+MAC_RE = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
 
 
 def now() -> str:
@@ -104,8 +106,13 @@ def approved_build(manifest: dict[str, Any]) -> str:
     return commit[:8]
 
 
-def should_erase(info: DeviceInfo | None) -> bool:
-    return info is None
+def should_erase(
+    info: DeviceInfo | None,
+    *,
+    known_device: bool,
+    factory_authorized: bool,
+) -> bool:
+    return info is None and not known_device and factory_authorized
 
 
 def should_skip(info: DeviceInfo | None, manifest: dict[str, Any]) -> bool:
@@ -180,9 +187,45 @@ def _validate_manifest(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.part")
-    temporary.write_bytes(data)
+    with temporary.open("wb") as output:
+        output.write(data)
+        output.flush()
+        os.fsync(output.fileno())
     os.replace(temporary, path)
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def load_known_devices(path: Path) -> set[str]:
+    if not path.is_file():
+        return set()
+    document = _json(path.read_bytes(), "known-device registry")
+    if set(document) != {"schema_version", "macs"} or document["schema_version"] != 1:
+        raise ValueError("known-device registry is invalid")
+    macs = document["macs"]
+    if (
+        not isinstance(macs, list)
+        or any(not isinstance(mac, str) or not MAC_RE.fullmatch(mac) for mac in macs)
+        or len(macs) != len(set(macs))
+    ):
+        raise ValueError("known-device registry MACs are invalid")
+    return set(macs)
+
+
+def remember_device(path: Path, mac: str) -> None:
+    if not MAC_RE.fullmatch(mac):
+        raise ValueError("cannot remember an invalid ROM MAC")
+    macs = load_known_devices(path)
+    if mac in macs:
+        return
+    macs.add(mac)
+    document = {"schema_version": 1, "macs": sorted(macs)}
+    _write_atomic(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
 
 
 def refresh_artifact(channel_url: str, cache: Path) -> tuple[dict[str, Any], Path] | None:
@@ -190,6 +233,20 @@ def refresh_artifact(channel_url: str, cache: Path) -> tuple[dict[str, Any], Pat
     _validate_channel(channel)
     if not channel["enabled"]:
         return None
+    try:
+        cached = load_cached_artifact(cache)
+    except (OSError, ValueError):
+        cached = None
+    if cached:
+        cached_manifest = cache / cached[0]["release"] / "lightweave-release.json"
+        if hashlib.sha256(cached_manifest.read_bytes()).hexdigest() == channel["manifest_sha256"]:
+            expected_manifest_url = (
+                "https://github.com/underminedsk/lightweave/releases/download/"
+                f"{cached[0]['release']}/lightweave-release.json"
+            )
+            if channel["manifest_url"] != expected_manifest_url:
+                raise ValueError("production channel manifest URL is not canonical")
+            return cached
     manifest_url = str(channel["manifest_url"])
     manifest_bytes = _download(manifest_url, 128 * 1024)
     if hashlib.sha256(manifest_bytes).hexdigest() != channel.get("manifest_sha256"):
@@ -348,19 +405,53 @@ def preserves_identity(before: DeviceInfo, after: DeviceInfo) -> bool:
     )
 
 
-def process_port(port: str, manifest: dict[str, Any], bundle: Path, work: Path) -> str:
+def process_port(
+    port: str,
+    manifest: dict[str, Any],
+    bundle: Path,
+    work: Path,
+    *,
+    device_registry: Path,
+    factory_authorized: bool,
+) -> str:
+    known_devices = load_known_devices(device_registry)
     before = read_info(port)
     probe = probe_board(port)
+    if before is None:
+        # A valid field node may be in daytime deep sleep and unable to answer
+        # until esptool's non-destructive ROM probe resets it into a cold boot.
+        time.sleep(1.5)
+        before = read_info(port, 5.0)
     if before and before.mac != probe["mac"]:
         raise RuntimeError("serial identity and ROM MAC disagree")
+    known_device = probe["mac"] in known_devices
+    if before is None and not known_device and not factory_authorized:
+        raise RuntimeError(
+            "device is not recognized; not flashing without explicit factory authorization"
+        )
+    if before is not None or factory_authorized:
+        # Commit the ROM MAC before any mutation. If a write is interrupted,
+        # reconnecting the same board can retry without another destructive erase.
+        remember_device(device_registry, probe["mac"])
     if should_skip(before, manifest):
         return f"{probe['mac']} already runs approved build {approved_build(manifest)}"
     plan = extract_bundle(bundle, work / probe["mac"].replace(":", ""))
-    flash_board(port, plan, work / probe["mac"].replace(":", ""), should_erase(before))
+    flash_board(
+        port,
+        plan,
+        work / probe["mac"].replace(":", ""),
+        should_erase(
+            before,
+            known_device=known_device,
+            factory_authorized=factory_authorized,
+        ),
+    )
     time.sleep(1.5)
     after = read_info(port, 5.0)
     if not after or after.build != approved_build(manifest) or after.dirty:
         raise RuntimeError("post-flash firmware identity did not match the production release")
+    if after.mac != probe["mac"]:
+        raise RuntimeError("post-flash firmware and ROM MAC disagree")
     if before and not preserves_identity(before, after):
         raise RuntimeError("post-flash NVS identity/position changed")
     return f"{after.mac} flashed build {after.build}; role/position verified"
@@ -406,12 +497,43 @@ def watch(args: argparse.Namespace) -> int:
                 log(f"{port}: no approved production artifact; not flashing")
                 continue
             try:
-                result = process_port(port, approved[0], approved[1], state / "work")
+                result = process_port(
+                    port,
+                    approved[0],
+                    approved[1],
+                    state / "work",
+                    device_registry=state / "devices.json",
+                    factory_authorized=args.factory,
+                )
                 log(f"{port}: {result}")
             except Exception as error:
                 log(f"{port}: FAILED: {error}")
         seen = current
         time.sleep(args.interval)
+
+
+def stable_pio_python(pio: Path) -> Path:
+    parts = shlex.split(pio.read_text(encoding="utf-8").splitlines()[0].removeprefix("#!"))
+    if not parts:
+        raise RuntimeError("cannot determine PlatformIO Python interpreter")
+    if parts[0] == "/usr/bin/env":
+        if len(parts) != 2 or not shutil.which(parts[1]):
+            raise RuntimeError("cannot resolve PlatformIO Python interpreter")
+        interpreter = Path(shutil.which(parts[1]) or "")
+    elif len(parts) == 1:
+        interpreter = Path(parts[0])
+    else:
+        raise RuntimeError("cannot determine PlatformIO Python interpreter")
+    path_parts = interpreter.parts
+    if "Cellar" in path_parts:
+        cellar = path_parts.index("Cellar")
+        if len(path_parts) > cellar + 1 and path_parts[cellar + 1] == "platformio":
+            stable = Path(*path_parts[:cellar]) / "opt/platformio/libexec/bin/python"
+            if stable.is_file():
+                interpreter = stable
+    if not interpreter.is_file():
+        raise RuntimeError("PlatformIO Python interpreter is unavailable")
+    return interpreter
 
 
 def install(args: argparse.Namespace) -> int:
@@ -424,17 +546,18 @@ def install(args: argparse.Namespace) -> int:
     pio = Path(shutil.which("pio") or "")
     if not pio.is_file():
         raise RuntimeError("pio is not installed")
-    first = pio.read_text(encoding="utf-8").splitlines()[0]
-    if not first.startswith("#!"):
-        raise RuntimeError("cannot determine PlatformIO Python interpreter")
-    python = first[2:]
+    python = stable_pio_python(pio)
+    subprocess.run([str(python), "-c", "import serial"], check=True)
     logs = home / "Library/Logs"
     logs.mkdir(parents=True, exist_ok=True)
     plist = home / f"Library/LaunchAgents/{LABEL}.plist"
     plist.parent.mkdir(parents=True, exist_ok=True)
+    program_arguments = [str(python), str(installed), "watch", "--channel", args.channel]
+    if args.factory:
+        program_arguments.append("--factory")
     document = {
         "Label": LABEL,
-        "ProgramArguments": [python, str(installed), "watch", "--channel", args.channel],
+        "ProgramArguments": program_arguments,
         "RunAtLoad": True,
         "KeepAlive": True,
         "ThrottleInterval": 5,
@@ -465,9 +588,19 @@ def main() -> int:
     watcher.add_argument("--state", default="~/Library/Application Support/Lightweave/autoflash")
     watcher.add_argument("--interval", type=float, default=1.0)
     watcher.add_argument("--refresh", type=float, default=300.0)
+    watcher.add_argument(
+        "--factory",
+        action="store_true",
+        help="authorize one first erase for previously unseen, unrecognized boards",
+    )
     watcher.set_defaults(function=watch)
     installer = sub.add_parser("install")
     installer.add_argument("--channel", default=DEFAULT_CHANNEL)
+    installer.add_argument(
+        "--factory",
+        action="store_true",
+        help="install a factory station allowed to erase new, unrecognized boards",
+    )
     installer.set_defaults(function=install)
     sub.add_parser("uninstall").set_defaults(function=uninstall)
     args = parser.parse_args()
