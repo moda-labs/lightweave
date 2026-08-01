@@ -16,7 +16,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=CONTROL_DEPLOYMENT_RECORD=/var/lib/lightweave-gitops/current.json
 Environment=CONTROL_OTA_LOCK=/var/lib/lightweave-gitops/firmware-ota.lock
 Environment=CONTROL_RELEASE_COMMIT_FILE=/var/lib/lightweave-gitops/running-commit
-ExecStart=/opt/lightweave/.venv/bin/uvicorn control.app:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
+ExecStart=/opt/lightweave/.venv/bin/python -m uvicorn control.app:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=180

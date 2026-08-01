@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**145 pass**) is green; control tests (**255 pass**) are green; all three
+(**145 pass**) is green; control tests (**263 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest locally (2026-08-01): **pull-based Pi releases and separate deployed-change
@@ -17,7 +17,8 @@ selects one hash-pinned immutable release manifest; each Pi polls outbound,
 verifies the repository/tag/commit and firmware hashes, backs up state, deploys
 the control plane into a fresh commit-specific Python environment, health-checks
 it, and atomically restores the untouched prior environment/code/record on
-failure. Root-owned release state, hash-locked application and release-tooling
+failure or on the next timer run after an interrupted deployment. Root-owned
+durable rollback state, hash-locked application and release-tooling
 dependencies, exact-commit health checks, and a shared OTA/deployment lock close
 the privileged update boundary. A
 successful deployment stages the release firmware without starting OTA, and a

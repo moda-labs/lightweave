@@ -133,8 +133,9 @@ class FakeReconciler(gitops.GitOpsReconciler):
         self.owned_paths = []
         self.dirty = False
         old_venv = self._venv_path(self.commit)
-        old_venv.mkdir(parents=True)
-        self._venv_link().symlink_to(old_venv)
+        old_venv.mkdir(parents=True, exist_ok=True)
+        if not self._venv_link().exists():
+            self._venv_link().symlink_to(old_venv)
 
     def _venv_root(self):
         return self.config.deployment_dir / "fake-venvs"
@@ -221,6 +222,10 @@ def test_current_release_is_a_noop_only_when_staged_firmware_is_verified(tmp_pat
     firmware_path = write_current_record(configuration)
     reconciler = FakeReconciler(configuration, fake_responses(configuration))
     reconciler.commit = "a" * 40
+    target_venv = reconciler._venv_path("a" * 40)
+    target_venv.mkdir(parents=True)
+    reconciler._switch_python(target_venv)
+    reconciler._write_running_commit("a" * 40)
 
     assert reconciler.reconcile() == {
         "status": "current",
@@ -228,6 +233,7 @@ def test_current_release_is_a_noop_only_when_staged_firmware_is_verified(tmp_pat
         "commit": "a" * 40,
     }
     assert not any(command[:3] == ("git", "checkout", "--detach") for command in reconciler.commands)
+    assert ("healthcheck", "a" * 40) in reconciler.commands
 
     firmware_path.unlink()
     result = reconciler.reconcile()
@@ -325,6 +331,25 @@ def test_active_ota_defers_deployment_before_backup_or_service_stop(tmp_path: Pa
     assert ("systemctl", "stop", "lightweave-control.service") not in reconciler.commands
 
 
+def test_active_ota_defers_interrupted_deployment_recovery(tmp_path: Path) -> None:
+    configuration = config(tmp_path)
+    reconciler = FakeReconciler(configuration, fake_responses(configuration))
+    reconciler._write_transaction(
+        "b" * 40,
+        reconciler._venv_path("b" * 40),
+        None,
+        reconciler._snapshot_runtime(),
+    )
+
+    with configuration.ota_lock_path.open("r") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = reconciler.reconcile()
+
+    assert result == {"status": "deferred", "reason": "ota_active", "recovery": True}
+    assert reconciler._transaction_path().exists()
+    assert ("systemctl", "stop", "lightweave-control.service") not in reconciler.commands
+
+
 def test_healthcheck_requires_the_expected_release_commit(tmp_path: Path) -> None:
     configuration = config(tmp_path)
     reconciler = gitops.GitOpsReconciler(
@@ -368,6 +393,22 @@ def test_late_failure_restores_the_previous_gitops_runtime(tmp_path: Path) -> No
     assert configuration.stable_script.read_bytes() == b"old runtime"
 
 
+class TransactionOrderReconciler(FakeReconciler):
+    def _git(self, *args, timeout=120):
+        if args[:2] == ("checkout", "--detach") and args[2] == "a" * 40:
+            assert self._transaction_path().is_file()
+        super()._git(*args, timeout=timeout)
+
+
+def test_rollback_transaction_is_durable_before_checkout(tmp_path: Path) -> None:
+    configuration = config(tmp_path)
+    reconciler = TransactionOrderReconciler(
+        configuration, fake_responses(configuration)
+    )
+
+    assert reconciler.reconcile()["status"] == "deployed"
+
+
 class StopFailingReconciler(FakeReconciler):
     def __init__(self, configuration, responses):
         super().__init__(configuration, responses)
@@ -397,11 +438,23 @@ def test_initial_stop_failure_attempts_a_full_service_recovery(tmp_path: Path) -
 def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> None:
     installer = (SCRIPT.parent / "install-gitops.sh").read_text(encoding="utf-8")
     control_unit = (SCRIPT.parent / "lightweave-control.service").read_text(encoding="utf-8")
+    runbook = (SCRIPT.parent / "README.md").read_text(encoding="utf-8")
 
     assert "install -d -o root -g root -m 0700 /var/backups/lightweave" in installer
     assert 'release_venv="$repo/.venvs/$running_commit"' in installer
     assert 'mv -Tf "$repo/.venv.new" "$repo/.venv"' in installer
+    assert "systemctl restart lightweave-control.service" in installer
+    assert 'if [ "$health_commit" != "$running_commit" ]' in installer
     assert "ReadOnlyPaths=-/var/lib/lightweave-gitops" in control_unit
+    assert "ExecStart=/opt/lightweave/.venv/bin/python -m uvicorn" in control_unit
+    emergency_upgrade = runbook.split("The commands below are retained", 1)[1].split(
+        "## 13. Emergency manual rollback", 1
+    )[0]
+    emergency_rollback = runbook.split("## 13. Emergency manual rollback", 1)[1]
+    assert '"/opt/lightweave/.venvs/$new_commit/bin/python" -m pip install' in emergency_upgrade
+    assert "running-commit.new" in emergency_upgrade
+    assert "pip install" not in emergency_rollback
+    assert '"/opt/lightweave/.venvs/$previous_commit"' in emergency_rollback
 
 
 class EnvironmentBuildingReconciler(FakeReconciler):
@@ -432,10 +485,63 @@ def test_python_environment_is_built_fresh_and_reused_only_after_completion(
     install = next(command for command in reconciler.commands if "install" in command)
     assert "--require-hashes" in install
     assert "--only-binary=:all:" in install
-    venv_commands = [command for command in reconciler.commands if command[1:3] == ("-m", "venv")]
+    venv_commands = [
+        command for command in reconciler.commands if command[1:3] == ("-m", "venv")
+    ]
     assert len(venv_commands) == 1
 
     reconciler._install_python(commit)
 
-    venv_commands = [command for command in reconciler.commands if command[1:3] == ("-m", "venv")]
+    venv_commands = [
+        command for command in reconciler.commands if command[1:3] == ("-m", "venv")
+    ]
     assert len(venv_commands) == 1
+
+
+@pytest.mark.parametrize("boundary", [1, 2, 3, 4, 5])
+def test_interrupted_deployment_recovers_durable_previous_state(
+    tmp_path: Path, boundary: int
+) -> None:
+    configuration = config(tmp_path)
+    reconciler = FakeReconciler(configuration, fake_responses(configuration))
+    previous_commit = "b" * 40
+    previous_venv = reconciler._venv_path(previous_commit)
+    previous_record = b'{"old":"record"}\n'
+    configuration.stable_script.parent.mkdir(parents=True)
+    configuration.systemd_dir.mkdir(parents=True)
+    configuration.stable_script.write_bytes(b"old runtime")
+    for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+        (configuration.systemd_dir / name).write_bytes(b"old unit")
+    runtime_snapshots = reconciler._snapshot_runtime()
+    reconciler._write_transaction(
+        previous_commit,
+        previous_venv,
+        previous_record,
+        runtime_snapshots,
+    )
+    reconciler.commit = "a" * 40
+    target_venv = reconciler._venv_path("a" * 40)
+    target_venv.mkdir()
+    if boundary >= 2:
+        reconciler._switch_python(target_venv)
+    if boundary >= 3:
+        reconciler._write_running_commit("a" * 40)
+    if boundary >= 4:
+        reconciler._current_record_path().write_bytes(b'{"target":"record"}\n')
+    if boundary >= 5:
+        configuration.stable_script.write_bytes(b"new runtime")
+        for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+            (configuration.systemd_dir / name).write_bytes(b"new unit")
+
+    result = reconciler.reconcile()
+
+    assert result == {"status": "recovered", "commit": previous_commit}
+    assert reconciler.commit == previous_commit
+    assert reconciler._venv_link().resolve() == previous_venv
+    assert reconciler._running_commit_path().read_text().strip() == previous_commit
+    assert reconciler._current_record_path().read_bytes() == previous_record
+    assert configuration.stable_script.read_bytes() == b"old runtime"
+    for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+        assert (configuration.systemd_dir / name).read_bytes() == b"old unit"
+    assert not reconciler._transaction_path().exists()
+    assert ("healthcheck", previous_commit) in reconciler.commands

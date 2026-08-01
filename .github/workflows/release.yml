@@ -89,9 +89,18 @@ jobs:
           release_api="repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}"
           verify_dir=$(mktemp -d)
           trap 'rm -rf "$verify_dir"' EXIT
+          expected_assets=$(printf '%s\n' \
+            "lightweave-field-${RELEASE_TAG}.bin" \
+            lightweave-release.json | LC_ALL=C sort)
+
+          verify_asset_set() {
+            actual_assets=$(gh api "$release_api" --jq '.assets[].name' | LC_ALL=C sort)
+            test "$actual_assets" = "$expected_assets"
+          }
 
           if draft=$(gh api "$release_api" --jq .draft 2>"$verify_dir/api-error"); then
             if [ "$draft" = false ]; then
+              verify_asset_set
               gh release download "$RELEASE_TAG" \
                 --repo "$GITHUB_REPOSITORY" \
                 --dir "$verify_dir" \
@@ -118,6 +127,7 @@ jobs:
           gh release upload "$RELEASE_TAG" "$manifest" "$firmware" \
             --clobber \
             --repo "$GITHUB_REPOSITORY"
+          verify_asset_set
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir "$verify_dir" \

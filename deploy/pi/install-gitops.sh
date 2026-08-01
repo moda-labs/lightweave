@@ -83,6 +83,23 @@ systemctl daemon-reload
 systemd-analyze verify \
   /etc/systemd/system/lightweave-gitops.service \
   /etc/systemd/system/lightweave-gitops.timer
+systemctl restart lightweave-control.service
+health_commit=
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+  health_commit=$(
+    curl --fail --silent http://127.0.0.1:8000/api/health 2>/dev/null |
+      python3 -c 'import json, sys; print(json.load(sys.stdin).get("commit") or "")' \
+        2>/dev/null || true
+  )
+  [ "$health_commit" = "$running_commit" ] && break
+  attempt=$((attempt + 1))
+  sleep 1
+done
+if [ "$health_commit" != "$running_commit" ]; then
+  printf '%s\n' "control health does not report the installed commit" >&2
+  exit 1
+fi
 systemctl enable --now lightweave-gitops.timer
 systemctl start lightweave-gitops.service
 systemctl --no-pager status lightweave-gitops.timer

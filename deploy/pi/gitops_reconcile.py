@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
 import fcntl
 import hashlib
@@ -197,6 +199,9 @@ class GitOpsReconciler:
 
     def _running_commit_path(self) -> Path:
         return self.config.deployment_dir / "running-commit"
+
+    def _transaction_path(self) -> Path:
+        return self.config.deployment_dir / "transaction.json"
 
     def _venv_root(self) -> Path:
         return self.config.repo / ".venvs"
@@ -405,6 +410,139 @@ class GitOpsReconciler:
         _atomic_write(path, previous)
         self._set_service_readable(path)
 
+    def _write_transaction(
+        self,
+        previous_commit: str,
+        previous_venv: Path,
+        previous_record: bytes | None,
+        runtime_snapshots: tuple[FileSnapshot, ...],
+    ) -> None:
+        document = {
+            "schema_version": 1,
+            "previous_commit": previous_commit,
+            "previous_venv": str(previous_venv),
+            "previous_record": (
+                base64.b64encode(previous_record).decode("ascii")
+                if previous_record is not None
+                else None
+            ),
+            "runtime": [
+                {
+                    "data": (
+                        base64.b64encode(snapshot.data).decode("ascii")
+                        if snapshot.data is not None
+                        else None
+                    ),
+                    "mode": snapshot.mode,
+                }
+                for snapshot in runtime_snapshots
+            ],
+        }
+        _atomic_write(
+            self._transaction_path(),
+            json.dumps(document, sort_keys=True, indent=2).encode() + b"\n",
+            mode=0o600,
+        )
+
+    @staticmethod
+    def _decode_transaction_data(value: Any, name: str) -> bytes | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ReconcileError(f"deployment transaction {name} is invalid")
+        try:
+            return base64.b64decode(value, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ReconcileError(f"deployment transaction {name} is invalid") from error
+
+    def _load_transaction(
+        self,
+    ) -> tuple[str, Path, bytes | None, tuple[FileSnapshot, ...]] | None:
+        path = self._transaction_path()
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as error:
+            raise ReconcileError(f"cannot read deployment transaction: {error}") from error
+        if not isinstance(document, dict) or set(document) != {
+            "schema_version",
+            "previous_commit",
+            "previous_venv",
+            "previous_record",
+            "runtime",
+        }:
+            raise ReconcileError("deployment transaction has an invalid shape")
+        previous_commit = document["previous_commit"]
+        if (
+            document["schema_version"] != 1
+            or not isinstance(previous_commit, str)
+            or len(previous_commit) != 40
+            or any(character not in "0123456789abcdef" for character in previous_commit)
+        ):
+            raise ReconcileError("deployment transaction has an invalid previous commit")
+        previous_venv_value = document["previous_venv"]
+        if not isinstance(previous_venv_value, str):
+            raise ReconcileError("deployment transaction has an invalid previous environment")
+        previous_venv = Path(previous_venv_value)
+        try:
+            expected_venv = self._venv_path(previous_commit).resolve(strict=True)
+            resolved_previous_venv = previous_venv.resolve(strict=True)
+        except OSError as error:
+            raise ReconcileError(
+                "deployment transaction previous environment is unavailable"
+            ) from error
+        if resolved_previous_venv != expected_venv:
+            raise ReconcileError("deployment transaction has an invalid previous environment")
+        runtime = document["runtime"]
+        paths = self._runtime_paths()
+        if not isinstance(runtime, list) or len(runtime) != len(paths):
+            raise ReconcileError("deployment transaction has invalid runtime snapshots")
+        snapshots = []
+        for index, (item, runtime_path) in enumerate(zip(runtime, paths, strict=True)):
+            if not isinstance(item, dict) or set(item) != {"data", "mode"}:
+                raise ReconcileError("deployment transaction has invalid runtime snapshots")
+            mode = item["mode"]
+            if mode is not None and (
+                not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 0o777
+            ):
+                raise ReconcileError("deployment transaction has invalid runtime mode")
+            snapshots.append(
+                FileSnapshot(
+                    runtime_path,
+                    self._decode_transaction_data(item["data"], f"runtime[{index}].data"),
+                    mode,
+                )
+            )
+        return (
+            previous_commit,
+            previous_venv,
+            self._decode_transaction_data(document["previous_record"], "previous_record"),
+            tuple(snapshots),
+        )
+
+    def _recover_interrupted_deployment(self) -> dict[str, Any] | None:
+        transaction = self._load_transaction()
+        if transaction is None:
+            return None
+        previous_commit, previous_venv, previous_record, runtime_snapshots = transaction
+        try:
+            with contextlib.suppress(Exception):
+                self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
+            self._git("checkout", "--detach", previous_commit)
+            self._install_control_unit()
+            self._switch_python(previous_venv)
+            self._write_running_commit(previous_commit)
+            self._restore_record(previous_record)
+            self._restore_runtime(runtime_snapshots)
+            self._run(["systemctl", "daemon-reload"])
+            self._run(["systemctl", "start", "lightweave-control.service"])
+            self._healthcheck(previous_commit)
+            self._transaction_path().unlink()
+        except Exception as error:
+            raise ReconcileError(f"interrupted deployment recovery failed: {error}") from error
+        return {"status": "recovered", "commit": previous_commit}
+
     def _write_running_commit(self, commit: str) -> None:
         _atomic_write(self._running_commit_path(), f"{commit}\n".encode(), mode=0o640)
         self._set_service_readable(self._running_commit_path())
@@ -427,18 +565,42 @@ class GitOpsReconciler:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def reconcile(self) -> dict[str, Any]:
+        self._prepare_deployment_dir()
+        if self._transaction_path().exists():
+            with self._ota_guard() as ota_available:
+                if not ota_available:
+                    return {
+                        "status": "deferred",
+                        "reason": "ota_active",
+                        "recovery": True,
+                    }
+                recovered = self._recover_interrupted_deployment()
+                if recovered is not None:
+                    return recovered
         manifest = self.desired_manifest()
         if manifest is None:
             return {"status": "disabled"}
         self._verify_origin()
-        self._prepare_deployment_dir()
         current_commit = self._git_output("rev-parse", "HEAD").lower()
         current_record = self._current_record()
+        marker_commit = None
+        try:
+            marker_commit = self._running_commit_path().read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        current_venv = None
+        try:
+            current_venv = self._venv_link().resolve(strict=True)
+        except OSError:
+            pass
         if (
             current_commit == manifest.commit
             and current_record
             and self._record_has_verified_firmware(current_record, manifest)
+            and marker_commit == manifest.commit
+            and current_venv == self._venv_path(manifest.commit).resolve()
         ):
+            self._healthcheck(manifest.commit)
             return {"status": "current", "release": manifest.release, "commit": manifest.commit}
 
         firmware = self._download_firmware(manifest)
@@ -477,6 +639,12 @@ class GitOpsReconciler:
 
         runtime_snapshots = self._snapshot_runtime()
         previous_venv = self._venv_link().resolve(strict=True)
+        self._write_transaction(
+            current_commit,
+            previous_venv,
+            previous_record,
+            runtime_snapshots,
+        )
         try:
             self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
             self._git("checkout", "--detach", manifest.commit)
@@ -496,6 +664,7 @@ class GitOpsReconciler:
             self._run(["systemctl", "daemon-reload"])
             self._run(["systemctl", "enable", "--now", "lightweave-gitops.timer"])
             self._write_history(record)
+            self._transaction_path().unlink()
             return {"status": "deployed", "release": manifest.release, "commit": manifest.commit}
         except Exception as deploy_error:
             try:
@@ -510,6 +679,7 @@ class GitOpsReconciler:
                 self._run(["systemctl", "daemon-reload"])
                 self._run(["systemctl", "start", "lightweave-control.service"])
                 self._healthcheck(current_commit)
+                self._transaction_path().unlink()
             except Exception as rollback_error:
                 raise ReconcileError(
                     f"deployment failed ({deploy_error}); rollback also failed ({rollback_error})"

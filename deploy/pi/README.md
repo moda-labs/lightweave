@@ -395,7 +395,8 @@ The installer creates root-owned release state under
 health endpoint, migrates the initial Python environment into an immutable
 commit-specific environment under `/opt/lightweave/.venvs`, installs the
 root-owned shared OTA/deployment lock, creates the sandboxed backup path, copies
-the reconciler outside the mutable Git checkout, verifies the systemd units, enables
+the reconciler outside the mutable Git checkout, verifies the systemd units,
+restarts control so its process identity uses the root-written commit marker, enables
 the five-minute timer, and performs one immediate check. Normal upgrades are
 then authorized by merging a reviewed channel
 promotion as documented in
@@ -409,18 +410,23 @@ Choose and record a reviewed target commit. Back up state and retain the current
 commit for rollback:
 
 ```bash
-git -C /opt/lightweave rev-parse HEAD
+old_commit=$(sudo git -C /opt/lightweave rev-parse HEAD)
+sudo git -C /opt/lightweave fetch --tags --prune
+new_commit=$(sudo git -C /opt/lightweave rev-parse 'NEW_RELEASE_REF^{commit}')
+test -x "/opt/lightweave/.venvs/$old_commit/bin/python"
+test ! -e "/opt/lightweave/.venvs/$new_commit"
+sudo systemctl stop lightweave-gitops.service lightweave-gitops.timer
 sudo systemctl stop lightweave-control
 sudo install -d -o root -g root -m 0700 /var/backups/lightweave
 sudo tar -C /var/lib -czf \
   "/var/backups/lightweave/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).tgz" \
   lightweave
-sudo git -C /opt/lightweave fetch --tags --prune
-sudo git -C /opt/lightweave checkout --detach NEW_RELEASE_REF
-sudo /opt/lightweave/.venv/bin/python -m pip install \
+sudo git -C /opt/lightweave checkout --detach "$new_commit"
+sudo python3 -m venv "/opt/lightweave/.venvs/$new_commit"
+sudo "/opt/lightweave/.venvs/$new_commit/bin/python" -m pip install \
   --require-hashes --only-binary=:all: \
   --requirement /opt/lightweave/control/requirements.lock
-sudo /opt/lightweave/.venv/bin/python -m pip check
+sudo "/opt/lightweave/.venvs/$new_commit/bin/python" -m pip check
 sudo chown --recursive root:root /opt/lightweave
 sudo chmod --recursive go-w /opt/lightweave
 sudo install -o root -g root -m 0644 \
@@ -433,7 +439,16 @@ sudo systemctl daemon-reload
 sudo systemd-analyze verify \
   /etc/systemd/system/lightweave-control.service \
   /etc/systemd/system/cloudflared.service
+sudo ln -sfn "/opt/lightweave/.venvs/$new_commit" /opt/lightweave/.venv.new
+sudo mv -Tf /opt/lightweave/.venv.new /opt/lightweave/.venv
+printf '%s\n' "$new_commit" | sudo tee \
+  /var/lib/lightweave-gitops/running-commit.new >/dev/null
+sudo chown root:lightweave /var/lib/lightweave-gitops/running-commit.new
+sudo chmod 0640 /var/lib/lightweave-gitops/running-commit.new
+sudo mv -f /var/lib/lightweave-gitops/running-commit.new \
+  /var/lib/lightweave-gitops/running-commit
 sudo systemctl start lightweave-control
+sudo systemctl start lightweave-gitops.timer
 sudo systemctl restart cloudflared
 sudo systemctl status lightweave-control
 sudo systemctl status cloudflared
@@ -465,14 +480,11 @@ procedure only for on-site recovery when the reconciler itself cannot run.
 Use the exact commit recorded before the upgrade:
 
 ```bash
+previous_commit=PREVIOUS_RELEASE_COMMIT
+test -x "/opt/lightweave/.venvs/$previous_commit/bin/python"
+sudo systemctl stop lightweave-gitops.service lightweave-gitops.timer
 sudo systemctl stop lightweave-control
-sudo git -C /opt/lightweave checkout --detach PREVIOUS_RELEASE_COMMIT
-sudo /opt/lightweave/.venv/bin/python -m pip install \
-  --require-hashes --only-binary=:all: \
-  --requirement /opt/lightweave/control/requirements.lock
-sudo /opt/lightweave/.venv/bin/python -m pip check
-sudo chown --recursive root:root /opt/lightweave
-sudo chmod --recursive go-w /opt/lightweave
+sudo git -C /opt/lightweave checkout --detach "$previous_commit"
 sudo install -o root -g root -m 0644 \
   /opt/lightweave/deploy/pi/lightweave-control.service \
   /etc/systemd/system/lightweave-control.service
@@ -483,7 +495,17 @@ sudo systemctl daemon-reload
 sudo systemd-analyze verify \
   /etc/systemd/system/lightweave-control.service \
   /etc/systemd/system/cloudflared.service
+sudo ln -sfn "/opt/lightweave/.venvs/$previous_commit" \
+  /opt/lightweave/.venv.new
+sudo mv -Tf /opt/lightweave/.venv.new /opt/lightweave/.venv
+printf '%s\n' "$previous_commit" | sudo tee \
+  /var/lib/lightweave-gitops/running-commit.new >/dev/null
+sudo chown root:lightweave /var/lib/lightweave-gitops/running-commit.new
+sudo chmod 0640 /var/lib/lightweave-gitops/running-commit.new
+sudo mv -f /var/lib/lightweave-gitops/running-commit.new \
+  /var/lib/lightweave-gitops/running-commit
 sudo systemctl start lightweave-control
+sudo systemctl start lightweave-gitops.timer
 sudo systemctl restart cloudflared
 sudo systemctl status lightweave-control
 sudo systemctl status cloudflared

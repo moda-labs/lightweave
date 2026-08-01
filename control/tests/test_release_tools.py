@@ -116,6 +116,8 @@ def test_release_publisher_is_retry_safe_and_verifies_assets_before_publish() ->
     assert "--draft" in workflow
     assert "gh release upload" in workflow
     assert "--clobber" in workflow
+    assert "verify_asset_set" in workflow
+    assert "'.assets[].name'" in workflow
     assert '--published-at "$RELEASE_PUBLISHED_AT"' in workflow
     assert "grep -q 'HTTP 404'" in workflow
     assert workflow.count("cmp \"$manifest\"") == 2

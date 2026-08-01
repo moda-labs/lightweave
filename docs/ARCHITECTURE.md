@@ -262,6 +262,13 @@ online cohort described in §7.1. This keeps Pi GitOps failure separate from sho
 runtime and from variable performer availability. See
 [`RELEASING.md`](RELEASING.md).
 
+Before changing the checkout, the reconciler persists a root-only transaction
+containing the prior commit, environment pointer, deployment record, and stable
+runtime snapshots. An interrupted invocation recovers and health-checks that
+state before reading desired state again. The no-op path likewise requires the
+checkout, environment link, commit marker, staged firmware, and live health
+response to agree.
+
 ## 6. Auto-calibration — drone + computer vision **[planned]**
 
 Goal: build the `MAC → (x,y)` table by **survey**, not by hand (manual surveying of

@@ -141,13 +141,20 @@ builds a fresh commit-specific virtual environment from the fully hash-locked
 Python dependency graph; atomically switches the service to it; and requires a
 health response naming the exact expected commit. A failed health check switches
 back to the untouched prior environment and restores the prior code, deployment
-record, stable reconciler, and units automatically. Privileged release records and firmware
-live under root-owned `/var/lib/lightweave-gitops`; backups are retained under
-`/var/backups/lightweave` for manual data recovery.
+record, stable reconciler, and units automatically. Privileged release records
+and firmware live under root-owned `/var/lib/lightweave-gitops`; backups are
+retained under `/var/backups/lightweave` for manual data recovery.
+
+Before the checkout changes, the reconciler durably records the prior commit,
+environment pointer, deployment record, and stable runtime snapshots. If power
+is lost at any later boundary, the next timer invocation restores and
+health-checks that complete prior state before attempting another deployment.
 
 The root reconciler writes the exact checked-out commit to a group-readable
-marker in the release directory. The unprivileged web service reports that
-marker instead of invoking Git against the root-owned checkout.
+marker in the release directory before starting control. The unprivileged web
+service reads that marker once at process startup and reports it instead of
+invoking Git against the root-owned checkout, so health proves that the expected
+process was actually restarted rather than merely observing a changed file.
 
 The reconciler and manual OTA share a root-owned, service-readable cross-process
 lock. If OTA is already running when the timer fires, deployment reports

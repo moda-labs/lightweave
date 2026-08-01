@@ -435,6 +435,22 @@ def test_health_endpoint_identifies_the_running_release(monkeypatch) -> None:
     assert response.json() == {"ok": True, "version": "0.4.0", "commit": "a" * 40}
 
 
+def test_health_endpoint_identifies_the_started_process_when_marker_changes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "running-commit"
+    marker.write_text("a" * 40 + "\n", encoding="utf-8")
+    monkeypatch.delenv("CONTROL_RELEASE_COMMIT", raising=False)
+    monkeypatch.setenv("CONTROL_RELEASE_COMMIT_FILE", str(marker))
+    client = TestClient(create_app(MockConductor()))
+    marker.write_text("b" * 40 + "\n", encoding="utf-8")
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["commit"] == "a" * 40
+
+
 def test_wifi_status_reports_current_connection(monkeypatch) -> None:
     def fake_which(command: str) -> str | None:
       return "/usr/bin/nmcli" if command == "nmcli" else None
