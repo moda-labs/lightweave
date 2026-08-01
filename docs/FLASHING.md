@@ -236,3 +236,49 @@ the onboard heartbeat LED compiled out — inside an opaque lantern it is
 invisible, burns LED current all night, and caps every Stage-B nap at 500 ms. Flash `field`
 onto anything that ships to the field; keep the bench envs for desk work (the
 GPIO2 blink is the zero-wiring sync check).
+
+---
+
+## Batch FireBeetle auto-flashing (macOS)
+
+Production releases publish the OTA binary plus a hash-pinned serial ZIP with
+the bootloader, partition table, OTA boot helper, canonical field firmware, and
+exact flash plan. The watcher follows the reviewed GitHub production channel;
+it never builds the local checkout, so local edits cannot change provisioning.
+If GitHub is temporarily unavailable it retains the last verified cache.
+
+After a release is promoted:
+
+```bash
+python3 scripts/firebeetle_autoflash.py install --factory
+tail -f ~/Library/Logs/lightweave-firebeetle-autoflash.log
+```
+
+`--factory` is the explicit authorization to erase a previously unseen board
+that still has no valid Lightweave identity after a non-destructive ROM reset.
+Omit it for an update-only station; unrecognized hardware then fails closed
+without any flash write. A factory erase is recorded as pending before the
+command and as known only after it succeeds, so an interrupted write never
+silently skips or repeats an ambiguous erase.
+
+Plug FireBeetles in one at a time with a direct data cable. The watcher accepts
+the WCH `1A86:7522` port, confirms ESP32-D0WD-V3/40 MHz/4 MB through the ROM,
+skips the current clean build, preserves Lightweave NVS, and full-erases only a
+previously unseen board in explicit factory mode after both normal and post-reset
+`info` attempts fail. It verifies the production build and preserved
+role/ID/position after flashing.
+
+The USB/chip signature is a strong fleet check, not a unique board-model ID; do
+not attach unrelated CH340 ESP32 hardware while enabled. A failure is retried
+after unplug/replug. If the log reports an ambiguous factory erase, physically
+confirm the ROM MAC belongs to the factory board, then authorize one retry:
+
+```bash
+python3 scripts/firebeetle_autoflash.py retry-factory C0:CD:D6:C8:03:E0
+```
+
+Disable the watcher while retaining its cache with:
+
+```bash
+python3 scripts/firebeetle_autoflash.py uninstall
+```

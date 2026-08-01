@@ -22,6 +22,7 @@ let calibrationProposal = null;
 let calibrationCodePlan = null;
 let calibrationSaveStatus = "";
 let wifiStatus = null;
+let releaseInfo = null;
 
 const MAP_PADDING = 0.08;
 const MIN_ZOOM = 1;
@@ -281,6 +282,7 @@ function render() {
   renderRows();
   renderDetail();
   renderFirmware();
+  renderReleases();
   renderRecovery();
   renderWifi();
   renderPowerMonitor();
@@ -717,6 +719,81 @@ function renderFirmware() {
     ? `${matching} / ${expected} on this build`
     : `${matching} / ${seen} match`;
   $("#firmware-consistency").className = `ops-value ${consistent ? "ok" : "bad"}`;
+}
+
+function releaseCommitHtml(commit) {
+  const value = String(commit || "");
+  if (!value) return "commit unavailable";
+  const label = shortHash(value);
+  const url = commitUrl(value);
+  return url
+    ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`
+    : escapeHtml(label);
+}
+
+function renderReleaseChanges(target, changes) {
+  const items = Array.isArray(changes) ? changes : [];
+  target.innerHTML = items.length
+    ? items.map((change) => `<li>${escapeHtml(change)}</li>`).join("")
+    : "<li>Release notes are not available for this version.</li>";
+}
+
+function renderReleases() {
+  if (!releaseInfo) return;
+  const control = releaseInfo.control || {};
+  const firmware = releaseInfo.firmware || {};
+  const controlRelease = control.release || {};
+  const firmwareRelease = firmware.release || {};
+  const desiredFirmwareRelease = firmware.desired_release || {};
+  const controlOk = control.in_sync !== false;
+  const firmwareConsistent = firmware.consistent !== false;
+  const firmwareCoverageComplete = firmware.coverage_complete === true;
+  const firmwareOk = firmware.in_sync !== false && firmwareConsistent && firmware.dirty !== true;
+
+  $("#control-release-version").textContent = control.version ? `v${control.version}` : "unknown";
+  $("#control-release-status").textContent = controlOk ? "deployed" : "drift";
+  $("#control-release-status").className = `chip ${controlOk ? "sync" : "active"}`;
+  $("#control-release-meta").innerHTML = `${releaseCommitHtml(control.commit)}${control.deployed_at ? ` · deployed ${escapeHtml(new Date(control.deployed_at).toLocaleString())}` : " · local/manual deployment"}`;
+  $("#control-release-title").textContent = controlRelease.title || "Release notes unavailable";
+  renderReleaseChanges($("#control-release-changes"), controlRelease.control_changes);
+
+  $("#field-release-version").textContent = firmware.version ? `v${firmware.version}` : "no firmware online";
+  const firmwareStatus = !firmware.version
+    ? "offline"
+    : firmware.dirty === true
+      ? "dirty build"
+      : !firmwareConsistent
+        ? "mixed"
+        : firmware.identity_in_sync === true && !firmwareCoverageComplete
+          ? "deferred"
+        : firmware.desired && !firmwareOk
+          ? "update available"
+          : "deployed";
+  $("#field-release-status").textContent = firmwareStatus;
+  $("#field-release-status").className = `chip ${firmwareOk ? "sync" : "active"}`;
+  const matching = firmware.matching ?? 0;
+  const expected = firmware.expected ?? state.summary.total;
+  $("#field-release-meta").innerHTML = `${releaseCommitHtml(firmware.commit)} · ${escapeHtml(String(matching))} / ${escapeHtml(String(expected))} currently match`;
+  $("#field-release-title").textContent = firmwareRelease.title || "Release notes unavailable";
+  renderReleaseChanges($("#field-release-changes"), firmwareRelease.firmware_changes);
+  const pendingFirmware = Boolean(firmware.desired_version && firmware.desired_version !== firmware.version);
+  $("#field-release-pending").hidden = !pendingFirmware;
+  if (pendingFirmware) {
+    $("#field-release-pending-title").textContent = `Staged for v${firmware.desired_version}: ${desiredFirmwareRelease.title || "release notes unavailable"}`;
+    renderReleaseChanges($("#field-release-pending-changes"), desiredFirmwareRelease.firmware_changes);
+  }
+
+  const allOk = controlOk && firmwareOk;
+  $("#release-overall-status").textContent = allOk ? "in sync" : "attention";
+  $("#release-overall-status").className = `chip ${allOk ? "sync" : "active"}`;
+  const history = Array.isArray(releaseInfo.history) ? releaseInfo.history : [];
+  $("#release-history-list").innerHTML = history.map((release) => `<details class="release-history-row">
+    <summary><span><strong>v${escapeHtml(release.version)} · ${escapeHtml(release.title)}</strong><small>${escapeHtml(release.date)} · ${escapeHtml(String((release.control_changes || []).length))} control · ${escapeHtml(String((release.firmware_changes || []).length))} firmware</small></span></summary>
+    <div class="release-history-detail">
+      <div><strong>Web control plane</strong><ul class="release-changes">${(release.control_changes || []).map((change) => `<li>${escapeHtml(change)}</li>`).join("") || "<li>No control-plane changes.</li>"}</ul></div>
+      <div><strong>Field firmware</strong><ul class="release-changes">${(release.firmware_changes || []).map((change) => `<li>${escapeHtml(change)}</li>`).join("") || "<li>No firmware changes.</li>"}</ul></div>
+    </div>
+  </details>`).join("") || '<div class="empty-state">No release history has been published.</div>';
 }
 
 function renderRecovery() {
@@ -1867,10 +1944,27 @@ async function refresh() {
     throw error;
   }
   savedPatterns = (await api("/api/patterns")).patterns;
+  await refreshReleaseInfo();
   otaArtifact = (await api("/api/operations/ota-artifact")).artifact;
   calibrationFrames = (await api("/api/calibration/frames")).frames || [];
   await refreshWifiStatus({ quiet: true });
   render();
+}
+
+async function refreshReleaseInfo() {
+  releaseInfo = await api("/api/releases");
+  renderReleases();
+  return releaseInfo;
+}
+
+async function applyLiveState(liveState) {
+  state = liveState;
+  render();
+  try {
+    await refreshReleaseInfo();
+  } catch (_error) {
+    // The live state is still useful if release metadata briefly fails to refresh.
+  }
 }
 
 async function refreshSavedPatterns() {
@@ -2163,11 +2257,10 @@ function connectWebSocket() {
   ws.addEventListener("open", () => {
     $("#connection-status").textContent = "connected";
   });
-  ws.addEventListener("message", (event) => {
+  ws.addEventListener("message", async (event) => {
     const data = JSON.parse(event.data);
     if (data.state) {
-      state = data.state;
-      render();
+      await applyLiveState(data.state);
     }
   });
   ws.addEventListener("close", (event) => {

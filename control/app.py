@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -30,13 +31,22 @@ from .remote_config import (
     select_client_ip,
     select_external_scheme,
 )
+from .releases import (
+    current_source_commit,
+    load_deployment_record,
+    load_release_catalog,
+    release_status,
+    stage_deployment_firmware,
+)
 from .serial_transport import PySerialTransport
 
 
 STATIC_DIR = Path(__file__).with_name("static")
+REPO_ROOT = STATIC_DIR.parents[1]
 OTA_CHUNK_RETRIES = 3
 OTA_STATUS_FRESH_S = 60
 OTA_PROGRESS_POLL_CHUNKS = 64
+RELEASE_SNAPSHOT_MAX_AGE_S = 1.0
 POWER_SAMPLE_STALE_S = 5 * 60
 DEFAULT_BATTERY_CAPACITY_WH = 384.0
 DEFAULT_FULL_VOLTAGE = 14.4
@@ -47,6 +57,7 @@ PUBLIC_HTTP_ROUTES = {
     ("GET", "/static/login.js"),
     ("GET", "/static/login.css"),
     ("GET", "/api/auth/session"),
+    ("GET", "/api/health"),
     ("POST", "/api/auth/login"),
 }
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -284,6 +295,7 @@ def create_app(
             revoked = set(app.state.auth_manager.revoke_all_sessions())
             if revoked:
                 await close_session_websockets(revoked)
+            release_ota_operation_lock()
 
     app = FastAPI(title="Do Baskets Dream Control Plane", lifespan=lifespan)
     app.state.settings = resolved_settings
@@ -291,6 +303,24 @@ def create_app(
     app.state.conductor = conductor or create_default_conductor()
     data_dir = resolved_settings.data_dir
     app.state.ota_store = ota_store or OtaArtifactStore(data_dir / "ota" if data_dir else ".control_ota")
+    default_deployment_record = (
+        "/var/lib/lightweave-gitops/current.json"
+        if resolved_settings.serial_mode
+        else str(data_dir / "deployments" / "current.json") if data_dir else ".control_deployment.json"
+    )
+    deployment_record_path = Path(
+        os.getenv(
+            "CONTROL_DEPLOYMENT_RECORD",
+            default_deployment_record,
+        )
+    )
+    app.state.release_catalog = load_release_catalog(REPO_ROOT / "RELEASES.json")
+    app.state.deployment_record = load_deployment_record(deployment_record_path)
+    app.state.running_version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    app.state.running_commit = current_source_commit(REPO_ROOT)
+    app.state.latest_snapshot = None
+    app.state.latest_snapshot_at = 0.0
+    stage_deployment_firmware(app.state.ota_store, app.state.deployment_record)
     app.state.pattern_store = pattern_store or PatternStore(data_dir / "patterns" if data_dir else ".control_patterns")
     app.state.calibration_store = calibration_store or CalibrationStore(
         data_dir / "calibration" if data_dir else ".control_calibration"
@@ -299,6 +329,12 @@ def create_app(
     app.state.ota_reserved = False
     app.state.ota_task: asyncio.Task[None] | None = None
     app.state.ota_start_lock = asyncio.Lock()
+    app.state.ota_operation_lock_path = (
+        Path(os.getenv("CONTROL_OTA_LOCK", str(data_dir / "operations" / "firmware-ota.lock")))
+        if data_dir
+        else None
+    )
+    app.state.ota_operation_lock = None
     app.state.calibration_previous_pattern = None
     app.state.power_monitor_config = {
         "battery_capacity_wh": float(os.getenv("CONTROL_BATTERY_CAPACITY_WH", DEFAULT_BATTERY_CAPACITY_WH)),
@@ -339,6 +375,33 @@ def create_app(
 
     def live_session(token: str | None):
         return app.state.auth_manager.lookup_session(token) if token else None
+
+    def acquire_ota_operation_lock():
+        path = app.state.ota_operation_lock_path
+        if path is None:
+            return None
+        try:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(mode=0o600)
+            handle = path.open("r")
+        except OSError as error:
+            raise HTTPException(status_code=503, detail=f"OTA operation lock is unavailable: {error}") from error
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            raise HTTPException(status_code=423, detail="software deployment is in progress")
+        return handle
+
+    def release_ota_operation_lock() -> None:
+        handle = app.state.ota_operation_lock
+        if handle is None:
+            return
+        app.state.ota_operation_lock = None
+        with contextlib.suppress(OSError):
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
 
     def secure_response(response: Response, scheme: str) -> Response:
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
@@ -608,7 +671,10 @@ def create_app(
                 raise HTTPException(status_code=423, detail="OTA install owns the conductor")
             result = await asyncio.to_thread(getattr(app.state.conductor, method), *args)
         if method == "snapshot" and isinstance(result, dict):
-            return enrich_state(result)
+            enriched = enrich_state(result)
+            app.state.latest_snapshot = enriched
+            app.state.latest_snapshot_at = time.monotonic()
+            return enriched
         return result
 
     async def pattern_store_call(method: str, *args: Any) -> Any:
@@ -934,6 +1000,14 @@ def create_app(
         token = request.cookies.get(SESSION_COOKIE)
         return {"authenticated": live_session(token) is not None}
 
+    @app.get("/api/health")
+    async def health() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "version": app.state.running_version,
+            "commit": app.state.running_commit,
+        }
+
     @app.post("/api/auth/login")
     async def auth_login(request: Request) -> Response:
         client_ip = request_client_ip(request)
@@ -1010,6 +1084,25 @@ def create_app(
             return await conductor_call("snapshot")
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.get("/api/releases")
+    async def get_releases() -> dict[str, Any]:
+        snapshot = app.state.latest_snapshot
+        if (
+            snapshot is None
+            or time.monotonic() - app.state.latest_snapshot_at > RELEASE_SNAPSHOT_MAX_AGE_S
+        ):
+            try:
+                snapshot = await conductor_call("snapshot")
+            except SerialProtocolError as error:
+                raise HTTPException(status_code=503, detail=str(error)) from error
+        return release_status(
+            app.state.release_catalog,
+            app.state.deployment_record,
+            snapshot,
+            running_version=app.state.running_version,
+            running_commit=app.state.running_commit,
+        )
 
     @app.get("/api/lanterns")
     async def get_lanterns() -> list[dict[str, Any]]:
@@ -1977,7 +2070,7 @@ def create_app(
 
     async def ota_install_worker(artifact: Any, state: dict[str, Any]) -> None:
         try:
-            data = await asyncio.to_thread(artifact.path.read_bytes)
+            data = await asyncio.to_thread(app.state.ota_store.read_verified, artifact)
             await perform_ota_install(artifact, state, data)
         except asyncio.CancelledError:
             app.state.ota_install.update({
@@ -2003,6 +2096,7 @@ def create_app(
             })
         finally:
             app.state.ota_reserved = False
+            release_ota_operation_lock()
 
     @app.post("/api/operations/ota-install", status_code=202)
     async def install_ota_artifact() -> dict[str, Any]:
@@ -2012,6 +2106,7 @@ def create_app(
             artifact = app.state.ota_store.artifact()
             if artifact is None:
                 raise HTTPException(status_code=400, detail="no firmware staged")
+            operation_lock = acquire_ota_operation_lock()
             try:
                 async with app.state.conductor_lock:
                     if app.state.ota_reserved:
@@ -2023,8 +2118,14 @@ def create_app(
                         blockers = ", ".join(ota.get("blocked") or ["field is not OTA-ready"])
                         raise HTTPException(status_code=400, detail=f"OTA not ready: {blockers}")
                     app.state.ota_reserved = True
-            except SerialProtocolError as error:
-                raise HTTPException(status_code=503, detail=str(error)) from error
+            except Exception as error:
+                if operation_lock is not None:
+                    operation_lock.close()
+                if isinstance(error, SerialProtocolError):
+                    raise HTTPException(status_code=503, detail=str(error)) from error
+                raise
+
+            app.state.ota_operation_lock = operation_lock
 
             app.state.ota_install = {
                 "running": True,

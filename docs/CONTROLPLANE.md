@@ -24,6 +24,9 @@ the control plane's shared-password session boundary rather than a public Pi IP
 or router port forwarding. Stable architecture and operator guidance are in
 [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md); implementation status remains in
 [`plans/remote-administration.md`](../plans/remote-administration.md).
+Production software updates use the reviewed pull-based flow in
+[`RELEASING.md`](RELEASING.md): a Pi release is reconciled automatically, while
+the checksum-verified firmware it stages still requires a manual OTA action.
 
 ## Architecture principles
 
@@ -57,6 +60,8 @@ these endpoints, so agents can drive the same workflows without a browser.
 
 - `GET /api/state` → full control-plane snapshot.
 - `GET /api/lanterns` → `state.lanterns` only.
+- `GET /api/releases` → separate running control-plane, desired/staged firmware,
+  and user-facing release-history state.
 - `WS /ws` → pushes `{"type":"state","state":...}` snapshots and `error`
   events.
 

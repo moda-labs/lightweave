@@ -1,0 +1,152 @@
+name: Publish release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            control/requirements.lock
+            control/requirements-tooling.lock
+      - name: Install control-plane dependencies
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements.lock
+      - name: Verify tag and release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "v$(tr -d '\n' < VERSION)"
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          python -c 'from pathlib import Path; from control.releases import load_release_catalog; releases = load_release_catalog(Path("RELEASES.json")); assert releases[0].version == Path("VERSION").read_text().strip()'
+      - name: Run control-plane release gates
+        run: |
+          python -m pytest -q control/tests
+          node --check control/static/app.js
+      - name: Install hash-locked firmware tooling
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements-tooling.lock
+      - name: Run firmware release gates
+        run: |
+          pio test -e native
+          pio run -e field
+      - name: Build immutable release assets
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: https://github.com/${{ github.repository }}.git
+        run: |
+          mkdir -p dist
+          RELEASE_COMMIT=$(git rev-parse HEAD)
+          RELEASE_PUBLISHED_AT=$(git show -s --format=%cI HEAD)
+          cp .pio/build/field/firmware.bin "dist/lightweave-field-${RELEASE_TAG}.bin"
+          python scripts/build_serial_flash_bundle.py \
+            --bootloader .pio/build/field/bootloader.bin \
+            --partitions .pio/build/field/partitions.bin \
+            --boot-app "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+            --firmware .pio/build/field/firmware.bin \
+            --output "dist/lightweave-serial-flash-${RELEASE_TAG}.zip"
+          python scripts/build_release_manifest.py \
+            --firmware "dist/lightweave-field-${RELEASE_TAG}.bin" \
+            --serial-flash "dist/lightweave-serial-flash-${RELEASE_TAG}.zip" \
+            --repository "$RELEASE_REPOSITORY" \
+            --commit "$RELEASE_COMMIT" \
+            --tag "$RELEASE_TAG" \
+            --published-at "$RELEASE_PUBLISHED_AT" \
+            --artifact-url "https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/lightweave-field-${RELEASE_TAG}.bin" \
+            --serial-flash-url "https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/lightweave-serial-flash-${RELEASE_TAG}.zip" \
+            --output dist/lightweave-release.json
+          sha256sum dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          manifest=dist/lightweave-release.json
+          firmware="dist/lightweave-field-${RELEASE_TAG}.bin"
+          serial_flash="dist/lightweave-serial-flash-${RELEASE_TAG}.zip"
+          release_api="repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf "$verify_dir"' EXIT
+          expected_assets=$(printf '%s\n' \
+            "lightweave-field-${RELEASE_TAG}.bin" \
+            "lightweave-serial-flash-${RELEASE_TAG}.zip" \
+            lightweave-release.json | LC_ALL=C sort)
+
+          verify_asset_set() {
+            actual_assets=$(gh api "$release_api" --jq '.assets[].name' | LC_ALL=C sort)
+            test "$actual_assets" = "$expected_assets"
+          }
+
+          if draft=$(gh api "$release_api" --jq .draft 2>"$verify_dir/api-error"); then
+            if [ "$draft" = false ]; then
+              verify_asset_set
+              gh release download "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --dir "$verify_dir" \
+                --pattern lightweave-release.json \
+                --pattern "lightweave-field-${RELEASE_TAG}.bin" \
+                --pattern "lightweave-serial-flash-${RELEASE_TAG}.zip"
+              cmp "$manifest" "$verify_dir/lightweave-release.json"
+              cmp "$firmware" "$verify_dir/lightweave-field-${RELEASE_TAG}.bin"
+              cmp "$serial_flash" "$verify_dir/lightweave-serial-flash-${RELEASE_TAG}.zip"
+              exit 0
+            fi
+            test "$draft" = true
+          else
+            grep -q 'HTTP 404' "$verify_dir/api-error" || {
+              cat "$verify_dir/api-error" >&2
+              exit 1
+            }
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Lightweave ${RELEASE_TAG}" \
+              --verify-tag \
+              --generate-notes
+          fi
+
+          gh release upload "$RELEASE_TAG" "$manifest" "$firmware" "$serial_flash" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
+          verify_asset_set
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$verify_dir" \
+            --pattern lightweave-release.json \
+            --pattern "lightweave-field-${RELEASE_TAG}.bin" \
+            --pattern "lightweave-serial-flash-${RELEASE_TAG}.zip"
+          cmp "$manifest" "$verify_dir/lightweave-release.json"
+          cmp "$firmware" "$verify_dir/lightweave-field-${RELEASE_TAG}.bin"
+          cmp "$serial_flash" "$verify_dir/lightweave-serial-flash-${RELEASE_TAG}.zip"
+          gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"

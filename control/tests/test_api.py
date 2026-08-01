@@ -1,7 +1,11 @@
 import json
+import hashlib
+import fcntl
+from pathlib import Path
 import subprocess
 import threading
 import time
+import zlib
 
 from fastapi.testclient import TestClient
 import pytest
@@ -39,6 +43,103 @@ def wait_for_ota_terminal(client: TestClient, timeout_s: float = 20) -> dict:
             return install
         time.sleep(0.01)
     raise AssertionError("OTA install did not reach a terminal state")
+
+
+def deployment_record(tmp_path: Path, data: bytes = b"gitops firmware") -> dict:
+    firmware_path = tmp_path / "releases" / "v0.3.0" / "field.bin"
+    firmware_path.parent.mkdir(parents=True)
+    firmware_path.write_bytes(data)
+    return {
+        "schema_version": 1,
+        "deployed_at": "2026-08-01T18:30:00Z",
+        "previous_commit": "b" * 40,
+        "backup": "/var/backups/lightweave/pre-upgrade.tgz",
+        "firmware_local_path": str(firmware_path),
+        "manifest": {
+            "schema_version": 1,
+            "release": "v0.3.0",
+            "version": "0.3.0",
+            "repository": "https://github.com/underminedsk/lightweave.git",
+            "ref": "refs/tags/v0.3.0",
+            "commit": "a" * 40,
+            "published_at": "2026-08-01T18:00:00Z",
+            "notes": {
+                "version": "0.3.0",
+                "date": "2026-08-01",
+                "title": "Release title",
+                "control_changes": ["Control change"],
+                "firmware_changes": ["Firmware change"],
+            },
+            "firmware": {
+                "filename": "lightweave-field-v0.3.0.bin",
+                "url": "https://github.com/underminedsk/lightweave/releases/download/v0.3.0/lightweave-field-v0.3.0.bin",
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+                "crc32": zlib.crc32(data) & 0xFFFFFFFF,
+            },
+            "serial_flash": {
+                "filename": "lightweave-serial-flash-v0.3.0.zip",
+                "url": "https://github.com/underminedsk/lightweave/releases/download/v0.3.0/lightweave-serial-flash-v0.3.0.zip",
+                "sha256": hashlib.sha256(b"serial bundle").hexdigest(),
+                "size": len(b"serial bundle"),
+            },
+        },
+    }
+
+
+def test_release_api_separates_control_and_field_firmware(managed_client, tmp_path: Path) -> None:
+    client = managed_client(create_app(MockConductor()))
+
+    response = client.get("/api/releases")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["control"]["version"] == (Path(__file__).parents[2] / "VERSION").read_text().strip()
+    assert payload["control"]["release"]["control_changes"]
+    assert payload["firmware"]["version"] == "0.3.0"
+    assert payload["firmware"]["release"]["firmware_changes"]
+    assert payload["firmware"]["expected"] == 9
+    assert payload["history"][0]["version"] == payload["control"]["version"]
+
+
+def test_release_api_reuses_latest_state_snapshot(managed_client) -> None:
+    class CountingConductor(MockConductor):
+        def __init__(self):
+            super().__init__()
+            self.snapshot_calls = 0
+
+        def snapshot(self):
+            self.snapshot_calls += 1
+            return super().snapshot()
+
+    conductor = CountingConductor()
+    client = managed_client(create_app(conductor))
+
+    assert client.get("/api/state").status_code == 200
+    assert client.get("/api/releases").status_code == 200
+    assert conductor.snapshot_calls == 1
+
+    client.app.state.latest_snapshot_at = 0
+    assert client.get("/api/releases").status_code == 200
+    assert conductor.snapshot_calls == 2
+
+
+def test_gitops_deployment_record_stages_verified_firmware_on_startup(
+    managed_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = deployment_record(tmp_path)
+    record_path = tmp_path / "deployments" / "current.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setenv("CONTROL_DEPLOYMENT_RECORD", str(record_path))
+    store = OtaArtifactStore(tmp_path / "ota")
+
+    client = managed_client(create_app(MockConductor(), ota_store=store))
+    release = client.get("/api/releases").json()
+
+    assert store.current()["sha256"] == record["manifest"]["firmware"]["sha256"]
+    assert release["control"]["desired_commit"] == "a" * 40
+    assert release["firmware"]["desired"]["filename"] == "lightweave-field-v0.3.0.bin"
 
 
 class DownConductor(MockConductor):
@@ -330,11 +431,41 @@ def test_state_endpoint_returns_mock_state() -> None:
     assert body["recovery"]["status"] == "missing_nodes"
 
 
+def test_health_endpoint_identifies_the_running_release(monkeypatch) -> None:
+    monkeypatch.setenv("CONTROL_RELEASE_COMMIT", "a" * 40)
+    client = TestClient(create_app(MockConductor()))
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "version": "0.4.0", "commit": "a" * 40}
+
+
+def test_health_endpoint_identifies_the_started_process_when_marker_changes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "running-commit"
+    marker.write_text("a" * 40 + "\n", encoding="utf-8")
+    monkeypatch.delenv("CONTROL_RELEASE_COMMIT", raising=False)
+    monkeypatch.setenv("CONTROL_RELEASE_COMMIT_FILE", str(marker))
+    client = TestClient(create_app(MockConductor()))
+    marker.write_text("b" * 40 + "\n", encoding="utf-8")
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["commit"] == "a" * 40
+
+
 def test_wifi_status_reports_current_connection(monkeypatch) -> None:
     def fake_which(command: str) -> str | None:
       return "/usr/bin/nmcli" if command == "nmcli" else None
 
     def fake_run(command: list[str], **_kwargs):
+        if command[:2] == ["git", "-C"]:
+            return app_module.subprocess.CompletedProcess(
+                command, 0, stdout="a" * 40 + "\n", stderr=""
+            )
         if command[:4] == ["/usr/bin/nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION"]:
             return app_module.subprocess.CompletedProcess(
                 command,
@@ -391,7 +522,7 @@ def test_wifi_join_runs_join_command_in_background(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    assert commands == [["/usr/bin/sudo", "-n", "/usr/bin/nmcli", "dev", "wifi", "connect", "New House", "password", "secret"]]
+    assert commands[-1:] == [["/usr/bin/sudo", "-n", "/usr/bin/nmcli", "dev", "wifi", "connect", "New House", "password", "secret"]]
 
 
 def test_hotspot_start_runs_nmcli_connection(monkeypatch) -> None:
@@ -415,7 +546,7 @@ def test_hotspot_start_runs_nmcli_connection(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    assert commands == [["/usr/bin/sudo", "-n", "/usr/bin/nmcli", "con", "up", "BasketsSetup"]]
+    assert commands[-1:] == [["/usr/bin/sudo", "-n", "/usr/bin/nmcli", "con", "up", "BasketsSetup"]]
 
 
 def test_state_endpoint_enriches_legacy_snapshot_with_recovery() -> None:
@@ -1247,6 +1378,49 @@ def test_ota_install_requires_staged_artifact(tmp_path, managed_client) -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "no firmware staged"
+
+
+def test_ota_install_fails_closed_if_staged_bytes_are_tampered(tmp_path, managed_client) -> None:
+    conductor = MockConductor()
+    conductor.set_ota_mode(True)
+    store = OtaArtifactStore(tmp_path)
+    client = managed_client(create_app(conductor, ota_store=store))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+    artifact = store.artifact()
+    assert artifact is not None
+    artifact.path.write_bytes(b"\xe9\x01")
+
+    response = client.post("/api/operations/ota-install")
+    install = wait_for_ota_terminal(client)
+
+    assert response.status_code == 202
+    assert install["complete"] is False
+    assert install["error"] == "staged firmware SHA-256 mismatch"
+    assert conductor.ota_installed_crc32 is None
+
+
+def test_ota_install_defers_while_software_deployment_holds_lock(tmp_path, managed_client) -> None:
+    conductor = MockConductor()
+    conductor.set_ota_mode(True)
+    store = OtaArtifactStore(tmp_path / "ota")
+    app = create_app(conductor, ota_store=store)
+    lock_path = tmp_path / "operations" / "firmware-ota.lock"
+    lock_path.parent.mkdir()
+    lock_path.touch()
+    app.state.ota_operation_lock_path = lock_path
+    client = managed_client(app)
+    store.stage("firmware.bin", b"\xe9\x00")
+
+    with lock_path.open("r") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        response = client.post("/api/operations/ota-install")
+
+    assert response.status_code == 423
+    assert response.json()["detail"] == "software deployment is in progress"
 
 
 def test_ota_install_updates_online_cohort_and_defers_missing_lantern(tmp_path, managed_client) -> None:

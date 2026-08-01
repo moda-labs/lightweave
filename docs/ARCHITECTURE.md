@@ -246,6 +246,31 @@ in [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md). It preserves the same non-dependency
 rule: loss of the internet-facing admin path does not affect conductor or
 performer runtime.
 
+**[done; Pi field proof pending] Pull-based deployment:** production releases
+bind an immutable Git tag/full commit, separate control and firmware notes, and
+one checksum-verified canonical field binary in a release manifest. A reviewed
+channel file on `main` selects exactly one manifest by URL and SHA-256. Each Pi
+polls that channel outbound, backs up state, deploys the detached commit, and
+requires a local service health check or automatically restores the prior code,
+deployment record, and untouched commit-specific Python environment. Release
+state is root-owned outside the app-writable data directory, application and
+release-tooling dependencies are transitively hash-locked, firmware build inputs
+are exactly pinned, and a shared operation
+lock defers Pi deployment during field OTA. The promoted firmware is staged but never broadcast by
+the reconciler: ESP32 OTA remains an explicit operator action using the frozen
+online cohort described in §7.1. This keeps Pi GitOps failure separate from show
+runtime and from variable performer availability. See
+[`RELEASING.md`](RELEASING.md).
+
+Before changing the checkout, the reconciler persists a root-only transaction
+containing the prior commit, environment pointer, deployment record, and stable
+runtime snapshots. An interrupted invocation recovers and health-checks that
+state before reading desired state again. A recovery-only root oneshot is a
+required predecessor of control at boot and restores the prior filesystem state
+without creating a service-start dependency cycle. The no-op path likewise requires the
+checkout, environment link, commit marker, staged firmware, and live health
+response to agree.
+
 ## 6. Auto-calibration — drone + computer vision **[planned]**
 
 Goal: build the `MAC → (x,y)` table by **survey**, not by hand (manual surveying of

@@ -16,7 +16,8 @@
 *.a
 
 # Python control-plane local env
-.venv/
+.venv
+.venvs/
 __pycache__/
 .pytest_cache/
 .control_ota/

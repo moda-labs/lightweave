@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            control/requirements.lock
+            control/requirements-tooling.lock
+      - name: Install control-plane dependencies
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements.lock
+      - name: Run control-plane tests
+        run: python -m pytest -q control/tests
+      - name: Install hash-locked firmware tooling
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements-tooling.lock
+      - name: Run host firmware tests
+        run: pio test -e native
+      - name: Build canonical field firmware
+        run: |
+          pio run -e field
+          python scripts/build_serial_flash_bundle.py \
+            --bootloader .pio/build/field/bootloader.bin \
+            --partitions .pio/build/field/partitions.bin \
+            --boot-app "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+            --firmware .pio/build/field/firmware.bin \
+            --output /tmp/lightweave-serial-flash.zip
+      - name: Validate release metadata
+        run: |
+          python -c 'from pathlib import Path; from control.releases import load_release_catalog; releases = load_release_catalog(Path("RELEASES.json")); assert releases[0].version == Path("VERSION").read_text().strip()'
+          node --check control/static/app.js

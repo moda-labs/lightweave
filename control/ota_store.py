@@ -53,6 +53,22 @@ class OtaArtifactStore:
     def artifact(self) -> OtaArtifact | None:
         return self._artifact
 
+    def read_verified(self, artifact: OtaArtifact | None = None) -> bytes:
+        selected = artifact or self._artifact
+        if selected is None:
+            raise OtaArtifactError("no firmware staged")
+        try:
+            data = selected.path.read_bytes()
+        except OSError as error:
+            raise OtaArtifactError(f"cannot read staged firmware: {error}") from error
+        if len(data) != selected.size:
+            raise OtaArtifactError("staged firmware size mismatch")
+        if hashlib.sha256(data).hexdigest() != selected.sha256:
+            raise OtaArtifactError("staged firmware SHA-256 mismatch")
+        if zlib.crc32(data) & 0xFFFFFFFF != selected.crc32:
+            raise OtaArtifactError("staged firmware CRC32 mismatch")
+        return data
+
     def stage(self, filename: str, data: bytes) -> dict[str, Any]:
         clean_name = Path(filename or "firmware.bin").name
         if not clean_name.endswith(".bin"):
