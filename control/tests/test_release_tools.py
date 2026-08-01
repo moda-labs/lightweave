@@ -310,6 +310,7 @@ def test_autoflash_uses_stable_homebrew_platformio_interpreter(tmp_path: Path) -
     pio.write_text(f"#!{versioned}\n")
 
     assert autoflash.stable_pio_python(pio) == stable
+    assert autoflash.stable_platformio_python(versioned) == stable
 
 
 def test_autoflash_honors_disabled_production_channel(

@@ -360,11 +360,24 @@ def read_info(port: str, duration: float = 3.0) -> DeviceInfo | None:
         connection.close()
 
 
+def stable_platformio_python(interpreter: Path) -> Path:
+    path_parts = interpreter.parts
+    if "Cellar" in path_parts:
+        cellar = path_parts.index("Cellar")
+        if len(path_parts) > cellar + 1 and path_parts[cellar + 1] == "platformio":
+            stable = Path(*path_parts[:cellar]) / "opt/platformio/libexec/bin/python"
+            if stable.is_file():
+                interpreter = stable
+    if not interpreter.is_file():
+        raise RuntimeError("PlatformIO Python interpreter is unavailable")
+    return interpreter
+
+
 def esptool_command() -> list[str]:
     tool = Path.home() / ".platformio/packages/tool-esptoolpy/esptool.py"
     if not tool.is_file():
         raise RuntimeError("PlatformIO esptool.py is not installed")
-    return [sys.executable, str(tool)]
+    return [str(stable_platformio_python(Path(sys.executable))), str(tool)]
 
 
 def run_tool(arguments: list[str]) -> str:
@@ -524,16 +537,7 @@ def stable_pio_python(pio: Path) -> Path:
         interpreter = Path(parts[0])
     else:
         raise RuntimeError("cannot determine PlatformIO Python interpreter")
-    path_parts = interpreter.parts
-    if "Cellar" in path_parts:
-        cellar = path_parts.index("Cellar")
-        if len(path_parts) > cellar + 1 and path_parts[cellar + 1] == "platformio":
-            stable = Path(*path_parts[:cellar]) / "opt/platformio/libexec/bin/python"
-            if stable.is_file():
-                interpreter = stable
-    if not interpreter.is_file():
-        raise RuntimeError("PlatformIO Python interpreter is unavailable")
-    return interpreter
+    return stable_platformio_python(interpreter)
 
 
 def install(args: argparse.Namespace) -> int:
