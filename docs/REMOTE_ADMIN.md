@@ -141,7 +141,9 @@ Loss of Starlink or Cloudflare removes remote administration but does not affect
 A Pi or FastAPI restart invalidates browser sessions and reconnects to the conductor after service recovery.
 A USB flap is handled by service restart and serial reconnection.
 
-Physical recovery uses a directly attached console or SSH from the Starlink LAN during an on-site visit.
+Physical recovery uses a directly attached console or SSH from the Starlink LAN
+during an on-site visit. Connection details, key enrollment, and the explicit
+internet-SSH boundary are in [`SSH_ACCESS.md`](SSH_ACCESS.md).
 Changing `wlan0`, tunnel credentials, or the application password is an administrative operation that may require physical access if performed incorrectly.
 
 Password rotation replaces the stored hash and restarts the FastAPI service.
