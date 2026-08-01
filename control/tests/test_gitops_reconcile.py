@@ -132,6 +132,15 @@ class FakeReconciler(gitops.GitOpsReconciler):
         self.health_calls = 0
         self.owned_paths = []
         self.dirty = False
+        old_venv = self._venv_path(self.commit)
+        old_venv.mkdir(parents=True)
+        self._venv_link().symlink_to(old_venv)
+
+    def _venv_root(self):
+        return self.config.deployment_dir / "fake-venvs"
+
+    def _venv_link(self):
+        return self.config.deployment_dir / "fake-venv"
 
     def _run(self, args, *, timeout=300):
         self.commands.append(tuple(args))
@@ -158,8 +167,11 @@ class FakeReconciler(gitops.GitOpsReconciler):
         path.write_bytes(b"backup")
         return path
 
-    def _install_python(self):
+    def _install_python(self, commit):
         self.commands.append(("install-python", self.commit))
+        target = self._venv_path(commit)
+        target.mkdir(parents=True, exist_ok=True)
+        return target
 
     def _install_control_unit(self):
         self.commands.append(("install-control-unit", self.commit))
@@ -249,6 +261,8 @@ def test_successful_reconcile_records_release_and_verified_firmware(tmp_path: Pa
     assert ("git", "fetch", "origin", "refs/tags/v0.3.0:refs/tags/v0.3.0") in reconciler.commands
     assert ("systemctl", "start", "lightweave-control.service") in reconciler.commands
     assert ("install-gitops-runtime", "a" * 40) in reconciler.commands
+    assert reconciler._venv_link().resolve() == reconciler._venv_path("a" * 40)
+    assert (configuration.deployment_dir / "running-commit").read_text().strip() == "a" * 40
 
 
 def test_failed_healthcheck_rolls_code_and_record_back(tmp_path: Path) -> None:
@@ -281,7 +295,8 @@ def test_failed_healthcheck_rolls_code_and_record_back(tmp_path: Path) -> None:
 
     assert reconciler.commit == "b" * 40
     assert current.read_bytes() == old_bytes
-    assert ("install-python", "b" * 40) in reconciler.commands
+    assert reconciler._venv_link().resolve() == reconciler._venv_path("b" * 40)
+    assert (configuration.deployment_dir / "running-commit").read_text().strip() == "b" * 40
     assert reconciler.health_calls == 2
     assert ("healthcheck", "a" * 40) in reconciler.commands
     assert ("healthcheck", "b" * 40) in reconciler.commands
@@ -351,3 +366,76 @@ def test_late_failure_restores_the_previous_gitops_runtime(tmp_path: Path) -> No
 
     assert reconciler.runtime_restored is True
     assert configuration.stable_script.read_bytes() == b"old runtime"
+
+
+class StopFailingReconciler(FakeReconciler):
+    def __init__(self, configuration, responses):
+        super().__init__(configuration, responses)
+        self.stop_calls = 0
+
+    def _run(self, args, *, timeout=300):
+        self.commands.append(tuple(args))
+        if args == ["systemctl", "stop", "lightweave-control.service"]:
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise gitops.ReconcileError("simulated stop timeout")
+
+
+def test_initial_stop_failure_attempts_a_full_service_recovery(tmp_path: Path) -> None:
+    configuration = config(tmp_path)
+    reconciler = StopFailingReconciler(configuration, fake_responses(configuration))
+
+    with pytest.raises(gitops.ReconcileError, match="was rolled back"):
+        reconciler.reconcile()
+
+    assert reconciler.commit == "b" * 40
+    assert reconciler.stop_calls == 2
+    assert ("systemctl", "start", "lightweave-control.service") in reconciler.commands
+    assert ("healthcheck", "b" * 40) in reconciler.commands
+
+
+def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> None:
+    installer = (SCRIPT.parent / "install-gitops.sh").read_text(encoding="utf-8")
+    control_unit = (SCRIPT.parent / "lightweave-control.service").read_text(encoding="utf-8")
+
+    assert "install -d -o root -g root -m 0700 /var/backups/lightweave" in installer
+    assert 'release_venv="$repo/.venvs/$running_commit"' in installer
+    assert 'mv -Tf "$repo/.venv.new" "$repo/.venv"' in installer
+    assert "ReadOnlyPaths=-/var/lib/lightweave-gitops" in control_unit
+
+
+class EnvironmentBuildingReconciler(FakeReconciler):
+    def _install_python(self, commit):
+        return gitops.GitOpsReconciler._install_python(self, commit)
+
+    def _run(self, args, *, timeout=300):
+        self.commands.append(tuple(args))
+        if args[1:3] == ["-m", "venv"]:
+            python = Path(args[3]) / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"fake python")
+
+
+def test_python_environment_is_built_fresh_and_reused_only_after_completion(
+    tmp_path: Path,
+) -> None:
+    configuration = config(tmp_path)
+    reconciler = EnvironmentBuildingReconciler(
+        configuration, fake_responses(configuration)
+    )
+    commit = "a" * 40
+
+    target = reconciler._install_python(commit)
+
+    assert target == reconciler._venv_path(commit)
+    assert (target / "bin" / "python").is_file()
+    install = next(command for command in reconciler.commands if "install" in command)
+    assert "--require-hashes" in install
+    assert "--only-binary=:all:" in install
+    venv_commands = [command for command in reconciler.commands if command[1:3] == ("-m", "venv")]
+    assert len(venv_commands) == 1
+
+    reconciler._install_python(commit)
+
+    venv_commands = [command for command in reconciler.commands if command[1:3] == ("-m", "venv")]
+    assert len(venv_commands) == 1

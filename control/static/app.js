@@ -747,6 +747,7 @@ function renderReleases() {
   const desiredFirmwareRelease = firmware.desired_release || {};
   const controlOk = control.in_sync !== false;
   const firmwareConsistent = firmware.consistent !== false;
+  const firmwareCoverageComplete = firmware.coverage_complete === true;
   const firmwareOk = firmware.in_sync !== false && firmwareConsistent && firmware.dirty !== true;
 
   $("#control-release-version").textContent = control.version ? `v${control.version}` : "unknown";
@@ -763,6 +764,8 @@ function renderReleases() {
       ? "dirty build"
       : !firmwareConsistent
         ? "mixed"
+        : firmware.identity_in_sync === true && !firmwareCoverageComplete
+          ? "deferred"
         : firmware.desired && !firmwareOk
           ? "update available"
           : "deployed";

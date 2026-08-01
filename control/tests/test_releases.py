@@ -14,6 +14,7 @@ from control.releases import (
     parse_release_manifest,
     release_status,
     stage_deployment_firmware,
+    current_source_commit,
 )
 
 
@@ -166,7 +167,7 @@ def test_release_status_separates_running_control_and_observed_firmware(tmp_path
             }
         },
         "summary": {
-            "firmware": {"consistent": True, "matching": 1, "seen": 1, "expected": 4}
+            "firmware": {"consistent": True, "matching": 8, "seen": 8, "expected": 9}
         },
     }
 
@@ -180,8 +181,11 @@ def test_release_status_separates_running_control_and_observed_firmware(tmp_path
 
     assert status["control"]["in_sync"] is True
     assert status["control"]["release"]["control_changes"] == ["Control change"]
-    assert status["firmware"]["in_sync"] is True
-    assert status["firmware"]["expected"] == 4
+    assert status["firmware"]["identity_in_sync"] is True
+    assert status["firmware"]["coverage_complete"] is False
+    assert status["firmware"]["in_sync"] is False
+    assert status["firmware"]["matching"] == 8
+    assert status["firmware"]["expected"] == 9
     assert status["firmware"]["release"]["firmware_changes"] == ["Firmware change"]
 
 
@@ -235,3 +239,21 @@ def test_dirty_firmware_is_never_reported_in_sync(tmp_path: Path) -> None:
 
     assert status["firmware"]["dirty"] is True
     assert status["firmware"]["in_sync"] is False
+
+
+def test_running_commit_marker_avoids_git_ownership_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "running-commit"
+    marker.write_text("a" * 40 + "\n", encoding="utf-8")
+    monkeypatch.delenv("CONTROL_RELEASE_COMMIT", raising=False)
+    monkeypatch.setenv("CONTROL_RELEASE_COMMIT_FILE", str(marker))
+    monkeypatch.setattr(
+        "control.releases.subprocess.check_output",
+        lambda *_args, **_kwargs: pytest.fail("git must not run"),
+    )
+
+    assert current_source_commit(tmp_path / "root-owned-checkout") == "a" * 40
+
+    marker.write_text("not-a-commit\n", encoding="utf-8")
+    assert current_source_commit(tmp_path / "root-owned-checkout") is None

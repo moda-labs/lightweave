@@ -19,11 +19,12 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: control/requirements.lock
-      - name: Install test and firmware tooling
+          cache-dependency-path: |
+            control/requirements.lock
+            control/requirements-tooling.lock
+      - name: Install control-plane dependencies
         run: |
           python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements.lock
-          python -m pip install platformio==6.1.19
       - name: Verify tag and release notes
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -32,11 +33,16 @@ jobs:
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main
           python -c 'from pathlib import Path; from control.releases import load_release_catalog; releases = load_release_catalog(Path("RELEASES.json")); assert releases[0].version == Path("VERSION").read_text().strip()'
-      - name: Run release gates
+      - name: Run control-plane release gates
         run: |
-          pio test -e native
           python -m pytest -q control/tests
           node --check control/static/app.js
+      - name: Install hash-locked firmware tooling
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements-tooling.lock
+      - name: Run firmware release gates
+        run: |
+          pio test -e native
           pio run -e field
       - name: Build immutable release assets
         env:
@@ -45,12 +51,14 @@ jobs:
         run: |
           mkdir -p dist
           RELEASE_COMMIT=$(git rev-parse HEAD)
+          RELEASE_PUBLISHED_AT=$(git show -s --format=%cI HEAD)
           cp .pio/build/field/firmware.bin "dist/lightweave-field-${RELEASE_TAG}.bin"
           python scripts/build_release_manifest.py \
             --firmware "dist/lightweave-field-${RELEASE_TAG}.bin" \
             --repository "$RELEASE_REPOSITORY" \
             --commit "$RELEASE_COMMIT" \
             --tag "$RELEASE_TAG" \
+            --published-at "$RELEASE_PUBLISHED_AT" \
             --artifact-url "https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/lightweave-field-${RELEASE_TAG}.bin" \
             --output dist/lightweave-release.json
           sha256sum dist/*
@@ -75,10 +83,46 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" \
-            dist/lightweave-release.json \
-            "dist/lightweave-field-${RELEASE_TAG}.bin" \
+          set -eu
+          manifest=dist/lightweave-release.json
+          firmware="dist/lightweave-field-${RELEASE_TAG}.bin"
+          release_api="repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf "$verify_dir"' EXIT
+
+          if draft=$(gh api "$release_api" --jq .draft 2>"$verify_dir/api-error"); then
+            if [ "$draft" = false ]; then
+              gh release download "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --dir "$verify_dir" \
+                --pattern lightweave-release.json \
+                --pattern "lightweave-field-${RELEASE_TAG}.bin"
+              cmp "$manifest" "$verify_dir/lightweave-release.json"
+              cmp "$firmware" "$verify_dir/lightweave-field-${RELEASE_TAG}.bin"
+              exit 0
+            fi
+            test "$draft" = true
+          else
+            grep -q 'HTTP 404' "$verify_dir/api-error" || {
+              cat "$verify_dir/api-error" >&2
+              exit 1
+            }
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Lightweave ${RELEASE_TAG}" \
+              --verify-tag \
+              --generate-notes
+          fi
+
+          gh release upload "$RELEASE_TAG" "$manifest" "$firmware" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
+          gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Lightweave ${RELEASE_TAG}" \
-            --verify-tag \
-            --generate-notes
+            --dir "$verify_dir" \
+            --pattern lightweave-release.json \
+            --pattern "lightweave-field-${RELEASE_TAG}.bin"
+          cmp "$manifest" "$verify_dir/lightweave-release.json"
+          cmp "$firmware" "$verify_dir/lightweave-field-${RELEASE_TAG}.bin"
+          gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"

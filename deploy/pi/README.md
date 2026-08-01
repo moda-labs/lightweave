@@ -391,8 +391,11 @@ sudo journalctl -u lightweave-gitops.service -n 100 --no-pager
 ```
 
 The installer creates root-owned release state under
-`/var/lib/lightweave-gitops`, installs the root-owned shared OTA/deployment lock, copies the
-reconciler outside the mutable Git checkout, verifies the systemd units, enables
+`/var/lib/lightweave-gitops`, records the running commit for the unprivileged
+health endpoint, migrates the initial Python environment into an immutable
+commit-specific environment under `/opt/lightweave/.venvs`, installs the
+root-owned shared OTA/deployment lock, creates the sandboxed backup path, copies
+the reconciler outside the mutable Git checkout, verifies the systemd units, enables
 the five-minute timer, and performs one immediate check. Normal upgrades are
 then authorized by merging a reviewed channel
 promotion as documented in

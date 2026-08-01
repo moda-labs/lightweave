@@ -32,6 +32,12 @@ Every release contains one exact set of:
 - firmware size, SHA-256, and CRC32;
 - an immutable `lightweave-release.json` manifest binding all of the above.
 
+The release workflow installs PlatformIO from a complete hash-locked Python
+tooling graph. `platformio.ini` also pins the Espressif platform and every
+firmware library to an exact version, so the reviewed release retains the
+inputs that resolved the firmware toolchain rather than accepting newer
+compatible packages at tag-build time.
+
 The production channel contains only the immutable manifest URL and the SHA-256
 of its exact bytes. The Pi rejects moving branch refs, short commits, unexpected
 repositories, changed manifest bytes, and firmware that fails any integrity
@@ -72,7 +78,10 @@ git push origin v0.4.0
 
 The `Publish release` GitHub Actions workflow reruns the full gates, builds
 `.pio/build/field/firmware.bin`, generates `lightweave-release.json`, and creates
-the GitHub release. Confirm both assets exist before promotion:
+the GitHub release as a draft. It uploads and downloads both assets, compares
+their exact bytes, and only then publishes. A rerun resumes an existing draft;
+an already-published release succeeds only when both immutable assets still
+match the rebuilt bytes. Confirm both assets exist before promotion:
 
 ```bash
 gh release view v0.4.0
@@ -128,12 +137,17 @@ curl --silent http://127.0.0.1:8000/api/health
 
 The reconciler verifies the channel, manifest, repository, tag, commit, and
 firmware; backs up mutable state; checks out the detached release commit;
-installs the fully hash-locked Python dependency graph; restarts the control
-service; and requires a health response naming the exact expected commit. A
-failed health check restores the prior code, deployment record, stable
-reconciler, and units automatically. Privileged release records and firmware
+builds a fresh commit-specific virtual environment from the fully hash-locked
+Python dependency graph; atomically switches the service to it; and requires a
+health response naming the exact expected commit. A failed health check switches
+back to the untouched prior environment and restores the prior code, deployment
+record, stable reconciler, and units automatically. Privileged release records and firmware
 live under root-owned `/var/lib/lightweave-gitops`; backups are retained under
 `/var/backups/lightweave` for manual data recovery.
+
+The root reconciler writes the exact checked-out commit to a group-readable
+marker in the release directory. The unprivileged web service reports that
+marker instead of invoking Git against the root-owned checkout.
 
 The reconciler and manual OTA share a root-owned, service-readable cross-process
 lock. If OTA is already running when the timer fires, deployment reports
@@ -144,7 +158,7 @@ The Operations page's **Deployed changes** section shows two independent states:
 - **Web control plane** — running version/commit, desired commit, deployment
   time, sync state, and control changes.
 - **Field firmware** — conductor version/build, field consistency, staged
-  desired artifact, sync state, and firmware changes.
+  desired artifact, verified layout coverage, sync state, and firmware changes.
 
 This distinction is intentional: immediately after a successful Pi deployment,
 the control-plane card can be current while the firmware card still says an OTA
@@ -163,9 +177,11 @@ From the authenticated Operations page:
 4. Keep power stable until every member of the frozen online cohort verifies.
 5. Confirm field firmware reports the promoted clean build.
 
-Offline layout rows are deferred rather than blocking the online cohort. Run a
-later maintenance OTA when additional performers return; the normal consistency
-and recovery UI shows what remains.
+Offline layout rows are deferred rather than blocking the online cohort. Until
+every placed row is online and verified on the promoted build, the field card
+says **deferred** and the overall release remains **attention**. Run a later
+maintenance OTA when additional performers return; the normal consistency and
+recovery UI shows what remains.
 
 ## Rollback
 

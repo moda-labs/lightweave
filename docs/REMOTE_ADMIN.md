@@ -55,7 +55,10 @@ The cookie is `Secure`, `HttpOnly`, `SameSite=Strict`, scoped to `Path=/`, has n
 Logout, password rotation, service restart, and expiry invalidate sessions.
 Failed logins are rate-limited.
 
-Only the login page, its explicitly allowlisted assets, session status, and login endpoint are public.
+Only the login page, its explicitly allowlisted assets, session status, login endpoint,
+and the health endpoint are public. The health response intentionally exposes
+only `ok`, the running release version, and the exact Git commit so the root
+reconciler can verify a deployment; it contains no operator or field state.
 Every other HTTP route requires a live session.
 Unauthenticated WebSockets are denied before acceptance, and authenticated sockets close when their session logs out or expires.
 

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pwd
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -110,6 +111,16 @@ def _atomic_write(path: Path, data: bytes, mode: int = 0o640) -> None:
             os.unlink(temporary)
 
 
+def _atomic_symlink(target: Path, link: Path) -> None:
+    temporary = link.with_name(f".{link.name}.{os.getpid()}.new")
+    temporary.unlink(missing_ok=True)
+    try:
+        temporary.symlink_to(target)
+        os.replace(temporary, link)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @dataclass(frozen=True)
 class FileSnapshot:
     path: Path
@@ -183,6 +194,18 @@ class GitOpsReconciler:
 
     def _current_record_path(self) -> Path:
         return self.config.deployment_dir / "current.json"
+
+    def _running_commit_path(self) -> Path:
+        return self.config.deployment_dir / "running-commit"
+
+    def _venv_root(self) -> Path:
+        return self.config.repo / ".venvs"
+
+    def _venv_path(self, commit: str) -> Path:
+        return self._venv_root() / commit
+
+    def _venv_link(self) -> Path:
+        return self.config.repo / ".venv"
 
     def _current_record(self) -> dict[str, Any] | None:
         return self.releases.load_deployment_record(self._current_record_path())
@@ -269,22 +292,43 @@ class GitOpsReconciler:
         )
         return backup
 
-    def _install_python(self) -> None:
-        python = self.config.repo / ".venv" / "bin" / "python"
-        self._run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "--require-hashes",
-                "--only-binary=:all:",
-                "--requirement",
-                str(self.config.repo / "control" / "requirements.lock"),
-            ],
-            timeout=600,
-        )
-        self._run([str(python), "-m", "pip", "check"], timeout=120)
+    def _install_python(self, commit: str) -> Path:
+        root = self._venv_root()
+        root.mkdir(mode=0o755, exist_ok=True)
+        target = self._venv_path(commit)
+        if target.exists():
+            python = target / "bin" / "python"
+            if not python.is_file():
+                raise ReconcileError(f"release environment is incomplete: {target}")
+            self._run([str(python), "-m", "pip", "check"], timeout=120)
+            return target
+
+        temporary = Path(tempfile.mkdtemp(prefix=f".{commit}.", dir=root))
+        try:
+            self._run([sys.executable, "-m", "venv", str(temporary)], timeout=180)
+            python = temporary / "bin" / "python"
+            self._run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--require-hashes",
+                    "--only-binary=:all:",
+                    "--requirement",
+                    str(self.config.repo / "control" / "requirements.lock"),
+                ],
+                timeout=600,
+            )
+            self._run([str(python), "-m", "pip", "check"], timeout=120)
+            os.replace(temporary, target)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+        return target
+
+    def _switch_python(self, target: Path) -> None:
+        _atomic_symlink(target, self._venv_link())
 
     def _install_control_unit(self) -> None:
         _atomic_write(
@@ -361,6 +405,10 @@ class GitOpsReconciler:
         _atomic_write(path, previous)
         self._set_service_readable(path)
 
+    def _write_running_commit(self, commit: str) -> None:
+        _atomic_write(self._running_commit_path(), f"{commit}\n".encode(), mode=0o640)
+        self._set_service_readable(self._running_commit_path())
+
     @contextlib.contextmanager
     def _ota_guard(self):
         try:
@@ -428,11 +476,14 @@ class GitOpsReconciler:
         }
 
         runtime_snapshots = self._snapshot_runtime()
-        self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
+        previous_venv = self._venv_link().resolve(strict=True)
         try:
+            self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
             self._git("checkout", "--detach", manifest.commit)
-            self._install_python()
+            target_venv = self._install_python(manifest.commit)
             self._install_control_unit()
+            self._switch_python(target_venv)
+            self._write_running_commit(manifest.commit)
             _atomic_write(
                 self._current_record_path(),
                 json.dumps(record, sort_keys=True, indent=2).encode() + b"\n",
@@ -448,10 +499,12 @@ class GitOpsReconciler:
             return {"status": "deployed", "release": manifest.release, "commit": manifest.commit}
         except Exception as deploy_error:
             try:
-                self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
+                with contextlib.suppress(Exception):
+                    self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
                 self._git("checkout", "--detach", current_commit)
-                self._install_python()
                 self._install_control_unit()
+                self._switch_python(previous_venv)
+                self._write_running_commit(current_commit)
                 self._restore_record(previous_record)
                 self._restore_runtime(runtime_snapshots)
                 self._run(["systemctl", "daemon-reload"])

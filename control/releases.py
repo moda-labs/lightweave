@@ -321,6 +321,13 @@ def current_source_commit(repo_root: Path) -> str | None:
     configured = os.getenv("CONTROL_RELEASE_COMMIT", "").strip().lower()
     if COMMIT_RE.fullmatch(configured):
         return configured
+    commit_file = os.getenv("CONTROL_RELEASE_COMMIT_FILE", "").strip()
+    if commit_file:
+        try:
+            recorded = Path(commit_file).read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            return None
+        return recorded if COMMIT_RE.fullmatch(recorded) else None
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
@@ -354,6 +361,23 @@ def release_status(
     desired_commit = deployed_manifest.commit if deployed_manifest else None
     firmware_build = str(conductor_firmware.get("build_label") or "").lower()
     desired_firmware = dict(deployed_manifest.firmware) if deployed_manifest else None
+    matching = summary.get("matching")
+    expected = summary.get("expected")
+    coverage_complete = (
+        isinstance(matching, int)
+        and not isinstance(matching, bool)
+        and isinstance(expected, int)
+        and not isinstance(expected, bool)
+        and expected >= 0
+        and matching == expected
+    )
+    identity_in_sync = (
+        conductor_firmware.get("dirty") is False
+        and (
+            desired_commit is None
+            or (firmware_build and desired_commit.startswith(firmware_build))
+        )
+    )
     return {
         "control": {
             "version": running_version,
@@ -374,12 +398,12 @@ def release_status(
             "desired": desired_firmware,
             "desired_version": deployed_manifest.version if deployed_manifest else None,
             "desired_release": deployed_manifest.notes.as_dict() if deployed_manifest else None,
+            "identity_in_sync": identity_in_sync,
+            "coverage_complete": coverage_complete,
             "in_sync": (
-                conductor_firmware.get("dirty") is False
-                and (
-                    desired_commit is None
-                    or (firmware_build and desired_commit.startswith(firmware_build))
-                )
+                identity_in_sync
+                and coverage_complete
+                and summary.get("consistent") is True
             ),
             "release": firmware_notes.as_dict() if firmware_notes else None,
         },

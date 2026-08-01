@@ -15,6 +15,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=CONTROL_DEPLOYMENT_RECORD=/var/lib/lightweave-gitops/current.json
 Environment=CONTROL_OTA_LOCK=/var/lib/lightweave-gitops/firmware-ota.lock
+Environment=CONTROL_RELEASE_COMMIT_FILE=/var/lib/lightweave-gitops/running-commit
 ExecStart=/opt/lightweave/.venv/bin/uvicorn control.app:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
 Restart=on-failure
 RestartSec=5
@@ -23,7 +24,7 @@ TimeoutStopSec=180
 StateDirectory=lightweave
 StateDirectoryMode=0700
 ReadWritePaths=/var/lib/lightweave
-ReadOnlyPaths=/var/lib/lightweave-gitops
+ReadOnlyPaths=-/var/lib/lightweave-gitops
 UMask=0077
 
 NoNewPrivileges=true

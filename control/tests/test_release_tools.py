@@ -105,3 +105,41 @@ def test_promote_rejects_noncanonical_manifest_url(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="immutable Lightweave"):
         promote.promoted_channel(json.dumps(document).encode(), "https://example.com/release.json")
+
+
+def test_release_publisher_is_retry_safe_and_verifies_assets_before_publish() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "gh release create \"$RELEASE_TAG\"" in workflow
+    assert "--draft" in workflow
+    assert "gh release upload" in workflow
+    assert "--clobber" in workflow
+    assert '--published-at "$RELEASE_PUBLISHED_AT"' in workflow
+    assert "grep -q 'HTTP 404'" in workflow
+    assert workflow.count("cmp \"$manifest\"") == 2
+    assert workflow.count("cmp \"$firmware\"") == 2
+    assert "gh release edit \"$RELEASE_TAG\" --draft=false" in workflow
+
+
+def test_firmware_release_inputs_are_exactly_pinned() -> None:
+    platformio = (REPO_ROOT / "platformio.ini").read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "platform = espressif32 @ 7.0.1" in platformio
+    assert "makuna/NeoPixelBus @ 2.8.4" in platformio
+    assert "adafruit/Adafruit INA228 Library @ 3.0.0" in platformio
+    assert "adafruit/Adafruit BusIO @ 1.17.4" in platformio
+    assert "requirements-tooling.lock" in workflow
+    assert "pip install platformio" not in workflow
+
+
+def test_operations_ui_names_partial_field_coverage_as_deferred() -> None:
+    app_js = (REPO_ROOT / "control" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "firmware.coverage_complete === true" in app_js
+    assert 'firmware.identity_in_sync === true && !firmwareCoverageComplete' in app_js
+    assert '? "deferred"' in app_js
