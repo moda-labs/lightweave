@@ -474,6 +474,10 @@ def process_port(
         )
     if should_skip(before, manifest):
         return f"{probe['mac']} already runs approved build {approved_build(manifest)}"
+    log(
+        f"{port}: starting flash of {probe['mac']} "
+        f"to production build {approved_build(manifest)}"
+    )
     plan = extract_bundle(bundle, work / probe["mac"].replace(":", ""))
     erase = should_erase(
         before,

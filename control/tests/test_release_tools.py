@@ -272,6 +272,7 @@ def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
     )
     responses = iter([None, prior if wakes_after_probe else None, flashed])
     erase_calls = []
+    messages = []
 
     monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: next(responses))
     monkeypatch.setattr(
@@ -282,6 +283,7 @@ def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
     monkeypatch.setattr(autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []})
     monkeypatch.setattr(autoflash, "erase_board", lambda _port: erase_calls.append(True))
     monkeypatch.setattr(autoflash, "flash_board", lambda _port, _plan, _work: None)
+    monkeypatch.setattr(autoflash, "log", messages.append)
     monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
 
     result = autoflash.process_port(
@@ -294,6 +296,10 @@ def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
     )
 
     assert erase_calls == ([True] if expected_erase else [])
+    assert messages[0] == (
+        "/dev/cu.usbserial-test: starting flash of C0:CD:D6:C8:03:E0 "
+        "to production build aaaaaaaa"
+    )
     assert "role/position verified" in result
 
 
