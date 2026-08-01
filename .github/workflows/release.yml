@@ -108,6 +108,11 @@ jobs:
             test "$actual_assets" = "$expected_assets"
           }
 
+          find_draft_id() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\" and .draft == true) | .id"
+          }
+
           if draft=$(gh api "$release_api" --jq .draft 2>"$verify_dir/api-error"); then
             if [ "$draft" = false ]; then
               verify_asset_set
@@ -128,12 +133,20 @@ jobs:
               cat "$verify_dir/api-error" >&2
               exit 1
             }
-            gh release create "$RELEASE_TAG" \
-              --draft \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "Lightweave ${RELEASE_TAG}" \
-              --verify-tag \
-              --generate-notes
+            draft_id=$(find_draft_id)
+            if [ -z "$draft_id" ]; then
+              gh release create "$RELEASE_TAG" \
+                --draft \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "Lightweave ${RELEASE_TAG}" \
+                --verify-tag \
+                --generate-notes
+              draft_id=$(find_draft_id)
+            fi
+            case "$draft_id" in
+              ''|*[!0-9]*) echo "expected exactly one numeric draft release ID" >&2; exit 1 ;;
+            esac
+            release_api="repos/${GITHUB_REPOSITORY}/releases/${draft_id}"
           fi
 
           gh release upload "$RELEASE_TAG" "$manifest" "$firmware" "$serial_flash" \

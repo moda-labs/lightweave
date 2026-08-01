@@ -510,6 +510,8 @@ def test_release_publisher_is_retry_safe_and_verifies_assets_before_publish() ->
     assert "gh release upload" in workflow
     assert "--clobber" in workflow
     assert "verify_asset_set" in workflow
+    assert "find_draft_id" in workflow
+    assert 'release_api="repos/${GITHUB_REPOSITORY}/releases/${draft_id}"' in workflow
     assert "'.assets[].name'" in workflow
     assert '--published-at "$RELEASE_PUBLISHED_AT"' in workflow
     assert "grep -q 'HTTP 404'" in workflow
