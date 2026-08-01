@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**145 pass**) is green; control tests (**283 pass**) are green; all three
+(**145 pass**) is green; control tests (**284 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest locally (2026-08-01): **the production release now also drives batch
@@ -438,7 +438,7 @@ power measurement):
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 145) and control tests (283): sync
+- **Host unit tests** (`test/test_logic/`, 145) and control tests (284): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),

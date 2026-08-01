@@ -99,11 +99,14 @@ def test_autoflash_erases_only_unrecognized_firmware_and_skips_approved_clean_bu
         "PERFORMER", 0, "C0:CD:D6:C8:03:E0", 0.0, 0.0, "0.4.0", 7, "abcdef12", True
     )
 
-    assert autoflash.should_erase(None, known_device=False, factory_authorized=False) is False
-    assert autoflash.should_erase(None, known_device=False, factory_authorized=True) is True
-    assert autoflash.should_erase(None, known_device=True, factory_authorized=True) is False
+    assert autoflash.should_erase(None, device_state=None, factory_authorized=False) is False
+    assert autoflash.should_erase(None, device_state=None, factory_authorized=True) is True
+    assert autoflash.should_erase(None, device_state="known", factory_authorized=True) is False
     assert autoflash.should_erase(
-        current, known_device=False, factory_authorized=True
+        None, device_state="erase_authorized", factory_authorized=False
+    ) is True
+    assert autoflash.should_erase(
+        current, device_state=None, factory_authorized=True
     ) is False
     assert autoflash.should_skip(current, manifest) is True
     assert autoflash.should_skip(dirty, manifest) is False
@@ -128,7 +131,7 @@ def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
         "PERFORMER", 4, "C0:CD:D6:C8:03:E0", 0.3, 0.45, "0.4.0", 7, "a" * 8, False
     )
     responses = iter([None, prior if wakes_after_probe else None, flashed])
-    erase_decisions = []
+    erase_calls = []
 
     monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: next(responses))
     monkeypatch.setattr(
@@ -137,11 +140,8 @@ def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
         lambda _port: {"mac": "C0:CD:D6:C8:03:E0"},
     )
     monkeypatch.setattr(autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []})
-    monkeypatch.setattr(
-        autoflash,
-        "flash_board",
-        lambda _port, _plan, _work, erase: erase_decisions.append(erase),
-    )
+    monkeypatch.setattr(autoflash, "erase_board", lambda _port: erase_calls.append(True))
+    monkeypatch.setattr(autoflash, "flash_board", lambda _port, _plan, _work: None)
     monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
 
     result = autoflash.process_port(
@@ -153,7 +153,7 @@ def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
         factory_authorized=factory_authorized,
     )
 
-    assert erase_decisions == [expected_erase]
+    assert erase_calls == ([True] if expected_erase else [])
     assert "role/position verified" in result
 
 
@@ -184,7 +184,7 @@ def test_autoflash_unrecognized_board_fails_closed_without_factory_authorization
     assert not (tmp_path / "devices.json").exists()
 
 
-def test_autoflash_remembers_rom_mac_before_factory_mutation_and_never_reerases(
+def test_autoflash_does_not_record_factory_device_before_bundle_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = tmp_path / "devices.json"
@@ -195,28 +195,74 @@ def test_autoflash_remembers_rom_mac_before_factory_mutation_and_never_reerases(
         lambda _port: {"mac": "C0:CD:D6:C8:03:E0"},
     )
     monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        autoflash,
+        "extract_bundle",
+        lambda _bundle, _work: (_ for _ in ()).throw(ValueError("bad bundle")),
+    )
+
+    with pytest.raises(ValueError, match="bad bundle"):
+        autoflash.process_port(
+            "/dev/cu.usbserial-test",
+            {"commit": "a" * 40},
+            tmp_path / "bundle.zip",
+            tmp_path / "work",
+            device_registry=registry,
+            factory_authorized=True,
+        )
+
+    assert not registry.exists()
+
+
+def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "devices.json"
+    mac = "C0:CD:D6:C8:03:E0"
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(autoflash, "probe_board", lambda _port: {"mac": mac})
+    monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []})
+    flash_calls = []
+    monkeypatch.setattr(autoflash, "flash_board", lambda *_args: flash_calls.append(True))
+    erase_calls = []
 
-    erase_decisions = []
+    def fail_erase(_port):
+        erase_calls.append("failed")
+        raise RuntimeError("simulated erase failure")
 
-    def fail_after_record(_port, _plan, _work, erase):
-        erase_decisions.append(erase)
-        assert autoflash.load_known_devices(registry) == {"C0:CD:D6:C8:03:E0"}
-        raise RuntimeError("simulated interrupted flash")
+    monkeypatch.setattr(autoflash, "erase_board", fail_erase)
+    call = lambda: autoflash.process_port(
+        "/dev/cu.usbserial-test",
+        {"commit": "a" * 40},
+        tmp_path / "bundle.zip",
+        tmp_path / "work",
+        device_registry=registry,
+        factory_authorized=True,
+    )
 
-    monkeypatch.setattr(autoflash, "flash_board", fail_after_record)
-    for _attempt in range(2):
-        with pytest.raises(RuntimeError, match="interrupted flash"):
-            autoflash.process_port(
-                "/dev/cu.usbserial-test",
-                {"commit": "a" * 40},
-                tmp_path / "bundle.zip",
-                tmp_path / "work",
-                device_registry=registry,
-                factory_authorized=True,
-            )
+    with pytest.raises(RuntimeError, match="erase failure"):
+        call()
+    assert autoflash.load_device_registry(registry) == {mac: "erase_pending"}
+    with pytest.raises(RuntimeError, match="ambiguous result"):
+        call()
+    assert erase_calls == ["failed"]
+    assert flash_calls == []
 
-    assert erase_decisions == [True, False]
+    autoflash.authorize_factory_retry(registry, mac)
+    monkeypatch.setattr(autoflash, "erase_board", lambda _port: erase_calls.append("succeeded"))
+    monkeypatch.setattr(
+        autoflash,
+        "flash_board",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("simulated write failure")),
+    )
+    with pytest.raises(RuntimeError, match="write failure"):
+        call()
+    assert autoflash.load_device_registry(registry) == {mac: "known"}
+
+    with pytest.raises(RuntimeError, match="write failure"):
+        call()
+    assert erase_calls == ["failed", "succeeded"]
 
 
 def test_autoflash_reuses_only_hash_verified_cached_bundle(tmp_path: Path) -> None:

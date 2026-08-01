@@ -109,10 +109,13 @@ def approved_build(manifest: dict[str, Any]) -> str:
 def should_erase(
     info: DeviceInfo | None,
     *,
-    known_device: bool,
+    device_state: str | None,
     factory_authorized: bool,
 ) -> bool:
-    return info is None and not known_device and factory_authorized
+    return info is None and (
+        device_state == "erase_authorized"
+        or (device_state is None and factory_authorized)
+    )
 
 
 def should_skip(info: DeviceInfo | None, manifest: dict[str, Any]) -> bool:
@@ -201,31 +204,43 @@ def _write_atomic(path: Path, data: bytes) -> None:
         os.close(descriptor)
 
 
-def load_known_devices(path: Path) -> set[str]:
+def load_device_registry(path: Path) -> dict[str, str]:
     if not path.is_file():
-        return set()
+        return {}
     document = _json(path.read_bytes(), "known-device registry")
-    if set(document) != {"schema_version", "macs"} or document["schema_version"] != 1:
+    if set(document) != {"schema_version", "devices"} or document["schema_version"] != 1:
         raise ValueError("known-device registry is invalid")
-    macs = document["macs"]
+    devices = document["devices"]
     if (
-        not isinstance(macs, list)
-        or any(not isinstance(mac, str) or not MAC_RE.fullmatch(mac) for mac in macs)
-        or len(macs) != len(set(macs))
+        not isinstance(devices, dict)
+        or any(
+            not isinstance(mac, str)
+            or not MAC_RE.fullmatch(mac)
+            or not isinstance(state, str)
+            or state not in {"known", "erase_pending", "erase_authorized"}
+            for mac, state in devices.items()
+        )
     ):
-        raise ValueError("known-device registry MACs are invalid")
-    return set(macs)
+        raise ValueError("known-device registry entries are invalid")
+    return dict(devices)
 
 
-def remember_device(path: Path, mac: str) -> None:
+def write_device_state(path: Path, mac: str, state: str) -> None:
     if not MAC_RE.fullmatch(mac):
         raise ValueError("cannot remember an invalid ROM MAC")
-    macs = load_known_devices(path)
-    if mac in macs:
-        return
-    macs.add(mac)
-    document = {"schema_version": 1, "macs": sorted(macs)}
+    if state not in {"known", "erase_pending", "erase_authorized"}:
+        raise ValueError("cannot remember an invalid device state")
+    devices = load_device_registry(path)
+    devices[mac] = state
+    document = {"schema_version": 1, "devices": dict(sorted(devices.items()))}
     _write_atomic(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+
+
+def authorize_factory_retry(path: Path, mac: str) -> None:
+    devices = load_device_registry(path)
+    if devices.get(mac) != "erase_pending":
+        raise ValueError("device does not have an ambiguous factory erase")
+    write_device_state(path, mac, "erase_authorized")
 
 
 def refresh_artifact(channel_url: str, cache: Path) -> tuple[dict[str, Any], Path] | None:
@@ -395,11 +410,14 @@ def probe_board(port: str) -> dict[str, str]:
     return probe
 
 
-def flash_board(port: str, plan: dict[str, Any], directory: Path, erase: bool) -> None:
+def erase_board(port: str) -> None:
     base = esptool_command() + ["--chip", "esp32", "--port", port, "--baud", "115200"]
-    if erase:
-        log(f"{port}: factory/unrecognized firmware; performing one-time erase")
-        run_tool(base + ["erase_flash"])
+    log(f"{port}: factory/unrecognized firmware; performing one-time erase")
+    run_tool(base + ["erase_flash"])
+
+
+def flash_board(port: str, plan: dict[str, Any], directory: Path) -> None:
+    base = esptool_command() + ["--chip", "esp32", "--port", port, "--baud", "115200"]
     arguments = base + [
         "write_flash", "-z", "--flash_mode", plan["flash_mode"],
         "--flash_freq", plan["flash_freq"], "--flash_size", plan["flash_size"],
@@ -427,7 +445,7 @@ def process_port(
     device_registry: Path,
     factory_authorized: bool,
 ) -> str:
-    known_devices = load_known_devices(device_registry)
+    devices = load_device_registry(device_registry)
     before = read_info(port)
     probe = probe_board(port)
     if before is None:
@@ -437,28 +455,33 @@ def process_port(
         before = read_info(port, 5.0)
     if before and before.mac != probe["mac"]:
         raise RuntimeError("serial identity and ROM MAC disagree")
-    known_device = probe["mac"] in known_devices
-    if before is None and not known_device and not factory_authorized:
+    device_state = devices.get(probe["mac"])
+    if before is not None:
+        write_device_state(device_registry, probe["mac"], "known")
+        device_state = "known"
+    elif device_state == "erase_pending":
+        raise RuntimeError(
+            "prior factory erase has an ambiguous result; authorize this ROM MAC before retrying"
+        )
+    if before is None and device_state not in {"known", "erase_authorized"} and not factory_authorized:
         raise RuntimeError(
             "device is not recognized; not flashing without explicit factory authorization"
         )
-    if before is not None or factory_authorized:
-        # Commit the ROM MAC before any mutation. If a write is interrupted,
-        # reconnecting the same board can retry without another destructive erase.
-        remember_device(device_registry, probe["mac"])
     if should_skip(before, manifest):
         return f"{probe['mac']} already runs approved build {approved_build(manifest)}"
     plan = extract_bundle(bundle, work / probe["mac"].replace(":", ""))
-    flash_board(
-        port,
-        plan,
-        work / probe["mac"].replace(":", ""),
-        should_erase(
-            before,
-            known_device=known_device,
-            factory_authorized=factory_authorized,
-        ),
+    erase = should_erase(
+        before,
+        device_state=device_state,
+        factory_authorized=factory_authorized,
     )
+    if erase:
+        # A pending marker is intentionally ambiguous. A crash or command error
+        # leaves it in place and requires explicit per-MAC operator authorization.
+        write_device_state(device_registry, probe["mac"], "erase_pending")
+        erase_board(port)
+        write_device_state(device_registry, probe["mac"], "known")
+    flash_board(port, plan, work / probe["mac"].replace(":", ""))
     time.sleep(1.5)
     after = read_info(port, 5.0)
     if not after or after.build != approved_build(manifest) or after.dirty:
@@ -584,6 +607,14 @@ def uninstall(_args: argparse.Namespace) -> int:
     return 0
 
 
+def retry_factory(args: argparse.Namespace) -> int:
+    state = Path(args.state).expanduser()
+    mac = args.mac.upper()
+    authorize_factory_retry(state / "devices.json", mac)
+    print(f"authorized one factory-erase retry for {mac}; unplug and reconnect the board")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Flash connected FireBeetles from production releases")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -607,6 +638,10 @@ def main() -> int:
     )
     installer.set_defaults(function=install)
     sub.add_parser("uninstall").set_defaults(function=uninstall)
+    retry = sub.add_parser("retry-factory")
+    retry.add_argument("mac", help="ROM MAC printed in the failed watcher log")
+    retry.add_argument("--state", default="~/Library/Application Support/Lightweave/autoflash")
+    retry.set_defaults(function=retry_factory)
     args = parser.parse_args()
     return args.function(args)
 
