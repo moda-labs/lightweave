@@ -108,6 +108,46 @@ def test_atomic_state_replacements_and_deletions_sync_the_parent(
     assert synced == [state, state, state]
 
 
+@pytest.mark.parametrize("completion_path", ["deploy", "rollback", "recovery"])
+def test_transaction_is_only_deleted_after_filesystem_commit_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, completion_path: str
+) -> None:
+    events = []
+
+    monkeypatch.setattr(gitops, "_sync_filesystems", lambda: events.append("sync"))
+    original_unlink = gitops._durable_unlink
+
+    def unlink(path):
+        if path.name == "transaction.json":
+            events.append("unlink")
+            assert events[-2:] == ["sync", "unlink"]
+        original_unlink(path)
+
+    monkeypatch.setattr(gitops, "_durable_unlink", unlink)
+
+    configuration = config(tmp_path)
+    reconciler = FakeReconciler(
+        configuration,
+        fake_responses(configuration),
+        fail_health=completion_path == "rollback",
+    )
+    if completion_path == "recovery":
+        reconciler._write_transaction(
+            "b" * 40,
+            reconciler._venv_path("b" * 40),
+            None,
+            reconciler._snapshot_runtime(),
+        )
+        reconciler.commit = "a" * 40
+        assert reconciler.reconcile()["status"] == "recovered"
+    elif completion_path == "rollback":
+        with pytest.raises(gitops.ReconcileError, match="was rolled back"):
+            reconciler.reconcile()
+    else:
+        assert reconciler.reconcile()["status"] == "deployed"
+    assert events[-2:] == ["sync", "unlink"]
+
+
 def test_manifest_hash_is_verified_before_parsing_or_git(tmp_path: Path) -> None:
     bad_channel = json.dumps(
         {
@@ -466,6 +506,7 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert 'release_venv="$repo/.venvs/$running_commit"' in installer
     assert 'mv -Tf "$repo/.venv.new" "$repo/.venv"' in installer
     assert "lightweave-gitops-recovery.service" in installer
+    assert '"$repo/deploy/pi/lightweave-control.service"' in installer
     assert "systemctl restart lightweave-control.service" in installer
     assert 'if [ "$health_commit" != "$running_commit" ]' in installer
     assert "ReadOnlyPaths=-/var/lib/lightweave-gitops" in control_unit
@@ -605,12 +646,43 @@ def test_boot_recovery_restores_state_without_starting_control(tmp_path: Path) -
 
 def test_systemd_orders_boot_recovery_before_control_start() -> None:
     control_unit = (SCRIPT.parent / "lightweave-control.service").read_text(encoding="utf-8")
+    gitops_unit = (SCRIPT.parent / "lightweave-gitops.service").read_text(encoding="utf-8")
     recovery_unit = (SCRIPT.parent / "lightweave-gitops-recovery.service").read_text(
         encoding="utf-8"
     )
 
     assert "Requires=lightweave-gitops-recovery.service" in control_unit
     assert "After=network-online.target lightweave-gitops-recovery.service" in control_unit
-    assert "Before=lightweave-control.service" in recovery_unit
+    assert "Requires=lightweave-gitops-recovery.service" in gitops_unit
+    assert "After=network-online.target lightweave-gitops-recovery.service" in gitops_unit
+    assert "Before=lightweave-control.service lightweave-gitops.service" in recovery_unit
     assert "ExecStart=/usr/local/lib/lightweave/gitops_reconcile.py --recover-only" in recovery_unit
     assert "RemainAfterExit=yes" in recovery_unit
+
+
+def test_boot_recovery_lock_blocks_while_normal_reconcile_lock_is_nonblocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flags = []
+
+    def record(_lock, value):
+        flags.append(value)
+
+    monkeypatch.setattr(gitops.fcntl, "flock", record)
+
+    assert gitops._acquire_process_lock(object(), recover_only=True) is True
+    assert gitops._acquire_process_lock(object(), recover_only=False) is True
+    assert flags == [gitops.fcntl.LOCK_EX, gitops.fcntl.LOCK_EX | gitops.fcntl.LOCK_NB]
+
+
+def test_boot_recovery_lock_contention_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def contend(_lock, _flags):
+        raise BlockingIOError
+
+    monkeypatch.setattr(gitops.fcntl, "flock", contend)
+
+    with pytest.raises(gitops.ReconcileError, match="boot recovery lock"):
+        gitops._acquire_process_lock(object(), recover_only=True)
+    assert gitops._acquire_process_lock(object(), recover_only=False) is False

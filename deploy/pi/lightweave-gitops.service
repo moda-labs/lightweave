@@ -2,7 +2,8 @@
 Description=Reconcile Lightweave to the approved GitOps release
 Documentation=https://github.com/underminedsk/lightweave/tree/main/deploy/pi
 Wants=network-online.target
-After=network-online.target
+Requires=lightweave-gitops-recovery.service
+After=network-online.target lightweave-gitops-recovery.service
 
 [Service]
 Type=oneshot

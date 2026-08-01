@@ -130,6 +130,11 @@ def _durable_unlink(path: Path) -> None:
     _fsync_directory(path.parent)
 
 
+def _sync_filesystems() -> None:
+    """Flush the checked-out repository and deployment state before commit."""
+    os.sync()
+
+
 def _fsync_file(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -601,6 +606,7 @@ class GitOpsReconciler:
         if finalize:
             self._run(["systemctl", "start", "lightweave-control.service"])
             self._healthcheck(previous_commit)
+            _sync_filesystems()
             _durable_unlink(self._transaction_path())
         return previous_commit
 
@@ -749,6 +755,7 @@ class GitOpsReconciler:
             self._run(["systemctl", "daemon-reload"])
             self._run(["systemctl", "enable", "--now", "lightweave-gitops.timer"])
             self._write_history(record)
+            _sync_filesystems()
             _durable_unlink(self._transaction_path())
             return {"status": "deployed", "release": manifest.release, "commit": manifest.commit}
         except Exception as deploy_error:
@@ -764,12 +771,24 @@ class GitOpsReconciler:
                 self._run(["systemctl", "daemon-reload"])
                 self._run(["systemctl", "start", "lightweave-control.service"])
                 self._healthcheck(current_commit)
+                _sync_filesystems()
                 _durable_unlink(self._transaction_path())
             except Exception as rollback_error:
                 raise ReconcileError(
                     f"deployment failed ({deploy_error}); rollback also failed ({rollback_error})"
                 ) from rollback_error
             raise ReconcileError(f"deployment failed and was rolled back: {deploy_error}") from deploy_error
+
+
+def _acquire_process_lock(lock: Any, *, recover_only: bool) -> bool:
+    flags = fcntl.LOCK_EX if recover_only else fcntl.LOCK_EX | fcntl.LOCK_NB
+    try:
+        fcntl.flock(lock, flags)
+    except BlockingIOError as error:
+        if recover_only:
+            raise ReconcileError("boot recovery lock is unexpectedly unavailable") from error
+        return False
+    return True
 
 
 def main() -> int:
@@ -786,7 +805,9 @@ def main() -> int:
     lock_path = Path("/run/lock/lightweave-gitops.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not _acquire_process_lock(lock, recover_only=args.recover_only):
+            print("lightweave GitOps reconciliation is already running", file=sys.stderr)
+            return 0
         if args.recover_only:
             result = reconciler.recover_before_control_start()
         elif args.check:
@@ -805,9 +826,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except BlockingIOError:
-        print("lightweave GitOps reconciliation is already running", file=sys.stderr)
-        raise SystemExit(0)
     except Exception as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(1)
