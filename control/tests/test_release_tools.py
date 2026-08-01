@@ -247,7 +247,10 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
     with pytest.raises(RuntimeError) as error:
         call()
     assert f"ambiguous result for {mac}" in str(error.value)
-    assert f"retry-factory {mac}" in str(error.value)
+    retry_command = autoflash.shlex.join(
+        [sys.executable, str(Path(autoflash.__file__).resolve()), "retry-factory", mac]
+    )
+    assert f"run: {retry_command}" in str(error.value)
     assert erase_calls == ["failed"]
     assert flash_calls == []
 
