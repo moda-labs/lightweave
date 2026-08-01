@@ -20,10 +20,12 @@ from control.releases import load_release_catalog, parse_release_manifest
 def build_manifest(
     *,
     firmware: Path,
+    serial_flash: Path,
     repository: str,
     commit: str,
     tag: str,
     artifact_url: str,
+    serial_flash_url: str,
     published_at: str,
 ) -> dict:
     version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -33,6 +35,7 @@ def build_manifest(
     if version not in notes:
         raise ValueError(f"RELEASES.json has no notes for VERSION {version}")
     firmware_bytes = firmware.read_bytes()
+    serial_flash_bytes = serial_flash.read_bytes()
     document = {
         "schema_version": 1,
         "release": tag,
@@ -49,6 +52,12 @@ def build_manifest(
             "size": len(firmware_bytes),
             "crc32": zlib.crc32(firmware_bytes) & 0xFFFFFFFF,
         },
+        "serial_flash": {
+            "filename": serial_flash.name,
+            "url": serial_flash_url,
+            "sha256": hashlib.sha256(serial_flash_bytes).hexdigest(),
+            "size": len(serial_flash_bytes),
+        },
     }
     return parse_release_manifest(document).as_dict()
 
@@ -56,10 +65,12 @@ def build_manifest(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a verified Lightweave release manifest")
     parser.add_argument("--firmware", type=Path, required=True)
+    parser.add_argument("--serial-flash", type=Path, required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--artifact-url", required=True)
+    parser.add_argument("--serial-flash-url", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--published-at",
@@ -68,10 +79,12 @@ def main() -> int:
     args = parser.parse_args()
     document = build_manifest(
         firmware=args.firmware,
+        serial_flash=args.serial_flash,
         repository=args.repository,
         commit=args.commit,
         tag=args.tag,
         artifact_url=args.artifact_url,
+        serial_flash_url=args.serial_flash_url,
         published_at=args.published_at,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

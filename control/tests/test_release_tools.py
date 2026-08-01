@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import zipfile
 
 import pytest
 
@@ -23,21 +24,182 @@ def load_script(name: str):
 
 
 build = load_script("build_release_manifest")
+bundle = load_script("build_serial_flash_bundle")
+autoflash = load_script("firebeetle_autoflash")
 promote = load_script("promote_release")
+
+
+def autoflash_manifest(bundle_data: bytes) -> dict:
+    filename = f"lightweave-serial-flash-{TAG}.zip"
+    return {
+        "version": VERSION,
+        "release": TAG,
+        "repository": "https://github.com/underminedsk/lightweave.git",
+        "ref": f"refs/tags/{TAG}",
+        "commit": "a" * 40,
+        "serial_flash": {
+            "filename": filename,
+            "url": (
+                "https://github.com/underminedsk/lightweave/releases/download/"
+                f"{TAG}/{filename}"
+            ),
+            "size": len(bundle_data),
+            "sha256": hashlib.sha256(bundle_data).hexdigest(),
+        },
+    }
+
+
+def test_serial_flash_bundle_is_deterministic_and_self_verifying(tmp_path: Path) -> None:
+    inputs = {}
+    for _offset, filename in bundle.SEGMENTS:
+        path = tmp_path / filename
+        path.write_bytes(filename.encode())
+        inputs[filename] = path
+    first = tmp_path / "first.zip"
+    second = tmp_path / "second.zip"
+    bundle.build_bundle(inputs=inputs, output=first)
+    bundle.build_bundle(inputs=inputs, output=second)
+
+    assert first.read_bytes() == second.read_bytes()
+    plan = autoflash.extract_bundle(first, tmp_path / "extracted")
+    assert {item["offset"] for item in plan["segments"]} == set(autoflash.EXPECTED_SEGMENTS)
+
+
+def test_autoflash_rejects_compressed_serial_bundle(tmp_path: Path) -> None:
+    archive = tmp_path / "compressed.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+        output.writestr("flash-plan.json", "{}")
+        for filename in autoflash.EXPECTED_SEGMENTS.values():
+            output.writestr(filename, filename * 100)
+
+    with pytest.raises(ValueError, match="stored members"):
+        autoflash.extract_bundle(archive, tmp_path / "extracted")
+
+
+def test_autoflash_parses_lightweave_identity_and_expected_rom_probe() -> None:
+    info = autoflash.parse_device_info(
+        "role=PERFORMER  id=4  mac=C0:CD:D6:C8:03:E0  x=0.30  y=0.45\n"
+        "firmware: v0.4.0  proto=7  build=abcdef12"
+    )
+    probe = autoflash.parse_probe(
+        "Chip is ESP32-D0WD-V3 (revision v3.1)\nCrystal is 40MHz\n"
+        "MAC: c0:cd:d6:c8:03:e0\nDetected flash size: 4MB\n"
+    )
+
+    assert info and info.node_id == 4 and info.build == "abcdef12" and not info.dirty
+    assert probe and probe["mac"] == "C0:CD:D6:C8:03:E0"
+
+
+def test_autoflash_erases_only_unrecognized_firmware_and_skips_approved_clean_build() -> None:
+    manifest = {"commit": "abcdef12" + "0" * 32}
+    current = autoflash.DeviceInfo(
+        "PERFORMER", 0, "C0:CD:D6:C8:03:E0", 0.0, 0.0, "0.4.0", 7, "abcdef12", False
+    )
+    dirty = autoflash.DeviceInfo(
+        "PERFORMER", 0, "C0:CD:D6:C8:03:E0", 0.0, 0.0, "0.4.0", 7, "abcdef12", True
+    )
+
+    assert autoflash.should_erase(None) is True
+    assert autoflash.should_erase(current) is False
+    assert autoflash.should_skip(current, manifest) is True
+    assert autoflash.should_skip(dirty, manifest) is False
+
+
+def test_autoflash_reuses_only_hash_verified_cached_bundle(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    release_dir = cache / TAG
+    release_dir.mkdir(parents=True)
+    bundle_data = b"serial bundle"
+    bundle_path = release_dir / f"lightweave-serial-flash-{TAG}.zip"
+    bundle_path.write_bytes(bundle_data)
+    manifest = autoflash_manifest(bundle_data)
+    (release_dir / "lightweave-release.json").write_text(json.dumps(manifest))
+    (cache / "current.json").write_text(json.dumps({"release": TAG}))
+
+    loaded, loaded_path = autoflash.load_cached_artifact(cache)
+    assert loaded["commit"] == "a" * 40
+    assert loaded_path == bundle_path
+
+    bundle_path.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="integrity"):
+        autoflash.load_cached_artifact(cache)
+
+    (cache / "current.json").write_text(json.dumps({"release": "../../escape"}))
+    with pytest.raises(ValueError, match="pointer release"):
+        autoflash.load_cached_artifact(cache)
+
+
+def test_autoflash_refreshes_only_canonical_hash_pinned_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_url = (
+        "https://raw.githubusercontent.com/underminedsk/lightweave/"
+        "main/deploy/channels/production.json"
+    )
+    manifest_url = (
+        "https://github.com/underminedsk/lightweave/releases/download/"
+        f"{TAG}/lightweave-release.json"
+    )
+    bundle_data = b"serial bundle"
+    manifest = autoflash_manifest(bundle_data)
+    manifest_data = json.dumps(manifest).encode()
+    channel_data = json.dumps(
+        {
+            "schema_version": 1,
+            "enabled": True,
+            "manifest_url": manifest_url,
+            "manifest_sha256": hashlib.sha256(manifest_data).hexdigest(),
+        }
+    ).encode()
+    downloads = {
+        channel_url: channel_data,
+        manifest_url: manifest_data,
+        manifest["serial_flash"]["url"]: bundle_data,
+    }
+    monkeypatch.setattr(autoflash, "_download", lambda url, _limit: downloads[url])
+
+    loaded, bundle_path = autoflash.refresh_artifact(channel_url, tmp_path / "cache")
+
+    assert loaded["commit"] == "a" * 40
+    assert bundle_path.read_bytes() == bundle_data
+    assert autoflash.load_cached_artifact(tmp_path / "cache") == (loaded, bundle_path)
+
+
+def test_autoflash_honors_disabled_production_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel = json.dumps(
+        {
+            "schema_version": 1,
+            "enabled": False,
+            "manifest_url": None,
+            "manifest_sha256": None,
+        }
+    ).encode()
+    monkeypatch.setattr(autoflash, "_download", lambda _url, _limit: channel)
+
+    assert autoflash.refresh_artifact("https://example.com/channel.json", tmp_path) is None
 
 
 def test_build_manifest_binds_code_notes_and_firmware(tmp_path: Path) -> None:
     firmware = tmp_path / f"lightweave-field-{TAG}.bin"
     firmware.write_bytes(b"field firmware")
+    serial_flash = tmp_path / f"lightweave-serial-flash-{TAG}.zip"
+    serial_flash.write_bytes(b"serial bundle")
 
     document = build.build_manifest(
         firmware=firmware,
+        serial_flash=serial_flash,
         repository="https://github.com/underminedsk/lightweave.git",
         commit="a" * 40,
         tag=TAG,
         artifact_url=(
             "https://github.com/underminedsk/lightweave/releases/download/"
             f"{TAG}/lightweave-field-{TAG}.bin"
+        ),
+        serial_flash_url=(
+            "https://github.com/underminedsk/lightweave/releases/download/"
+            f"{TAG}/lightweave-serial-flash-{TAG}.zip"
         ),
         published_at="2026-08-01T19:00:00Z",
     )
@@ -46,18 +208,23 @@ def test_build_manifest_binds_code_notes_and_firmware(tmp_path: Path) -> None:
     assert document["notes"]["control_changes"]
     assert document["notes"]["firmware_changes"]
     assert document["firmware"]["sha256"] == hashlib.sha256(b"field firmware").hexdigest()
+    assert document["serial_flash"]["sha256"] == hashlib.sha256(b"serial bundle").hexdigest()
 
 
 def test_build_manifest_rejects_tag_version_mismatch(tmp_path: Path) -> None:
     firmware = tmp_path / "field.bin"
     firmware.write_bytes(b"field firmware")
+    serial_flash = tmp_path / "serial.zip"
+    serial_flash.write_bytes(b"serial bundle")
     with pytest.raises(ValueError, match="does not match VERSION"):
         build.build_manifest(
             firmware=firmware,
+            serial_flash=serial_flash,
             repository="https://github.com/underminedsk/lightweave.git",
             commit="a" * 40,
             tag="v9.9.9",
             artifact_url="https://github.com/underminedsk/lightweave/releases/download/v9.9.9/field.bin",
+            serial_flash_url="https://github.com/underminedsk/lightweave/releases/download/v9.9.9/serial.zip",
             published_at="2026-08-01T19:00:00Z",
         )
 
@@ -65,14 +232,21 @@ def test_build_manifest_rejects_tag_version_mismatch(tmp_path: Path) -> None:
 def test_promote_channel_pins_exact_manifest_bytes(tmp_path: Path) -> None:
     firmware = tmp_path / f"lightweave-field-{TAG}.bin"
     firmware.write_bytes(b"field firmware")
+    serial_flash = tmp_path / f"lightweave-serial-flash-{TAG}.zip"
+    serial_flash.write_bytes(b"serial bundle")
     document = build.build_manifest(
         firmware=firmware,
+        serial_flash=serial_flash,
         repository="https://github.com/underminedsk/lightweave.git",
         commit="a" * 40,
         tag=TAG,
         artifact_url=(
             "https://github.com/underminedsk/lightweave/releases/download/"
             f"{TAG}/lightweave-field-{TAG}.bin"
+        ),
+        serial_flash_url=(
+            "https://github.com/underminedsk/lightweave/releases/download/"
+            f"{TAG}/lightweave-serial-flash-{TAG}.zip"
         ),
         published_at="2026-08-01T19:00:00Z",
     )
@@ -92,14 +266,21 @@ def test_promote_channel_pins_exact_manifest_bytes(tmp_path: Path) -> None:
 def test_promote_rejects_noncanonical_manifest_url(tmp_path: Path) -> None:
     firmware = tmp_path / f"lightweave-field-{TAG}.bin"
     firmware.write_bytes(b"field firmware")
+    serial_flash = tmp_path / f"lightweave-serial-flash-{TAG}.zip"
+    serial_flash.write_bytes(b"serial bundle")
     document = build.build_manifest(
         firmware=firmware,
+        serial_flash=serial_flash,
         repository="https://github.com/underminedsk/lightweave.git",
         commit="a" * 40,
         tag=TAG,
         artifact_url=(
             "https://github.com/underminedsk/lightweave/releases/download/"
             f"{TAG}/lightweave-field-{TAG}.bin"
+        ),
+        serial_flash_url=(
+            "https://github.com/underminedsk/lightweave/releases/download/"
+            f"{TAG}/lightweave-serial-flash-{TAG}.zip"
         ),
         published_at="2026-08-01T19:00:00Z",
     )
@@ -122,7 +303,14 @@ def test_release_publisher_is_retry_safe_and_verifies_assets_before_publish() ->
     assert "grep -q 'HTTP 404'" in workflow
     assert workflow.count("cmp \"$manifest\"") == 2
     assert workflow.count("cmp \"$firmware\"") == 2
+    assert workflow.count("cmp \"$serial_flash\"") == 2
+    assert "build_serial_flash_bundle.py" in workflow
     assert "gh release edit \"$RELEASE_TAG\" --draft=false" in workflow
+
+    ci_workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "build_serial_flash_bundle.py" in ci_workflow
 
 
 def test_firmware_release_inputs_are_exactly_pinned() -> None:

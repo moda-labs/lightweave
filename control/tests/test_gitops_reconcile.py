@@ -49,6 +49,12 @@ def release_manifest(data: bytes = b"firmware") -> dict:
             "size": len(data),
             "crc32": zlib.crc32(data) & 0xFFFFFFFF,
         },
+        "serial_flash": {
+            "filename": "serial.zip",
+            "url": "https://github.com/example/serial.zip",
+            "sha256": hashlib.sha256(b"serial bundle").hexdigest(),
+            "size": len(b"serial bundle"),
+        },
     }
 
 

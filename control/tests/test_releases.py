@@ -45,6 +45,12 @@ def manifest(data: bytes = b"firmware", version: str = "0.3.0") -> dict:
             "size": len(data),
             "crc32": zlib.crc32(data) & 0xFFFFFFFF,
         },
+        "serial_flash": {
+            "filename": f"lightweave-serial-flash-v{version}.zip",
+            "url": f"https://github.com/underminedsk/lightweave/releases/download/v{version}/lightweave-serial-flash-v{version}.zip",
+            "sha256": hashlib.sha256(b"serial bundle").hexdigest(),
+            "size": len(b"serial bundle"),
+        },
     }
 
 
@@ -78,6 +84,7 @@ def test_release_manifest_requires_immutable_tag_commit_and_hashed_firmware() ->
     assert parsed.ref == "refs/tags/v0.3.0"
     assert parsed.commit == "a" * 40
     assert parsed.firmware["size"] == 8
+    assert parsed.serial_flash["filename"].endswith(".zip")
 
     bad = manifest()
     bad["ref"] = "refs/heads/main"

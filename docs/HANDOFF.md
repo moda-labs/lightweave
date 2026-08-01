@@ -8,10 +8,19 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**145 pass**) is green; control tests (**271 pass**) are green; all three
+(**145 pass**) is green; control tests (**278 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-01): **pull-based Pi releases and separate deployed-change
+Latest locally (2026-08-01): **the production release now also drives batch
+FireBeetle provisioning.** Tag CI builds a deterministic, manifest-bound serial
+ZIP containing the bootloader, partition table, OTA boot helper, field firmware,
+and verified flash plan. The checked-in macOS LaunchAgent watcher follows only
+the reviewed production channel, caches the last verified bundle, filters for
+the fleet's WCH + ESP32/40 MHz/4 MB signature, preserves valid Lightweave NVS,
+erases factory/unrecognized boards once, and verifies the promoted clean build
+plus role/ID/position after upload. See `FLASHING.md`.
+
+Previous latest (2026-08-01): **pull-based Pi releases and separate deployed-change
 visibility are implemented for v0.4.0.** A reviewed `production.json` pointer
 selects one hash-pinned immutable release manifest; each Pi polls outbound,
 verifies the repository/tag/commit and firmware hashes, backs up state, deploys
@@ -429,7 +438,7 @@ power measurement):
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 145) and control tests (271): sync
+- **Host unit tests** (`test/test_logic/`, 145) and control tests (278): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),

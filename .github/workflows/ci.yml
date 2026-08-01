@@ -33,7 +33,14 @@ jobs:
       - name: Run host firmware tests
         run: pio test -e native
       - name: Build canonical field firmware
-        run: pio run -e field
+        run: |
+          pio run -e field
+          python scripts/build_serial_flash_bundle.py \
+            --bootloader .pio/build/field/bootloader.bin \
+            --partitions .pio/build/field/partitions.bin \
+            --boot-app "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+            --firmware .pio/build/field/firmware.bin \
+            --output /tmp/lightweave-serial-flash.zip
       - name: Validate release metadata
         run: |
           python -c 'from pathlib import Path; from control.releases import load_release_catalog; releases = load_release_catalog(Path("RELEASES.json")); assert releases[0].version == Path("VERSION").read_text().strip()'

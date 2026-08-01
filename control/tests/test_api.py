@@ -77,6 +77,12 @@ def deployment_record(tmp_path: Path, data: bytes = b"gitops firmware") -> dict:
                 "size": len(data),
                 "crc32": zlib.crc32(data) & 0xFFFFFFFF,
             },
+            "serial_flash": {
+                "filename": "lightweave-serial-flash-v0.3.0.zip",
+                "url": "https://github.com/underminedsk/lightweave/releases/download/v0.3.0/lightweave-serial-flash-v0.3.0.zip",
+                "sha256": hashlib.sha256(b"serial bundle").hexdigest(),
+                "size": len(b"serial bundle"),
+            },
         },
     }
 

@@ -29,6 +29,8 @@ Every release contains one exact set of:
 - the Git tag and full commit deployed to `/opt/lightweave`;
 - separate user-facing control-plane and firmware notes from `RELEASES.json`;
 - the canonical `field` firmware binary;
+- a deterministic serial-flash ZIP containing all four flash segments plus
+  addresses and hashes for factory provisioning and NVS-preserving USB updates;
 - firmware size, SHA-256, and CRC32;
 - an immutable `lightweave-release.json` manifest binding all of the above.
 
@@ -42,6 +44,10 @@ The production channel contains only the immutable manifest URL and the SHA-256
 of its exact bytes. The Pi rejects moving branch refs, short commits, unexpected
 repositories, changed manifest bytes, and firmware that fails any integrity
 check.
+
+The macOS FireBeetle watcher consumes this same promoted channel and caches its
+serial bundle. It neither follows the newest tag nor builds a local checkout, so
+Pi deployment, field OTA, and factory provisioning name one reviewed firmware.
 
 ## 1. Prepare and merge a release
 
@@ -77,11 +83,12 @@ git push origin v0.4.0
 ```
 
 The `Publish release` GitHub Actions workflow reruns the full gates, builds
-`.pio/build/field/firmware.bin`, generates `lightweave-release.json`, and creates
-the GitHub release as a draft. It uploads and downloads both assets, compares
-their exact bytes, and only then publishes. A rerun resumes an existing draft;
-an already-published release succeeds only when both immutable assets still
-match the rebuilt bytes. Confirm both assets exist before promotion:
+the OTA binary and deterministic serial bundle, generates
+`lightweave-release.json`, and creates
+the GitHub release as a draft. It uploads and downloads all three assets,
+compares their exact bytes, and only then publishes. A rerun resumes an existing draft;
+an already-published release succeeds only when all three immutable assets still
+match the rebuilt bytes. Confirm all three assets exist before promotion:
 
 ```bash
 gh release view v0.4.0

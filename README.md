@@ -182,6 +182,9 @@ pio run -e devkitc -t upload --upload-port /dev/cu.usbserial-XXXX
 pio device monitor --port /dev/cu.usbserial-XXXX
 ```
 
+For production-line FireBeetle provisioning from the reviewed GitHub release,
+see **Batch FireBeetle auto-flashing** in `docs/FLASHING.md`.
+
 Useful serial commands:
 
 ```text

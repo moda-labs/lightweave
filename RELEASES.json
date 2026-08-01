@@ -14,6 +14,7 @@
       ],
       "firmware_changes": [
         "Added immutable, checksum-verified firmware artifacts to each software release.",
+        "Added production-release USB provisioning bundles and automatic FireBeetle flashing for batch assembly.",
         "Added automatic staging of the promoted firmware on the Pi for an operator-authorized OTA.",
         "Kept field firmware rollout separate from Pi deployment so offline performers remain safely deferred."
       ]

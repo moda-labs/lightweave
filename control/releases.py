@@ -52,6 +52,7 @@ class ReleaseManifest:
     published_at: str
     notes: ReleaseNotes
     firmware: Mapping[str, Any]
+    serial_flash: Mapping[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +65,7 @@ class ReleaseManifest:
             "published_at": self.published_at,
             "notes": self.notes.as_dict(),
             "firmware": dict(self.firmware),
+            "serial_flash": dict(self.serial_flash),
         }
 
 
@@ -181,6 +183,7 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
             "published_at",
             "notes",
             "firmware",
+            "serial_flash",
         },
         "release manifest",
     )
@@ -215,6 +218,25 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
         raise ReleaseMetadataError("firmware size must be a positive integer")
     if not isinstance(crc32, int) or isinstance(crc32, bool) or not 0 <= crc32 <= 0xFFFFFFFF:
         raise ReleaseMetadataError("firmware crc32 must be an unsigned 32-bit integer")
+    serial_flash = _object(manifest["serial_flash"], "release manifest.serial_flash")
+    _exact_keys(
+        serial_flash,
+        {"filename", "url", "sha256", "size"},
+        "release manifest.serial_flash",
+    )
+    serial_filename = _string(
+        serial_flash["filename"], "release manifest.serial_flash.filename"
+    )
+    if Path(serial_filename).name != serial_filename or not serial_filename.endswith(".zip"):
+        raise ReleaseMetadataError("serial flash filename must be a basename ending in .zip")
+    serial_sha256 = _string(
+        serial_flash["sha256"], "release manifest.serial_flash.sha256"
+    ).lower()
+    if not SHA256_RE.fullmatch(serial_sha256):
+        raise ReleaseMetadataError("serial flash sha256 must be 64 lowercase hex characters")
+    serial_size = serial_flash["size"]
+    if not isinstance(serial_size, int) or isinstance(serial_size, bool) or serial_size <= 0:
+        raise ReleaseMetadataError("serial flash size must be a positive integer")
     return ReleaseManifest(
         release=release,
         version=version,
@@ -229,6 +251,12 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
             "sha256": sha256,
             "size": size,
             "crc32": crc32,
+        },
+        serial_flash={
+            "filename": serial_filename,
+            "url": _https_url(serial_flash["url"], "release manifest.serial_flash.url"),
+            "sha256": serial_sha256,
+            "size": serial_size,
         },
     )
 

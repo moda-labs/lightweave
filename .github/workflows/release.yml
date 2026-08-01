@@ -53,13 +53,21 @@ jobs:
           RELEASE_COMMIT=$(git rev-parse HEAD)
           RELEASE_PUBLISHED_AT=$(git show -s --format=%cI HEAD)
           cp .pio/build/field/firmware.bin "dist/lightweave-field-${RELEASE_TAG}.bin"
+          python scripts/build_serial_flash_bundle.py \
+            --bootloader .pio/build/field/bootloader.bin \
+            --partitions .pio/build/field/partitions.bin \
+            --boot-app "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+            --firmware .pio/build/field/firmware.bin \
+            --output "dist/lightweave-serial-flash-${RELEASE_TAG}.zip"
           python scripts/build_release_manifest.py \
             --firmware "dist/lightweave-field-${RELEASE_TAG}.bin" \
+            --serial-flash "dist/lightweave-serial-flash-${RELEASE_TAG}.zip" \
             --repository "$RELEASE_REPOSITORY" \
             --commit "$RELEASE_COMMIT" \
             --tag "$RELEASE_TAG" \
             --published-at "$RELEASE_PUBLISHED_AT" \
             --artifact-url "https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/lightweave-field-${RELEASE_TAG}.bin" \
+            --serial-flash-url "https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/lightweave-serial-flash-${RELEASE_TAG}.zip" \
             --output dist/lightweave-release.json
           sha256sum dist/*
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -86,11 +94,13 @@ jobs:
           set -eu
           manifest=dist/lightweave-release.json
           firmware="dist/lightweave-field-${RELEASE_TAG}.bin"
+          serial_flash="dist/lightweave-serial-flash-${RELEASE_TAG}.zip"
           release_api="repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}"
           verify_dir=$(mktemp -d)
           trap 'rm -rf "$verify_dir"' EXIT
           expected_assets=$(printf '%s\n' \
             "lightweave-field-${RELEASE_TAG}.bin" \
+            "lightweave-serial-flash-${RELEASE_TAG}.zip" \
             lightweave-release.json | LC_ALL=C sort)
 
           verify_asset_set() {
@@ -105,9 +115,11 @@ jobs:
                 --repo "$GITHUB_REPOSITORY" \
                 --dir "$verify_dir" \
                 --pattern lightweave-release.json \
-                --pattern "lightweave-field-${RELEASE_TAG}.bin"
+                --pattern "lightweave-field-${RELEASE_TAG}.bin" \
+                --pattern "lightweave-serial-flash-${RELEASE_TAG}.zip"
               cmp "$manifest" "$verify_dir/lightweave-release.json"
               cmp "$firmware" "$verify_dir/lightweave-field-${RELEASE_TAG}.bin"
+              cmp "$serial_flash" "$verify_dir/lightweave-serial-flash-${RELEASE_TAG}.zip"
               exit 0
             fi
             test "$draft" = true
@@ -124,7 +136,7 @@ jobs:
               --generate-notes
           fi
 
-          gh release upload "$RELEASE_TAG" "$manifest" "$firmware" \
+          gh release upload "$RELEASE_TAG" "$manifest" "$firmware" "$serial_flash" \
             --clobber \
             --repo "$GITHUB_REPOSITORY"
           verify_asset_set
@@ -132,7 +144,9 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --dir "$verify_dir" \
             --pattern lightweave-release.json \
-            --pattern "lightweave-field-${RELEASE_TAG}.bin"
+            --pattern "lightweave-field-${RELEASE_TAG}.bin" \
+            --pattern "lightweave-serial-flash-${RELEASE_TAG}.zip"
           cmp "$manifest" "$verify_dir/lightweave-release.json"
           cmp "$firmware" "$verify_dir/lightweave-field-${RELEASE_TAG}.bin"
+          cmp "$serial_flash" "$verify_dir/lightweave-serial-flash-${RELEASE_TAG}.zip"
           gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"
