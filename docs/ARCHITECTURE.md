@@ -7,11 +7,13 @@ while building it. Status tags: **[done]** shipped, **[wip]** in progress,
 
 ---
 
-## 1. Design philosophy: parametric field, not addressed pixels
+## 1. Design philosophy: parametric field, not pushed pixel frames
 
 The conductor broadcasts a compact **pattern config** (which pattern + a few knobs + the
-clock); every node computes its own color locally from **`f(x, y, t)`** using its
-stored position. We deliberately do **not** push per-node frames.
+clock); every node computes its output locally from **`f(x, y, t)`** using its
+stored position. Ring-aware patterns may additionally evaluate
+**`f(x, y, pixel_index, t)`** for each local emitter. We deliberately do **not**
+push per-node or per-pixel frames.
 
 Why this is the right core:
 - **Resilience.** A node that misses a beacon keeps evaluating `f(x,y,t)` against
@@ -54,7 +56,7 @@ two conductors at once). One image + NVS role removes that entirely.
   coordinates from calibration are sufficient. Optional reference markers can set
   orientation/scale if a pattern must align to a real-world feature.
 
-## 4. Pattern model **[done for 1-D; 2-D planned]**
+## 4. Pattern model **[done for field-space, 2-D, and first ring-local effect]**
 
 Conductor broadcasts the pattern in the beacon: `pattern_id`, `brightness`,
 `palette_id`, `params[4]`, plus the clock (`epoch_us`, `seq`).
@@ -71,8 +73,13 @@ Conductor broadcasts the pattern in the beacon: `pattern_id`, `brightness`,
   - `SWEEP` — traveling wave across `x`. **[done]** (1-D today.)
   - `SOLID` — every pixel full RGBW at `brightness`: the worst-case power draw, a
     bench rig for measuring the per-node LED ceiling (not a show pattern). **[done]**
-  - **[planned]** true 2-D: plane wave at an arbitrary **angle**, **radial ripple**
-    from a center point. `params` encode direction/center.
+  - `FIREFLY` — position-staggered meadow twinkle. **[done]**
+  - `OCEAN_WAVE` — true 2-D summed wavefronts with tunable travel angle. **[done]**
+  - `FIRE_FLICKER` — first ring-local pattern: deterministic billow plus coherent
+    angular waves give all 16 LEDs distinct brightness and flame temperature.
+    It remains clock/position-derived, so missed beacons do not freeze or desync
+    the texture. **[done; hardware tuning pending]**
+  - **[planned]** additional 2-D primitives such as a radial ripple from a center.
 
 Every node hard-clamps rendered brightness to `MAX_BRIGHTNESS` (config.h, **192**),
 so no pattern or broadcast config can exceed the per-node power budget regardless of what is

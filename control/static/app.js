@@ -36,6 +36,7 @@ const PATTERN_DEFAULTS = {
   Sweep: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
   "Palette Drift": { hue: 40, saturation: 100, value: 255, period: 8000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
   Firefly: { hue: 58, saturation: 85, value: 255, period: 7000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
+  "Fire Flicker": { hue: 24, saturation: 95, value: 255, period: 1200, wavelength: 300, spatial: 0, scatter: 100, texture: 85, angle: 45 },
   "Ocean Wave": { hue: 205, saturation: 100, value: 255, period: 9000, wavelength: 100, spatial: 0, scatter: 100, angle: 45 },
 };
 
@@ -294,8 +295,8 @@ function render() {
 function patternHueFromState() {
   const params = state.pattern.params || {};
   // Firefly is positional: hue lives in p1 (p0 is the period).
-  if (state.pattern.pattern === "Firefly") {
-    return params.p1 !== undefined ? Number(params.p1) : PATTERN_DEFAULTS.Firefly.hue;
+  if (state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") {
+    return params.p1 !== undefined ? Number(params.p1) : PATTERN_DEFAULTS[state.pattern.pattern].hue;
   }
   // Ocean Wave is positional: base water hue lives in p3.
   if (state.pattern.pattern === "Ocean Wave") {
@@ -310,9 +311,9 @@ function patternHueFromState() {
 
 function patternSaturationFromState() {
   const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Firefly") {
+  if (state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") {
     if (colorValuePresent(params.p2) && params.p3 !== undefined) return Math.min(100, Number(params.p3));
-    return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS.Firefly.saturation;
+    return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS[state.pattern.pattern].saturation;
   }
   if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
     return Math.round(((Number(params.p1) >> 10) & 0x3f) * 100 / 63);
@@ -330,7 +331,7 @@ function patternSaturationFromState() {
 
 function patternValueFromState() {
   const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Firefly" && colorValuePresent(params.p2)) {
+  if ((state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") && colorValuePresent(params.p2)) {
     return (Number(params.p2) >> 7) & 0xff;
   }
   if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
@@ -346,7 +347,7 @@ function patternValueFromState() {
 function patternPeriodFromState() {
   const params = state.pattern.params || {};
   if (params.period !== undefined) return Number(params.period);
-  if ((state.pattern.pattern === "Sweep" || state.pattern.pattern === "Palette Drift" || state.pattern.pattern === "Firefly" || state.pattern.pattern === "Ocean Wave") && params.p0 !== undefined) {
+  if ((state.pattern.pattern === "Sweep" || state.pattern.pattern === "Palette Drift" || state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker" || state.pattern.pattern === "Ocean Wave") && params.p0 !== undefined) {
     return Number(params.p0);
   }
   return PATTERN_DEFAULTS[state.pattern.pattern]?.period || 4000;
@@ -359,6 +360,15 @@ function patternScatterFromState() {
     return Number(params.p2);
   }
   return PATTERN_DEFAULTS.Firefly.scatter;
+}
+
+function patternTextureFromState() {
+  const params = state.pattern.params || {};
+  if (state.pattern.pattern === "Fire Flicker" && params.p2 !== undefined) {
+    if (colorValuePresent(params.p2)) return Number(params.p2) & FIREFLY_SCATTER_MASK;
+    return Number(params.p2);
+  }
+  return PATTERN_DEFAULTS["Fire Flicker"].texture;
 }
 
 function patternAngleFromState() {
@@ -400,6 +410,7 @@ function patternDraftFromState() {
     wavelength: patternWavelengthFromState() || defaults.wavelength,
     spatial: patternSpatialFromState(),
     scatter: patternScatterFromState(),
+    texture: patternTextureFromState(),
     angle: patternAngleFromState(),
   };
 }
@@ -416,6 +427,7 @@ function patternDraftForSelection(pattern) {
     wavelength: Number(defaults.wavelength),
     spatial: Number(defaults.spatial),
     scatter: Number(defaults.scatter),
+    texture: Number(defaults.texture ?? PATTERN_DEFAULTS["Fire Flicker"].texture),
     angle: Number(defaults.angle),
   };
 }
@@ -443,6 +455,15 @@ function patternParams(draft) {
       p1: Number(draft.hue),
       p2: fireflyMetaPack(draft.scatter ?? 100, draft.value ?? 255),
       p3: Number(draft.saturation ?? 85),
+    };
+  }
+  if (draft.pattern === "Fire Flicker") {
+    // Positional on the wire; p2 packs sRGB value with per-pixel texture depth.
+    return {
+      p0: Number(draft.period),
+      p1: Number(draft.hue),
+      p2: fireflyMetaPack(draft.texture ?? 85, draft.value ?? 255),
+      p3: Number(draft.saturation ?? 95),
     };
   }
   if (draft.pattern === "Ocean Wave") {
@@ -473,6 +494,7 @@ function relevantPatternFields(pattern) {
   if (pattern === "Sweep") return ["pattern", "brightness", "period", "wavelength"];
   if (pattern === "Palette Drift") return ["pattern", "brightness", "period", "spatial"];
   if (pattern === "Firefly") return ["pattern", "brightness", "period", "hue", "saturation", "value", "scatter"];
+  if (pattern === "Fire Flicker") return ["pattern", "brightness", "period", "hue", "saturation", "value", "texture"];
   if (pattern === "Ocean Wave") return ["pattern", "brightness", "period", "wavelength", "angle", "hue", "saturation", "value"];
   return ["pattern", "brightness"];
 }
@@ -498,6 +520,8 @@ function renderPatternControls() {
   $("#spatial-value").textContent = (Number(patternDraft.spatial) / 100).toFixed(2);
   $("#pattern-scatter").value = patternDraft.scatter ?? 100;
   $("#scatter-value").textContent = String(Number(patternDraft.scatter ?? 100));
+  $("#pattern-texture").value = patternDraft.texture ?? 85;
+  $("#texture-value").textContent = String(Number(patternDraft.texture ?? 85));
   $("#pattern-angle").value = patternDraft.angle ?? 45;
   $("#angle-value").textContent = String(Number(patternDraft.angle ?? 45));
   const draftHex = hueSaturationValueToHex(
@@ -508,7 +532,7 @@ function renderPatternControls() {
   $$("#color-presets button").forEach((button) => {
     button.classList.toggle("active", hexApproxEqual(button.dataset.hex, draftHex));
   });
-  const isColorPattern = patternDraft.pattern === "Pulse" || patternDraft.pattern === "Glow" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Ocean Wave";
+  const isColorPattern = patternDraft.pattern === "Pulse" || patternDraft.pattern === "Glow" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Fire Flicker" || patternDraft.pattern === "Ocean Wave";
   $("#color-presets").hidden = !isColorPattern;
   $("#hex-color-row").hidden = !isColorPattern;
   if (isColorPattern) {
@@ -523,10 +547,11 @@ function renderPatternControls() {
     $("#color-swatch").style.backgroundColor = hex;
     $("#hex-error").hidden = true;
   }
-  $('[data-param-group="period"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Palette Drift" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Ocean Wave");
+  $('[data-param-group="period"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Palette Drift" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Fire Flicker" || patternDraft.pattern === "Ocean Wave");
   $('[data-param-group="wavelength"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Ocean Wave");
   $('[data-param-group="spatial"]').hidden = patternDraft.pattern !== "Palette Drift";
   $('[data-param-group="scatter"]').hidden = patternDraft.pattern !== "Firefly";
+  $('[data-param-group="texture"]').hidden = patternDraft.pattern !== "Fire Flicker";
   $('[data-param-group="angle"]').hidden = patternDraft.pattern !== "Ocean Wave";
   const changeButton = $('[data-action="broadcast"]');
   changeButton.disabled = !isPatternDirty();
@@ -2350,6 +2375,14 @@ $("#pattern-scatter").addEventListener("input", (event) => {
   if (!patternDraft && state) patternDraft = patternDraftFromState();
   if (patternDraft) {
     patternDraft.scatter = Number(event.target.value);
+    renderPatternControls();
+  }
+});
+
+$("#pattern-texture").addEventListener("input", (event) => {
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (patternDraft) {
+    patternDraft.texture = Number(event.target.value);
     renderPatternControls();
   }
 });

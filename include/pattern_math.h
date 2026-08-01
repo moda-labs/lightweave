@@ -214,6 +214,56 @@ inline float fireflyIntensity(int64_t synced_us, float x, float y,
   return v;
 }
 
+struct FireFlickerSample {
+  float intensity;  // emitted-light level in [0,1]
+  float heat;       // local color-temperature offset in [-1,1]
+};
+
+// Deterministic, ring-aware flame texture. Each pixel combines two slow
+// whole-lantern billows with three angular waves around the ring. Adjacent LEDs
+// therefore move coherently like tongues of flame instead of producing white
+// noise, while the incommensurate periods keep the motion from looking like a
+// simple chase. Position seeds each lantern differently without storing random
+// state, so performers still free-run through dropped beacons and converge on
+// the same result for the same (x,y,pixel,t).
+//
+//   period_s    primary flicker timescale (about 1.2 s by default)
+//   texture     0..1 depth of per-pixel variation; global flicker remains at 0
+inline FireFlickerSample fireFlickerSample(int64_t synced_us, float x, float y,
+                                           uint16_t pixel_index,
+                                           uint16_t pixel_count,
+                                           float period_s, float texture) {
+  if (period_s <= 0.0f) period_s = 1.2f;
+  if (texture < 0.0f) texture = 0.0f;
+  if (texture > 1.0f) texture = 1.0f;
+  uint16_t count = pixel_count ? pixel_count : 1;
+  float around = (pixel_index % count) / (float)count;
+  float node = fireflyStagger(x, y, 1.0f);
+
+  float billow_a = sinf(2.0f * kPi * (phase(synced_us, period_s * 1.47f) + node));
+  float billow_b = sinf(2.0f * kPi * (phase(synced_us, period_s * 0.73f) - node * 0.61f));
+  float global = 0.63f + 0.13f * billow_a + 0.09f * billow_b;
+
+  float tongue_a = sinf(2.0f * kPi *
+                         (phase(synced_us, period_s * 0.83f) +
+                          2.0f * around + node * 0.37f));
+  float tongue_b = sinf(2.0f * kPi *
+                         (phase(synced_us, period_s * 0.41f) -
+                          3.0f * around + node * 0.79f));
+  float tongue_c = sinf(2.0f * kPi *
+                         (phase(synced_us, period_s * 0.19f) +
+                          5.0f * around - node * 0.53f));
+  float local = 0.20f * tongue_a + 0.12f * tongue_b + 0.08f * tongue_c;
+
+  float intensity = global + texture * local;
+  if (intensity < 0.08f) intensity = 0.08f;  // retain a low ember bed
+  if (intensity > 1.0f) intensity = 1.0f;
+  float heat = texture * local / 0.40f;
+  if (heat < -1.0f) heat = -1.0f;
+  if (heat > 1.0f) heat = 1.0f;
+  return {intensity, heat};
+}
+
 // One traveling sine wavefront sampled at (x,y): sin(2π (t/T - proj/λ)), where
 // proj is the position projected onto the travel direction (cx,cy). Returns
 // [-1,1]. Double-precision phase accumulation so long runs don't lose precision.

@@ -75,6 +75,7 @@
             <button data-pattern="Sweep">Sweep</button>
             <button data-pattern="Glow">Glow</button>
             <button data-pattern="Firefly">Firefly</button>
+            <button data-pattern="Fire Flicker">Fire</button>
             <button data-pattern="Ocean Wave">Ocean</button>
             <button data-pattern="White">White</button>
             <button data-pattern="Solid">Solid</button>
@@ -104,7 +105,7 @@
           </div>
           <div class="pattern-param" data-param-group="period">
             <label class="control-label" for="pattern-period">Period <span id="period-value">4.0</span>s</label>
-            <input id="pattern-period" type="range" min="1000" max="16000" step="500" value="4000">
+            <input id="pattern-period" type="range" min="1000" max="16000" step="100" value="4000">
           </div>
           <div class="pattern-param" data-param-group="wavelength">
             <label class="control-label" for="pattern-wavelength">Wavelength <span id="wavelength-value">3.0</span></label>
@@ -117,6 +118,10 @@
           <div class="pattern-param" data-param-group="scatter">
             <label class="control-label" for="pattern-scatter">Firefly scatter <span id="scatter-value">100</span> / 100</label>
             <input id="pattern-scatter" type="range" min="20" max="100" step="5" value="100">
+          </div>
+          <div class="pattern-param" data-param-group="texture">
+            <label class="control-label" for="pattern-texture">Flame texture <span id="texture-value">85</span> / 100</label>
+            <input id="pattern-texture" type="range" min="0" max="100" step="5" value="85">
           </div>
           <div class="pattern-param" data-param-group="angle">
             <label class="control-label" for="pattern-angle">Wave direction <span id="angle-value">45</span>°</label>

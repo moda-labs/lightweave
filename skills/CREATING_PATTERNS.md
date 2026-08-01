@@ -4,7 +4,8 @@ Use this guide when an agent is asked to author, compare, review, save, or
 broadcast show patterns for Do Baskets Dream.
 
 This is a control-plane workflow for the current compiled pattern vocabulary:
-`Pulse`, `Glow`, `Sweep`, `Palette Drift`, `Firefly`, and `Ocean Wave`. It does
+`Pulse`, `Glow`, `Sweep`, `Palette Drift`, `Firefly`, `Ocean Wave`, and
+`Fire Flicker`. It does
 not create arbitrary new firmware pattern functions. New C++ pattern functions
 still belong in `include/pattern_math.h` with host tests.
 
@@ -110,6 +111,28 @@ deep blue in the troughs with foam-capped cyan-white crests. Also **positional**
   "chase"; straight axis angles read mechanical. Default 45.
 - `p3` = base (mid-water) hue in degrees; the ramp runs indigo→azure→cyan around
   it. Default 205 (ocean blue). ~180-220 reads as water.
+
+`Fire Flicker`
+
+```json
+{"pattern":"Fire Flicker","brightness":56,"params":{"p0":1200,"p1":24,"p2":65493,"p3":95}}
+```
+
+`Fire Flicker` is the first ring-addressable built-in pattern. Each 16-pixel
+ring gets a shared billow plus coherent angular flame waves, so neighboring LEDs
+move like flame tongues rather than independent noise. Brighter pixels shift
+toward yellow and dimmer pixels toward red. Its params are positional:
+
+- `p0` = primary flicker timescale in ms, default 1200.
+- `p1` = middle flame hue in degrees, default 24 (orange).
+- `p2` = packed value + texture: bit 15 marker, bits 7-14 sRGB value, and bits
+  0-6 texture depth (0-100). Default UI value 255 + texture 85 packs to `65493`.
+- `p3` = saturation percent, default 95.
+
+Preview/review accept friendly `period`, `hue`, `texture`, and `saturation`
+query params. Live broadcasts and saved candidates should use `p0..p3`; the
+friendly `period` and `hue` aliases both map to wire slot 0 and therefore cannot
+represent this pattern safely on a live conductor.
 
 ## Draft Review Loop
 
@@ -221,4 +244,3 @@ If a hardware conductor is attached, also smoke test one saved pattern end to en
 2. Review saved candidate.
 3. Broadcast saved candidate.
 4. Confirm `/api/state.pattern`.
-

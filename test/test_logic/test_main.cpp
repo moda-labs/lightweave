@@ -476,6 +476,71 @@ void test_firefly_stagger_in_unit_range() {
   }
 }
 
+// ---- Ring-aware fire flicker ----------------------------------------------
+
+void test_fire_flicker_samples_stay_in_gamut() {
+  for (int64_t us = 0; us < 6'000'000; us += 23'000) {
+    for (uint16_t pixel = 0; pixel < 16; pixel++) {
+      pmath::FireFlickerSample sample =
+          pmath::fireFlickerSample(us, 0.37f, 0.61f, pixel, 16, 1.2f, 1.0f);
+      TEST_ASSERT_TRUE(sample.intensity >= 0.0f && sample.intensity <= 1.0f);
+      TEST_ASSERT_TRUE(sample.heat >= -1.0f && sample.heat <= 1.0f);
+    }
+  }
+}
+
+void test_fire_flicker_texture_varies_pixels_but_keeps_neighbors_coherent() {
+  float values[16];
+  float min_value = 1.0f, max_value = 0.0f;
+  for (uint16_t pixel = 0; pixel < 16; pixel++) {
+    values[pixel] = pmath::fireFlickerSample(
+                        730'000, 0.2f, 0.8f, pixel, 16, 1.2f, 1.0f)
+                        .intensity;
+    min_value = fminf(min_value, values[pixel]);
+    max_value = fmaxf(max_value, values[pixel]);
+  }
+  TEST_ASSERT_TRUE(max_value - min_value > 0.10f);
+  // Coherent angular waves should keep at least one neighboring pair much
+  // closer than the ring's overall range; this guards against per-pixel noise.
+  float closest_neighbors = 1.0f;
+  for (uint16_t pixel = 0; pixel < 16; pixel++) {
+    closest_neighbors = fminf(
+        closest_neighbors, fabsf(values[pixel] - values[(pixel + 1) % 16]));
+  }
+  TEST_ASSERT_TRUE(closest_neighbors < (max_value - min_value) * 0.35f);
+}
+
+void test_fire_flicker_zero_texture_keeps_ring_together() {
+  pmath::FireFlickerSample first =
+      pmath::fireFlickerSample(410'000, 0.4f, 0.3f, 0, 16, 1.2f, 0.0f);
+  for (uint16_t pixel = 1; pixel < 16; pixel++) {
+    pmath::FireFlickerSample sample =
+        pmath::fireFlickerSample(410'000, 0.4f, 0.3f, pixel, 16, 1.2f, 0.0f);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, first.intensity, sample.intensity);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, sample.heat);
+  }
+}
+
+void test_fire_flicker_is_deterministic_and_changes_over_time() {
+  pmath::FireFlickerSample a =
+      pmath::fireFlickerSample(900'000, 0.12f, 0.91f, 7, 16, 1.2f, 0.85f);
+  pmath::FireFlickerSample b =
+      pmath::fireFlickerSample(900'000, 0.12f, 0.91f, 7, 16, 1.2f, 0.85f);
+  pmath::FireFlickerSample later =
+      pmath::fireFlickerSample(1'050'000, 0.12f, 0.91f, 7, 16, 1.2f, 0.85f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-7f, a.intensity, b.intensity);
+  TEST_ASSERT_FLOAT_WITHIN(1e-7f, a.heat, b.heat);
+  TEST_ASSERT_TRUE(fabsf(a.intensity - later.intensity) > 1e-3f ||
+                   fabsf(a.heat - later.heat) > 1e-3f);
+}
+
+void test_fire_flicker_matches_control_preview_golden_sample() {
+  pmath::FireFlickerSample sample =
+      pmath::fireFlickerSample(730'000, 0.2f, 0.8f, 6, 16, 1.2f, 0.85f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.4318507f, sample.intensity);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, -0.7561197f, sample.heat);
+}
+
 // ---- Ocean wave -----------------------------------------------------------
 
 void test_ocean_component_bounds() {
@@ -1130,6 +1195,7 @@ void test_pattern_static_ids() {
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::PALETTE_DRIFT));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::SWEEP));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::CALIBRATION));
+  TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::FIRE_FLICKER));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(999));  // unknown => animated
 }
 
@@ -1575,6 +1641,23 @@ void test_serial_json_white_maps_pattern_name() {
   TEST_ASSERT_EQUAL_UINT8(48, cmd.brightness);
 }
 
+void test_serial_json_fire_flicker_maps_pattern_name_and_positional_params() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":12,\"cmd\":\"pattern\",\"pattern\":\"Fire Flicker\","
+      "\"brightness\":56,\"params\":{\"p0\":1200,\"p1\":24,"
+      "\"p2\":65493,\"p3\":95}}",
+      cmd, error));
+
+  TEST_ASSERT_EQUAL_UINT16(patterns::FIRE_FLICKER, cmd.pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(1200, cmd.params[0]);
+  TEST_ASSERT_EQUAL_UINT16(24, cmd.params[1]);
+  TEST_ASSERT_EQUAL_UINT16(65493, cmd.params[2]);
+  TEST_ASSERT_EQUAL_UINT16(95, cmd.params[3]);
+}
+
 void test_serial_json_calibration_maps_params() {
   SerialJsonCommand cmd;
   const char* error = nullptr;
@@ -1960,6 +2043,11 @@ int main(int, char**) {
   RUN_TEST(test_firefly_attack_is_faster_than_decay);
   RUN_TEST(test_firefly_scatter_staggers_nodes_but_unison_locks_them);
   RUN_TEST(test_firefly_stagger_in_unit_range);
+  RUN_TEST(test_fire_flicker_samples_stay_in_gamut);
+  RUN_TEST(test_fire_flicker_texture_varies_pixels_but_keeps_neighbors_coherent);
+  RUN_TEST(test_fire_flicker_zero_texture_keeps_ring_together);
+  RUN_TEST(test_fire_flicker_is_deterministic_and_changes_over_time);
+  RUN_TEST(test_fire_flicker_matches_control_preview_golden_sample);
   RUN_TEST(test_ocean_component_bounds);
   RUN_TEST(test_ocean_component_travels_along_direction);
   RUN_TEST(test_ocean_intensity_in_unit_range);
@@ -2041,6 +2129,7 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_pattern_maps_name_brightness_and_params);
   RUN_TEST(test_serial_json_glow_maps_hue_and_saturation_params);
   RUN_TEST(test_serial_json_white_maps_pattern_name);
+  RUN_TEST(test_serial_json_fire_flicker_maps_pattern_name_and_positional_params);
   RUN_TEST(test_serial_json_calibration_maps_params);
   RUN_TEST(test_serial_json_power_policy_parses_runtime_sleep_controls);
   RUN_TEST(test_serial_json_ota_mode_parses_enabled_flag);

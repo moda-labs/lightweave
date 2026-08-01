@@ -385,12 +385,13 @@ position", and table rows not currently registered show as "Not seen".
 
 ### 3. Live show control
 
-- Pattern picker (PULSE / PALETTE_DRIFT / SWEEP / GLOW; SOLID behind a
-  bench-only flag).
+- Pattern picker includes field-space patterns plus the ring-addressable
+  `FIRE_FLICKER`; SOLID remains a bench-only power pattern.
 - Brightness slider + per-pattern param controls with human labels:
-  Pulse/Glow expose hue, Sweep exposes period + wavelength, and Palette Drift
-  exposes period + spatial spread. The Change Pattern button is disabled until
-  the visible draft differs from the live conductor state.
+  Pulse/Glow expose hue, Sweep exposes period + wavelength, Palette Drift
+  exposes period + spatial spread, and Fire Flicker exposes speed, color, and
+  per-pixel texture depth. The Change Pattern button is disabled until the
+  visible draft differs from the live conductor state.
 - Pattern preview: the browser renders `f(x,y,t)` live on the map *before*
   broadcasting (JS port of the pure `pattern_math.h`). Cheap because the
   math is pure and host-tested; turns knob-tuning into instant feedback.
@@ -603,7 +604,9 @@ There are three pattern-delivery tiers:
    their own clip against the synced clock. This preserves no-live-streaming
    resilience while minimizing node "thinking" and CPU time.
 
-   Do not bake "16-LED ring" into the control-plane model. The current hardware is a
+   Do not bake "16-LED ring" into the future clip protocol. The current built-in
+   Fire Flicker correctly targets the known 16-pixel hardware, but future nodes may
+   use a different emitter layout. The current hardware is a
    16-pixel ring, but future nodes may splay those pixels into a different 2-D or
    3-D shape. Model each physical node as a container with an optional **emitter
    layout**: emitter count + local coordinates/orientation. Phase 1 can treat every
@@ -637,7 +640,8 @@ Until that layer exists, new patterns are still compiled firmware
 (`pattern_math.h` stays the single home of `f(x,y,t)`), but the control plane is
 what makes authoring fast and lets an agent do most of it:
 
-1. **Author:** write the new `f(x,y,t)` in `pattern_math.h` (pure,
+1. **Author:** write the new `f(x,y,t)` or ring-aware `f(x,y,pixel,t)` in
+   `pattern_math.h` (pure,
    dependency-free — an agent can iterate here freely) + host tests.
 2. **Visualize before any flash:** the browser preview (§3) renders the
    proposed pattern on the *real* field layout. An agent drives this via

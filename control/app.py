@@ -1308,6 +1308,7 @@ def create_app(
         period: int | None = None,
         spatial: int | None = None,
         wavelength: int | None = None,
+        texture: int | None = None,
     ) -> Response:
         try:
             state = await conductor_call("snapshot")
@@ -1317,6 +1318,7 @@ def create_app(
                 "period": period,
                 "spatial": spatial,
                 "wavelength": wavelength,
+                "texture": texture,
             })
             png = await asyncio.to_thread(
                 render_preview_png,
@@ -1345,6 +1347,7 @@ def create_app(
         period: int | None = None,
         spatial: int | None = None,
         wavelength: int | None = None,
+        texture: int | None = None,
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -1354,6 +1357,7 @@ def create_app(
                 "period": period,
                 "spatial": spatial,
                 "wavelength": wavelength,
+                "texture": texture,
             })
             return await asyncio.to_thread(render_preview_data, state, pattern, brightness, decoded_params, t)
         except SerialProtocolError as error:
@@ -1373,6 +1377,7 @@ def create_app(
         period: int | None = None,
         spatial: int | None = None,
         wavelength: int | None = None,
+        texture: int | None = None,
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -1382,6 +1387,7 @@ def create_app(
                 "period": period,
                 "spatial": spatial,
                 "wavelength": wavelength,
+                "texture": texture,
             })
             return await asyncio.to_thread(
                 render_preview_frames,
@@ -1409,6 +1415,7 @@ def create_app(
         period: int | None = None,
         spatial: int | None = None,
         wavelength: int | None = None,
+        texture: int | None = None,
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -1418,6 +1425,7 @@ def create_app(
                 "period": period,
                 "spatial": spatial,
                 "wavelength": wavelength,
+                "texture": texture,
             })
             return await asyncio.to_thread(
                 review_preview,

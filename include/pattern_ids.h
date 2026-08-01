@@ -21,7 +21,9 @@ enum PatternId : uint16_t {
                      // own position-staggered cycle, like fireflies in a meadow
   OCEAN_WAVE = 7,    // soft 2-D ocean swell: summed sine wavefronts travel across
                      // the field, deep blue in the troughs with foam-capped crests
-  WHITE = 8          // steady neutral white using only the SK6812 white channel
+  WHITE = 8,         // steady neutral white using only the SK6812 white channel
+  FIRE_FLICKER = 9   // ring-aware flame: every LED gets its own deterministic
+                     // brightness/temperature sample while staying clock-synced
 };
 
 // True when f(x,y,t) has no time term: the rendered color never changes until

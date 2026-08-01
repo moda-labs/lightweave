@@ -1096,6 +1096,7 @@ static const char* patternName(uint16_t id) {
     case patterns::GLOW: return "Glow";
     case patterns::FIREFLY: return "Firefly";
     case patterns::OCEAN_WAVE: return "Ocean Wave";
+    case patterns::FIRE_FLICKER: return "Fire Flicker";
     case patterns::CALIBRATION: return "Calibration";
     case patterns::WHITE: return "White";
     default: return "Unknown";

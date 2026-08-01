@@ -8,11 +8,40 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**136 pass**) is green; control tests (**212 pass**) are green; all four
+(**142 pass**) is green; control tests (**215 pass**) are green; all four
 device envs (`devkitc` / `firebeetle` / `field-devkitc` /
-`field-firebeetle`) built clean before this control-plane-only change.
+`field-firebeetle`) build clean.
 
-Latest locally (2026-07-29): **remote-administration phases 1–3 are
+Latest locally (2026-07-31): **the first ring-addressable show pattern is
+code-complete and ready for bench tuning.** `FIRE_FLICKER` (`pattern 9`) keeps
+the compact clock+config broadcast but evaluates
+`f(x,y,pixel_index,t)` locally, giving all 16 LEDs a deterministic shared
+billow plus coherent angular flame texture. Bright pixels lean yellow and dim
+pixels lean red; speed, base color, sRGB value, and texture depth are tunable.
+The control plane exposes Fire in the pattern picker, packs the positional wire
+params, renders individual ring emitters in PNG previews, and includes all 16
+RGBW samples plus intra-ring contrast in JSON previews/reviews. Offline review
+on the 9-node mock layout rated the default candidate `strong` / 100 with
+temporal luma range 10.943 and max ring contrast 0.2088 at brightness 56.
+The USB-attached board (`30:76:F5:93:67:3C`, ID 1) was flashed with the
+`devkitc` bench image from dirty build `a425d7eb` on 2026-07-31. It reported and
+preserved a CONDUCTOR role and its post-flash beacon sequence advanced normally,
+but the older hardware record below identifies this MAC as performer #2 and the
+conductor as `8C:94:DF:57:7F:14`. The operator subsequently confirmed that a
+second conductor is powered in range on the Raspberry Pi alongside one
+battery-powered performer. With two conductors beaconing, the performer follows
+whichever beacon most recently overwrote its learned conductor MAC; that
+explains why a 20+ second check found no performers in the laptop conductor's
+roster. Its placement table is also empty, so no OTA was started; the temporary
+field-awake override was restored to off. Power down one conductor before OTA
+so readiness and completion status have one authoritative controller. No
+performers were flashed, and nothing was saved or broadcast. Native tests are 142/142, control
+tests 215/215, and all four firmware environments build. Hardware verification
+still owed: establish the intended conductor/performer identities, flash the
+same build to all bench performers before broadcasting Fire, then tune
+period/texture/color against the actual diffuser and ring orientation.
+
+Previous latest (2026-07-29): **remote-administration phases 1–3 are
 code-complete; physical rollout remains deliberately unclaimed.** Serial mode
 now fails closed behind a strict shared-password session boundary that protects
 HTTP, previews, uploads, OpenAPI, and WebSockets. Login uses the canonical
@@ -203,29 +232,35 @@ full-repo adversarial self-review with all 5 correctness findings fixed, the
 production BOM, and the **pilot-batch order placed 2026-07-03** (most parts
 arrive Mon Jul 6, batteries Jul 10 — see "Pilot batch: ORDERED" below).
 
-## ▶ Next session: pick up here (updated 2026-07-29)
+## ▶ Next session: pick up here (updated 2026-07-31)
 
 Priority order:
-1. **Remote-administration rollout (human-owned):** follow
+1. **Fire Flicker bench tuning:** the conductor already has dirty build
+   `a425d7eb`; read `docs/FLASHING.md` and flash that same source build to the
+   performers before broadcasting. Then select Fire at brightness 56 / period 1200 ms /
+   hue 24 / saturation 95 / texture 85, and evaluate it through the physical
+   diffuser. Tune for organic neighboring-pixel motion without a visible chase;
+   check draw on the INA228 reference node before adopting a brighter default.
+2. **Remote-administration rollout (human-owned):** follow
    [`deploy/pi/README.md`](../deploy/pi/README.md) and phase 4 of the remote
    administration plan. This needs the Pi, Starlink, Cloudflare account, final
    hostname, and 3-board bench. Do not record the shared password, hash, or
    tunnel token in this repository.
-2. **CV calibration apply workflow:** the phone-video proof is now good enough
+3. **CV calibration apply workflow:** the phone-video proof is now good enough
    on two real clips, including one with large glare/cable false positives.
    Add a guarded "apply proposal" endpoint/UI that writes assignments through
    the existing `/api/lanterns/{mac}/assign` path only after the operator
    reviews the image overlay and any missing/ambiguous rows.
-3. **Synthetic hardening follow-up only when needed:** run Simulate with jitter,
+4. **Synthetic hardening follow-up only when needed:** run Simulate with jitter,
    dim LEDs, glare, missing frames, and perspective values that approximate the
    phone capture. Tests already cover clean recovery, noisy recovery, and
    missing-frame alias prevention; add cases only when real media exposes a new
    failure mode.
-4. **Drone/field media validation:** when a drone clip exists, run it through
+5. **Drone/field media validation:** when a drone clip exists, run it through
    the same Lantern Locations flow and add a fixture if it exposes a new failure
    mode. Temporal code scoring should ignore constant extra lights; only extra
    lights blinking with the same planned code should remain ambiguous.
-5. **Scale-harden OTA when more boards exist:** manual maintenance OTA and
+6. **Scale-harden OTA when more boards exist:** manual maintenance OTA and
    same-protocol mixed-firmware recovery are hardware-verified on the 3-board
    bench. The updater retries serial chunk timeouts/NACKs, rejects unsafe resume
    offsets and wrong-length chunks, waits for maintenance readiness, and verifies
@@ -233,11 +268,11 @@ Priority order:
    explicit per-node chunk ACK/retry until a larger bench/field test shows
    repeated ESP-NOW chunk loss that the current 3x broadcast repetition cannot
    cover.
-6. **Optional negative OTA-safety check:** if useful, intentionally flash one
+7. **Optional negative OTA-safety check:** if useful, intentionally flash one
    performer with a same-v6 but different build and confirm it appears as
    `Firmware mismatch`; restore all boards to one build afterward. Protocol-v2
    or older boards simply vanish from the roster due to the version gate.
-7. **When parts are in hand:** phototransistors are no longer required for the
+8. **When parts are in hand:** phototransistors are no longer required for the
    main sleep strategy. Treat them as optional/fallback only. Wire INA228 on one
    reference node (SDA→21, SCL→22, chip in series between
    battery+ and buck input) → run the INA228 bench checklist below → first
@@ -247,12 +282,12 @@ Priority order:
    re-adopts its position within ~10 s of registering (the new single-row
    `[table]` reply; code-reviewed + host-tested but the radio path itself
    isn't hardware-verified yet).
-8. **User task, anytime (needs hands + DMM):** re-measure the 12 V
+9. **User task, anytime (needs hands + DMM):** re-measure the 12 V
    battery-side draw with naps running, **USB disconnected** (USB backfeeds the
    5 V rail and corrupts the reading) — quantifies the Stage-B win vs the old
    51 mA rest / 55 mA avg numbers. Same scene for apples-to-apples: amber GLOW
    @ bri 48.
-9. **Hardware topic to revisit:** buried battery/control boxes will likely make
+10. **Hardware topic to revisit:** buried battery/control boxes will likely make
    onboard 2.4 GHz antennas unreliable. Read `docs/RF_ENCLOSURE.md` before buying
    more MCUs or committing to enclosure geometry. The pilot FireBeetles already
    ordered are DFR0654-F onboard-antenna boards; buried-box deployment likely
@@ -291,6 +326,9 @@ power measurement):
   (`pattern_id`/`brightness`/`params[4]`); performers render it. Every node
   hard-clamps brightness to `MAX_BRIGHTNESS` (config.h, **192**) so no pattern can
   exceed the per-node power budget (see the worst-case measurement below).
+  `FIRE_FLICKER` extends the local model to `f(x,y,pixel_index,t)` and is the
+  first pattern to render distinct values across the ring; it appends ID 9
+  without changing the beacon layout or protocol version.
 - **NVS identity:** `id` + `(x,y)` persist across reboot; set over serial.
 - **Pattern config persists** too: `pattern_id`/`brightness`/`params` survive a
   power-cycle (keys `pat`/`bri`/`p0`..`p3` in the `"node"` namespace).
@@ -358,7 +396,7 @@ power measurement):
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 136) and control tests (212): sync
+- **Host unit tests** (`test/test_logic/`, 142) and control tests (215): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),

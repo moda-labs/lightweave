@@ -14,6 +14,7 @@ COLOR_VALUE_MARKER = 0x8000
 FIREFLY_SCATTER_MASK = 0x007F
 OCEAN_WAVELENGTH_MASK = 0x03FF
 OCEAN_ANGLE_MASK = 0x01FF
+RING_PIXEL_COUNT = 16
 
 
 @dataclass(frozen=True)
@@ -72,12 +73,16 @@ def render_preview_png(
     for lantern in lanterns:
         x = float(lantern["x"])
         y = float(lantern["y"])
-        color = _pattern_color(normalized, brightness, params, synced_us, x, y)
+        colors = _pattern_pixels(normalized, brightness, params, synced_us, x, y)
+        color = _average_rgbw(colors)
         rgb = _rgbw_to_preview_rgb(color)
         cx = round(margin + x * (width - 2 * margin))
         cy = round(margin + y * (height - 2 * margin))
-        _draw_disc(pixels, width, height, cx, cy, radius + 2, (34, 38, 46))
-        _draw_disc(pixels, width, height, cx, cy, radius, rgb)
+        if normalized == "fire_flicker":
+            _draw_pixel_ring(pixels, width, height, cx, cy, radius, colors)
+        else:
+            _draw_disc(pixels, width, height, cx, cy, radius + 2, (34, 38, 46))
+            _draw_disc(pixels, width, height, cx, cy, radius, rgb)
 
     return _encode_png(width, height, pixels)
 
@@ -103,17 +108,23 @@ def render_preview_data(
     synced_us = int(t_ms) * 1000
     rendered = []
     lumas = []
+    ring_contrasts = []
     lit_count = 0
     for lantern in lanterns:
         x = float(lantern["x"])
         y = float(lantern["y"])
-        color = _pattern_color(normalized, brightness, params, synced_us, x, y)
+        colors = _pattern_pixels(normalized, brightness, params, synced_us, x, y)
+        color = _average_rgbw(colors)
         rgb = _rgbw_to_preview_rgb(color)
         luma = _luma(rgb)
+        pixel_rgbs = [_rgbw_to_preview_rgb(pixel) for pixel in colors]
+        pixel_lumas = [_luma(pixel_rgb) for pixel_rgb in pixel_rgbs]
+        ring_contrast = (max(pixel_lumas) - min(pixel_lumas)) / 255.0
         lumas.append(luma)
-        if max(color.r, color.g, color.b, color.w) > 0:
+        ring_contrasts.append(ring_contrast)
+        if any(max(pixel.r, pixel.g, pixel.b, pixel.w) > 0 for pixel in colors):
             lit_count += 1
-        rendered.append({
+        lantern_render = {
             "mac": lantern.get("mac"),
             "label": lantern.get("label"),
             "x": x,
@@ -122,7 +133,14 @@ def render_preview_data(
             "rgbw": [color.r, color.g, color.b, color.w],
             "rgb": list(rgb),
             "luma": round(luma, 3),
-        })
+            "ring_contrast": round(ring_contrast, 4),
+        }
+        if normalized == "fire_flicker":
+            lantern_render["pixels"] = [
+                {"rgbw": [pixel.r, pixel.g, pixel.b, pixel.w], "rgb": list(pixel_rgb)}
+                for pixel, pixel_rgb in zip(colors, pixel_rgbs)
+            ]
+        rendered.append(lantern_render)
 
     avg_luma = sum(lumas) / len(lumas)
     min_luma = min(lumas)
@@ -140,6 +158,8 @@ def render_preview_data(
             "min_luma": round(min_luma, 3),
             "max_luma": round(max_luma, 3),
             "contrast": round((max_luma - min_luma) / 255.0, 4),
+            "avg_ring_contrast": round(sum(ring_contrasts) / len(ring_contrasts), 4),
+            "max_ring_contrast": round(max(ring_contrasts), 4),
         },
     }
 
@@ -193,7 +213,7 @@ def review_preview(
         issues.append(_issue("error", "no_lit_lanterns", "No positioned lantern is lit in the sampled window."))
     if metrics["avg_luma_mean"] < 2 and brightness > 0:
         issues.append(_issue("warn", "mostly_dark", "Average luma is near black across the sampled window."))
-    if normalized in {"sweep", "palette_drift", "pulse", "firefly", "ocean_wave"} and metrics["temporal_luma_range"] < 1:
+    if normalized in {"sweep", "palette_drift", "pulse", "firefly", "ocean_wave", "fire_flicker"} and metrics["temporal_luma_range"] < 1:
         issues.append(_issue("warn", "no_temporal_change", "The sampled window has almost no visible temporal change."))
     if normalized in {"sweep", "palette_drift", "ocean_wave"} and metrics["max_contrast"] < 0.02:
         issues.append(_issue("warn", "low_spatial_contrast", "The field has little spatial variation at the sampled times."))
@@ -238,6 +258,9 @@ def _normalize_pattern(pattern: str) -> str:
         "hotaru": "firefly",
         "ocean wave": "ocean_wave",
         "ocean": "ocean_wave",
+        "fire flicker": "fire_flicker",
+        "fire": "fire_flicker",
+        "flame": "fire_flicker",
         "white": "white",
     }
     try:
@@ -318,6 +341,55 @@ def _pattern_color(pattern: str, brightness: int, params: dict[str, Any], synced
     raise ValueError(f"unknown pattern: {pattern}")
 
 
+def _pattern_pixels(
+    pattern: str,
+    brightness: int,
+    params: dict[str, Any],
+    synced_us: int,
+    x: float,
+    y: float,
+) -> list[Rgbw]:
+    if pattern != "fire_flicker":
+        color = _pattern_color(pattern, brightness, params, synced_us, x, y)
+        return [color] * RING_PIXEL_COUNT
+
+    period_s = _number(params, "p0", "period", default=1200) / 1000.0
+    hue = _number(params, "p1", "hue", default=24) % 360
+    meta = int(_number(params, "p2", default=0))
+    full_hsv = _color_value_present(meta)
+    if full_hsv:
+        texture = min(meta & FIREFLY_SCATTER_MASK, 100) / 100.0
+        value = ((meta >> 7) & 0xFF) / 255.0
+    else:
+        texture_raw = _number(params, "texture", "p2", default=85)
+        texture = (85 if texture_raw <= 0 else min(texture_raw, 100)) / 100.0
+        value = 1.0
+    saturation = _number(params, "p3", "saturation", default=95)
+    saturation = (min(max(saturation, 0), 100) if full_hsv
+                  else (95 if saturation <= 0 else min(saturation, 100))) / 100.0
+
+    pixels = []
+    for pixel_index in range(RING_PIXEL_COUNT):
+        intensity, heat = _fire_flicker_sample(
+            synced_us, x, y, pixel_index, RING_PIXEL_COUNT, period_s, texture
+        )
+        hue_shift = 18.0 * (intensity - 0.55) + 5.0 * heat
+        pixels.append(_hsv_color(
+            brightness, intensity, hue + hue_shift, saturation, value
+        ))
+    return pixels
+
+
+def _average_rgbw(colors: list[Rgbw]) -> Rgbw:
+    count = len(colors)
+    return Rgbw(
+        round(sum(color.r for color in colors) / count),
+        round(sum(color.g for color in colors) / count),
+        round(sum(color.b for color in colors) / count),
+        round(sum(color.w for color in colors) / count),
+    )
+
+
 def _frame_times(duration_ms: int, fps: int) -> list[int]:
     if duration_ms < 500 or duration_ms > 60_000:
         raise ValueError("duration_ms must be between 500 and 60000")
@@ -335,6 +407,7 @@ def _sequence_metrics(frames: list[dict[str, Any]]) -> dict[str, Any]:
     lit_counts = [metric["lit_count"] for metric in frame_metrics]
     avg_lumas = [metric["avg_luma"] for metric in frame_metrics]
     contrasts = [metric["contrast"] for metric in frame_metrics]
+    ring_contrasts = [metric["max_ring_contrast"] for metric in frame_metrics]
     return {
         "min_lit_count": min(lit_counts),
         "max_lit_count": max(lit_counts),
@@ -346,6 +419,8 @@ def _sequence_metrics(frames: list[dict[str, Any]]) -> dict[str, Any]:
         "min_contrast": round(min(contrasts), 4),
         "max_contrast": round(max(contrasts), 4),
         "avg_contrast": round(sum(contrasts) / len(contrasts), 4),
+        "max_ring_contrast": round(max(ring_contrasts), 4),
+        "avg_ring_contrast": round(sum(ring_contrasts) / len(ring_contrasts), 4),
     }
 
 
@@ -469,6 +544,40 @@ def _firefly_intensity(synced_us: int, x: float, y: float, period_s: float, scat
         env = 1.0 - _smoothstep01((u - attack) / (1.0 - attack))
     shimmer = 1.0 - 0.12 * (0.5 - 0.5 * math.cos(2.0 * math.pi * 6.0 * u))
     return max(0.0, min(1.0, env * shimmer))
+
+
+def _fire_flicker_sample(
+    synced_us: int,
+    x: float,
+    y: float,
+    pixel_index: int,
+    pixel_count: int,
+    period_s: float,
+    texture: float,
+) -> tuple[float, float]:
+    if period_s <= 0:
+        raise ValueError("period must be positive")
+    texture = max(0.0, min(1.0, texture))
+    count = pixel_count or 1
+    around = (pixel_index % count) / count
+    node = _firefly_stagger(x, y, 1.0)
+
+    billow_a = math.sin(2.0 * math.pi * (_phase(synced_us, period_s * 1.47) + node))
+    billow_b = math.sin(2.0 * math.pi * (_phase(synced_us, period_s * 0.73) - node * 0.61))
+    global_level = 0.63 + 0.13 * billow_a + 0.09 * billow_b
+    tongue_a = math.sin(2.0 * math.pi * (
+        _phase(synced_us, period_s * 0.83) + 2.0 * around + node * 0.37
+    ))
+    tongue_b = math.sin(2.0 * math.pi * (
+        _phase(synced_us, period_s * 0.41) - 3.0 * around + node * 0.79
+    ))
+    tongue_c = math.sin(2.0 * math.pi * (
+        _phase(synced_us, period_s * 0.19) + 5.0 * around - node * 0.53
+    ))
+    local = 0.20 * tongue_a + 0.12 * tongue_b + 0.08 * tongue_c
+    intensity = max(0.08, min(1.0, global_level + texture * local))
+    heat = max(-1.0, min(1.0, texture * local / 0.40))
+    return intensity, heat
 
 
 def _ocean_component(synced_us: int, x: float, y: float, cx: float, cy: float, period_s: float, wavelength: float) -> float:
@@ -599,6 +708,28 @@ def _draw_disc(
                 continue
             idx = (y * width + x) * 3
             pixels[idx:idx + 3] = bytes(color)
+
+
+def _draw_pixel_ring(
+    pixels: bytearray,
+    width: int,
+    height: int,
+    cx: int,
+    cy: int,
+    radius: int,
+    colors: list[Rgbw],
+) -> None:
+    ring_radius = radius + 1
+    led_radius = max(1, radius // 4)
+    _draw_disc(pixels, width, height, cx, cy, ring_radius + led_radius + 1, (34, 38, 46))
+    for index, color in enumerate(colors):
+        angle = -math.pi / 2.0 + 2.0 * math.pi * index / len(colors)
+        led_x = round(cx + ring_radius * math.cos(angle))
+        led_y = round(cy + ring_radius * math.sin(angle))
+        _draw_disc(
+            pixels, width, height, led_x, led_y, led_radius,
+            _rgbw_to_preview_rgb(color),
+        )
 
 
 def _encode_png(width: int, height: int, rgb_pixels: bytes | bytearray) -> bytes:

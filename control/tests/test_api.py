@@ -12,6 +12,7 @@ from control.app import create_app
 from control.mock_conductor import Lantern, MockConductor
 from control.ota_store import OtaArtifactStore
 from control.pattern_store import PatternStore
+from control.preview import _fire_flicker_sample
 
 
 @pytest.fixture
@@ -600,6 +601,66 @@ def test_preview_endpoint_accepts_json_params() -> None:
     assert response.headers["content-type"] == "image/png"
 
 
+def test_fire_flicker_preview_exposes_distinct_addressable_ring_pixels() -> None:
+    client = TestClient(create_app(MockConductor()))
+
+    response = client.get(
+        "/preview.json",
+        params={
+            "pattern": "Fire Flicker",
+            "brightness": 56,
+            "period": 1200,
+            "hue": 24,
+            "saturation": 95,
+            "texture": 85,
+            "t": 730,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    first = body["lanterns"][0]
+    assert len(first["pixels"]) == 16
+    assert len({tuple(pixel["rgbw"]) for pixel in first["pixels"]}) >= 6
+    assert first["ring_contrast"] > 0.03
+    assert body["metrics"]["max_ring_contrast"] >= first["ring_contrast"]
+
+    later = client.get(
+        "/preview.json",
+        params={
+            "pattern": "Fire Flicker",
+            "brightness": 56,
+            "period": 1200,
+            "texture": 85,
+            "t": 980,
+        },
+    ).json()
+    assert first["pixels"] != later["lanterns"][0]["pixels"]
+
+    png = client.get(
+        "/preview",
+        params={
+            "pattern": "Fire Flicker",
+            "brightness": 56,
+            "texture": 85,
+            "t": 730,
+            "width": 180,
+            "height": 120,
+        },
+    )
+    assert png.status_code == 200
+    assert png.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_fire_flicker_preview_matches_firmware_golden_sample() -> None:
+    intensity, heat = _fire_flicker_sample(
+        730_000, 0.2, 0.8, 6, 16, 1.2, 0.85
+    )
+
+    assert intensity == pytest.approx(0.4318507, abs=1e-4)
+    assert heat == pytest.approx(-0.7561197, abs=1e-4)
+
+
 def test_hex_picker_preserves_value_and_packs_distinct_pattern_colors() -> None:
     script = r'''
 const fs = require("fs");
@@ -634,6 +695,32 @@ console.log(JSON.stringify([sample("#ff8800"), sample("#804400"), sample("#80808
     assert bright["params"]["p2"] != half["params"]["p2"]
     assert gray["params"]["p1"] == 0
     assert gray["params"]["p2"] & 0x8000
+
+
+def test_fire_flicker_ui_packs_speed_color_value_and_texture_into_wire_params() -> None:
+    script = r'''
+const fs = require("fs");
+const src = fs.readFileSync("control/static/app.js", "utf8");
+eval(src.slice(0, src.indexOf("function isPatternDirty")));
+console.log(JSON.stringify(patternParams({
+  pattern: "Fire Flicker", brightness: 56,
+  period: 1200, hue: 24, saturation: 95, value: 255, texture: 85,
+})));
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    params = json.loads(result.stdout)
+
+    assert params["p0"] == 1200
+    assert params["p1"] == 24
+    assert params["p2"] & 0x8000
+    assert params["p2"] & 0x7F == 85
+    assert (params["p2"] >> 7) & 0xFF == 255
+    assert params["p3"] == 95
 
 
 def test_preview_distinguishes_hex_value_uses_white_for_gray_and_keeps_ocean_saturation() -> None:

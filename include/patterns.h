@@ -123,6 +123,42 @@ inline RgbwColor firefly(int64_t synced_us, uint8_t brightness, float x, float y
                     brightness);
 }
 
+// Fire flicker: use every addressable LED in the ring. A low ember bed and
+// whole-lantern billow keep the ring visually cohesive; angular flame waves
+// give neighboring pixels distinct brightness and warmer/cooler color. Params
+// use the same compact value+texture metadata shape as Firefly.
+//   params[0] = primary flicker period in ms                 (default 1200)
+//   params[1] = middle flame hue in degrees, 0-359           (default 24)
+//   params[2] = marker + 8-bit value + 7-bit texture depth   (legacy: texture)
+//   params[3] = saturation percent                           (default 95)
+inline RgbwColor fireFlickerPixel(int64_t synced_us, uint8_t brightness,
+                                  float x, float y, uint16_t pixel_index,
+                                  uint16_t pixel_count,
+                                  const uint16_t params[4]) {
+  float period_s = params[0] ? params[0] / 1000.0f : 1.2f;
+  bool full_hsv = pmath::colorValuePresent(params[2]);
+  float base_hue = ((full_hsv || params[1]) ? params[1] % 360 : 24) / 360.0f;
+  uint16_t texture_pct = full_hsv
+                             ? pmath::fireflyScatterDecode(params[2])
+                             : (params[2] ? (params[2] > 100 ? 100 : params[2])
+                                          : 85);
+  uint16_t sat_pct = full_hsv
+                         ? (params[3] > 100 ? 100 : params[3])
+                         : (params[3] ? (params[3] > 100 ? 100 : params[3]) : 95);
+  pmath::FireFlickerSample sample = pmath::fireFlickerSample(
+      synced_us, x, y, pixel_index, pixel_count, period_s,
+      texture_pct / 100.0f);
+  // Hot/brighter pixels lean yellow; cooler/dimmer pixels lean red. The shift
+  // stays modest so a chosen flame color remains recognizable.
+  float hue_shift_degrees = 18.0f * (sample.intensity - 0.55f) +
+                            5.0f * sample.heat;
+  float hue = base_hue + hue_shift_degrees / 360.0f;
+  return scaledRgbw(pmath::hsvToRgbw(hue, sat_pct / 100.0f,
+                                    pmath::fireflyValueDecode(params[2]),
+                                    sample.intensity),
+                    brightness);
+}
+
 // Ocean wave: a soft 2-D swell of light rolls across the field. Deep saturated
 // blue in the troughs; as the swell rises the color brightens, desaturates, and
 // shifts toward cyan while retaining its chromatic tint on the RGB emitters.
@@ -177,11 +213,20 @@ inline RgbwColor calibrationId(int64_t synced_us, uint8_t brightness,
   return RgbwColor(brightness, (uint8_t)lroundf(brightness * 0.72f), 0, 0);
 }
 
-// Render one pattern into a NeoPixelBus strip (all pixels share one color for
-// these 16-pixel rings; per-pixel spatial effects can come later).
+// Render one pattern into a NeoPixelBus strip. Most field patterns intentionally
+// treat a lantern as one sample of f(x,y,t); ring-aware patterns can branch here
+// and evaluate f(x,y,pixel,t) without changing the beacon or sync model.
 template <typename StripT>
 inline void render(StripT& strip, const BeaconMsg& b, int64_t synced_us, float x,
                    float y, uint16_t node_id = 0) {
+  if (b.pattern_id == FIRE_FLICKER) {
+    uint16_t count = strip.PixelCount();
+    for (uint16_t i = 0; i < count; i++) {
+      strip.SetPixelColor(
+          i, fireFlickerPixel(synced_us, b.brightness, x, y, i, count, b.params));
+    }
+    return;
+  }
   RgbwColor c;
   switch (b.pattern_id) {
     case SWEEP:
