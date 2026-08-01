@@ -11,7 +11,7 @@ dependency stack today.
 
 ```bash
 /opt/homebrew/bin/python3.13 -m venv .venv
-.venv/bin/python -m pip install -r control/requirements.txt
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r control/requirements.lock
 .venv/bin/python -m uvicorn control.app:app --reload --host 127.0.0.1 --port 8000
 ```
 

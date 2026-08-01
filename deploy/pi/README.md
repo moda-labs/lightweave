@@ -5,6 +5,8 @@ It is the implementation guide for the stable contract in
 [`docs/REMOTE_ADMIN.md`](../../docs/REMOTE_ADMIN.md). The human-owned rollout and
 hardware proof remain in
 [`plans/remote-administration.md`](../../plans/remote-administration.md), Phase 4.
+After the first installation, normal updates follow the pull-based release
+procedure in [`docs/RELEASING.md`](../../docs/RELEASING.md).
 
 The production shape is deliberately narrow:
 
@@ -88,14 +90,17 @@ sudo git -C /opt/lightweave checkout --detach RELEASE_REF
 sudo python3 -m venv /opt/lightweave/.venv
 sudo /opt/lightweave/.venv/bin/python -m pip install --upgrade pip
 sudo /opt/lightweave/.venv/bin/python -m pip install \
-  --requirement /opt/lightweave/control/requirements.txt
+  --require-hashes --only-binary=:all: \
+  --requirement /opt/lightweave/control/requirements.lock
 sudo /opt/lightweave/.venv/bin/python -m pip check
 sudo chown --recursive root:root /opt/lightweave
 sudo chmod --recursive go-w /opt/lightweave
 ```
 
-All Python dependencies are pinned in `control/requirements.txt`. Keep the
-checkout root-owned: the service user only needs to read and execute it.
+The direct dependencies are pinned in `control/requirements.txt`; the complete
+transitive graph and accepted wheel hashes are committed in
+`control/requirements.lock`. Keep the checkout root-owned: the service user only
+needs to read and execute it.
 
 ## 3. Select the stable conductor serial device
 
@@ -376,6 +381,27 @@ Never delete the named tunnel itself when the intent is to delete its connectors
 
 ## 12. Upgrade
 
+After the first `v0.4.0` installation, enroll the Pi in the production release
+channel:
+
+```bash
+sudo /opt/lightweave/deploy/pi/install-gitops.sh
+sudo systemctl status lightweave-gitops.timer
+sudo journalctl -u lightweave-gitops.service -n 100 --no-pager
+```
+
+The installer creates root-owned release state under
+`/var/lib/lightweave-gitops`, installs the shared OTA/deployment lock, copies the
+reconciler outside the mutable Git checkout, verifies the systemd units, enables
+the five-minute timer, and performs one immediate check. Normal upgrades are
+then authorized by merging a reviewed channel
+promotion as documented in
+[`docs/RELEASING.md`](../../docs/RELEASING.md). Do not pull or edit the detached
+checkout by hand during normal operation.
+
+The commands below are retained only as an on-site emergency procedure for a Pi
+that cannot run the GitOps reconciler.
+
 Choose and record a reviewed target commit. Back up state and retain the current
 commit for rollback:
 
@@ -389,7 +415,8 @@ sudo tar -C /var/lib -czf \
 sudo git -C /opt/lightweave fetch --tags --prune
 sudo git -C /opt/lightweave checkout --detach NEW_RELEASE_REF
 sudo /opt/lightweave/.venv/bin/python -m pip install \
-  --requirement /opt/lightweave/control/requirements.txt
+  --require-hashes --only-binary=:all: \
+  --requirement /opt/lightweave/control/requirements.lock
 sudo /opt/lightweave/.venv/bin/python -m pip check
 sudo chown --recursive root:root /opt/lightweave
 sudo chmod --recursive go-w /opt/lightweave
@@ -426,7 +453,11 @@ sudo systemctl status cloudflared
 Re-check that the version is at least 2025.4.0 and that only the expected
 connector is active.
 
-## 13. Rollback
+## 13. Emergency manual rollback
+
+Normal unhealthy deployments roll back automatically, and an intentional
+rollback is performed by promoting an older immutable release. Use this manual
+procedure only for on-site recovery when the reconciler itself cannot run.
 
 Use the exact commit recorded before the upgrade:
 
@@ -434,7 +465,8 @@ Use the exact commit recorded before the upgrade:
 sudo systemctl stop lightweave-control
 sudo git -C /opt/lightweave checkout --detach PREVIOUS_RELEASE_COMMIT
 sudo /opt/lightweave/.venv/bin/python -m pip install \
-  --requirement /opt/lightweave/control/requirements.txt
+  --require-hashes --only-binary=:all: \
+  --requirement /opt/lightweave/control/requirements.lock
 sudo /opt/lightweave/.venv/bin/python -m pip check
 sudo chown --recursive root:root /opt/lightweave
 sudo chmod --recursive go-w /opt/lightweave

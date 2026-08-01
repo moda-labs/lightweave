@@ -246,6 +246,20 @@ in [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md). It preserves the same non-dependency
 rule: loss of the internet-facing admin path does not affect conductor or
 performer runtime.
 
+**[done; Pi field proof pending] Pull-based deployment:** production releases
+bind an immutable Git tag/full commit, separate control and firmware notes, and
+one checksum-verified canonical field binary in a release manifest. A reviewed
+channel file on `main` selects exactly one manifest by URL and SHA-256. Each Pi
+polls that channel outbound, backs up state, deploys the detached commit, and
+requires a local service health check or automatically restores the prior code
+and deployment record. Release state is root-owned outside the app-writable data
+directory, dependencies are transitively hash-locked, and a shared operation
+lock defers Pi deployment during field OTA. The promoted firmware is staged but never broadcast by
+the reconciler: ESP32 OTA remains an explicit operator action using the frozen
+online cohort described in §7.1. This keeps Pi GitOps failure separate from show
+runtime and from variable performer availability. See
+[`RELEASING.md`](RELEASING.md).
+
 ## 6. Auto-calibration — drone + computer vision **[planned]**
 
 Goal: build the `MAC → (x,y)` table by **survey**, not by hand (manual surveying of

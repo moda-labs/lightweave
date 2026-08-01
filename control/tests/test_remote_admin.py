@@ -71,6 +71,7 @@ def test_default_deny_boundary_and_security_headers(tmp_path: Path) -> None:
     app, _manager = protected_app(tmp_path)
     with TestClient(app, base_url="https://control.example.test") as client:
         session = client.get("/api/auth/session")
+        health = client.get("/api/health")
         login_page = client.get("/login")
         api = client.get("/api/state")
         page = client.get("/", follow_redirects=False)
@@ -79,13 +80,15 @@ def test_default_deny_boundary_and_security_headers(tmp_path: Path) -> None:
 
     assert session.status_code == 200
     assert session.json() == {"authenticated": False}
+    assert health.status_code == 200
+    assert health.json()["ok"] is True
     assert login_page.status_code == 200
     assert api.status_code == 401
     assert api.json() == {"detail": "authentication required"}
     assert page.status_code == 303 and page.headers["location"] == "/login"
     assert openapi.status_code == 303 and openapi.headers["location"] == "/login"
     assert ordinary_asset.status_code == 303
-    for response in (session, login_page, api, page, openapi, ordinary_asset):
+    for response in (session, health, login_page, api, page, openapi, ordinary_asset):
         assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
         assert response.headers["x-frame-options"] == "DENY"
         assert response.headers["strict-transport-security"] == "max-age=31536000"
@@ -97,6 +100,7 @@ def test_registered_public_route_inventory_is_exact() -> None:
         ("GET", "/static/login.js"),
         ("GET", "/static/login.css"),
         ("GET", "/api/auth/session"),
+        ("GET", "/api/health"),
         ("POST", "/api/auth/login"),
     }
 
@@ -117,9 +121,49 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert 'const ack = await api("/api/operations/ota-install"' in app_js
     assert "await pollOtaInstallUntilTerminal()" in app_js
     assert "wifi.allow_changes !== false" in app_js
+    assert 'releaseInfo = await api("/api/releases")' in app_js
+    assert "await applyLiveState(data.state)" in app_js
+    assert "function renderReleases()" in app_js
+    index_html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+    assert "Web control plane" in index_html
+    assert "Field firmware" in index_html
+    assert "field-release-pending-changes" in index_html
+    assert "Full release changelog" in index_html
     assert "event.code === 4401" in app_js
     assert 'await api("/api/auth/logout", { method: "POST" })' in app_js
     assert "JSON.stringify({password: passwordInput.value})" in login_js
+
+
+def test_live_state_refreshes_release_status_in_executed_javascript() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    refresh_start = app_js.index("async function refreshReleaseInfo()")
+    refresh_end = app_js.index("\n}\n\nasync function applyLiveState", refresh_start) + 2
+    apply_start = app_js.index("async function applyLiveState")
+    apply_end = app_js.index("\n}\n\nasync function refreshSavedPatterns", apply_start) + 2
+    script = f"""
+let state = null;
+let releaseInfo = null;
+let rendered = 0;
+let releaseRendered = 0;
+async function api(path) {{
+  if (path !== "/api/releases") throw new Error(path);
+  return {{control: {{version: "0.4.0"}}, firmware: {{version: "0.3.0"}}, history: []}};
+}}
+function render() {{ rendered += 1; }}
+function renderReleases() {{ releaseRendered += 1; }}
+{app_js[refresh_start:refresh_end]}
+{app_js[apply_start:apply_end]}
+await applyLiveState({{conductor: {{firmware: {{version: "0.3.0"}}}}}});
+if (state === null || releaseInfo.control.version !== "0.4.0") process.exit(1);
+if (rendered !== 1 || releaseRendered !== 1) process.exit(2);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_ota_control_lock_is_reversible_in_executed_javascript() -> None:
@@ -164,6 +208,7 @@ let otaInstall = null;
 let savedPatterns = [];
 let otaArtifact = null;
 let calibrationFrames = [];
+let releaseInfo = null;
 let stateCalls = 0;
 let delays = 0;
 async function api(path) {{
@@ -180,6 +225,7 @@ async function api(path) {{
     return {{conductor: {{}}, summary: {{}}, pattern: {{}}}};
   }}
   if (path === "/api/patterns") return {{patterns: []}};
+  if (path === "/api/releases") return {{control: {{}}, firmware: {{}}, history: []}};
   if (path === "/api/operations/ota-artifact") return {{artifact: null}};
   if (path === "/api/calibration/frames") return {{frames: []}};
   throw new Error(`unexpected path ${{path}}`);
@@ -191,6 +237,7 @@ async function pollOtaInstallUntilTerminal() {{
 }}
 function toast() {{}}
 function render() {{}}
+function renderReleases() {{}}
 {function_source}
 await refresh();
 if (stateCalls !== 2 || delays !== 1 || state === null) process.exit(1);

@@ -8,10 +8,24 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**145 pass**) is green; control tests (**216 pass**) are green; all three
+(**145 pass**) is green; control tests (**248 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-01): **manual OTA now treats the online field as a
+Latest locally (2026-08-01): **pull-based Pi releases and separate deployed-change
+visibility are implemented for v0.4.0.** A reviewed `production.json` pointer
+selects one hash-pinned immutable release manifest; each Pi polls outbound,
+verifies the repository/tag/commit and firmware hashes, backs up state, deploys
+the control plane, health-checks it, and restores the prior code/record on
+failure. Root-owned release state, hash-locked dependencies, exact-commit health
+checks, and a shared OTA/deployment lock close the privileged update boundary. A
+successful deployment stages the release firmware without starting OTA, and a
+timer firing during OTA safely defers. Operations shows web-control and field-firmware versions, sync state, and
+separate changelogs from `RELEASES.json`. Tag CI publishes the canonical field
+binary plus manifest; promotion remains a separate PR. The complete procedure is
+[`RELEASING.md`](RELEASING.md). Physical installation of the timer and the first
+production promotion remain operator-owned proof steps.
+
+Previous latest (2026-08-01): **manual OTA now treats the online field as a
 frozen required cohort instead of requiring every layout row to be present.**
 The conductor considers a performer online after a registration within the
 last 30 seconds, snapshots all fresh placed MACs at `ota_begin`, returns that

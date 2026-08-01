@@ -1,0 +1,84 @@
+name: Publish release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: control/requirements.lock
+      - name: Install test and firmware tooling
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements.lock
+          python -m pip install platformio==6.1.19
+      - name: Verify tag and release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "v$(tr -d '\n' < VERSION)"
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          python -c 'from pathlib import Path; from control.releases import load_release_catalog; releases = load_release_catalog(Path("RELEASES.json")); assert releases[0].version == Path("VERSION").read_text().strip()'
+      - name: Run release gates
+        run: |
+          pio test -e native
+          python -m pytest -q control/tests
+          node --check control/static/app.js
+          pio run -e field
+      - name: Build immutable release assets
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: https://github.com/${{ github.repository }}.git
+        run: |
+          mkdir -p dist
+          RELEASE_COMMIT=$(git rev-parse HEAD)
+          cp .pio/build/field/firmware.bin "dist/lightweave-field-${RELEASE_TAG}.bin"
+          python scripts/build_release_manifest.py \
+            --firmware "dist/lightweave-field-${RELEASE_TAG}.bin" \
+            --repository "$RELEASE_REPOSITORY" \
+            --commit "$RELEASE_COMMIT" \
+            --tag "$RELEASE_TAG" \
+            --artifact-url "https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/lightweave-field-${RELEASE_TAG}.bin" \
+            --output dist/lightweave-release.json
+          sha256sum dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            dist/lightweave-release.json \
+            "dist/lightweave-field-${RELEASE_TAG}.bin" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Lightweave ${RELEASE_TAG}" \
+            --verify-tag \
+            --generate-notes

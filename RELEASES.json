@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "releases": [
+    {
+      "version": "0.4.0",
+      "date": "2026-08-01",
+      "title": "Safe pull-based field releases",
+      "control_changes": [
+        "Added pull-based GitOps deployment from an explicitly promoted production release.",
+        "Added exact-version service health checks and automatic rollback when a Pi deployment fails.",
+        "Made Pi deployment defer safely while a field firmware OTA is active.",
+        "Added separate web-control and field-firmware deployment status in the Operations UI.",
+        "Added a user-visible release history with distinct control-plane and firmware changes."
+      ],
+      "firmware_changes": [
+        "Added immutable, checksum-verified firmware artifacts to each software release.",
+        "Added automatic staging of the promoted firmware on the Pi for an operator-authorized OTA.",
+        "Kept field firmware rollout separate from Pi deployment so offline performers remain safely deferred."
+      ]
+    },
+    {
+      "version": "0.3.0",
+      "date": "2026-08-01",
+      "title": "Remote field operations and richer light patterns",
+      "control_changes": [
+        "Added authenticated remote administration through the Raspberry Pi control plane.",
+        "Added persistent pattern review, preview, saving, and live broadcast workflows.",
+        "Added guarded firmware OTA with progress, recovery state, and partial-online cohorts.",
+        "Added field power scheduling, battery monitoring, Wi-Fi operations, and calibration tools."
+      ],
+      "firmware_changes": [
+        "Added Firefly, Ocean Wave, and ring-addressable Fire Flicker patterns.",
+        "Added firmware identity reporting and field-wide OTA over ESP-NOW.",
+        "Changed OTA targeting to freeze online performers while deferring offline layout rows.",
+        "Added runtime power policy, dusk sensing, light sleep, and power telemetry support."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,500 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import zlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+
+DEFAULT_CHANNEL_URL = (
+    "https://raw.githubusercontent.com/underminedsk/lightweave/"
+    "main/deploy/channels/production.json"
+)
+DEFAULT_REPOSITORY = "https://github.com/underminedsk/lightweave.git"
+MAX_CHANNEL_BYTES = 16 * 1024
+MAX_MANIFEST_BYTES = 128 * 1024
+MAX_FIRMWARE_BYTES = 0x140000
+
+
+class ReconcileError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class ReconcileConfig:
+    channel_url: str = DEFAULT_CHANNEL_URL
+    allowed_repository: str = DEFAULT_REPOSITORY
+    repo: Path = Path("/opt/lightweave")
+    data_dir: Path = Path("/var/lib/lightweave")
+    deployment_dir: Path = Path("/var/lib/lightweave-gitops")
+    backup_dir: Path = Path("/var/backups/lightweave")
+    stable_script: Path = Path("/usr/local/lib/lightweave/gitops_reconcile.py")
+    systemd_dir: Path = Path("/etc/systemd/system")
+    ota_lock_path: Path = Path("/var/lib/lightweave/operations/firmware-ota.lock")
+    health_url: str = "http://127.0.0.1:8000/api/health"
+    service_user: str = "lightweave"
+    health_attempts: int = 30
+    health_delay_s: float = 2.0
+
+    @classmethod
+    def from_environ(cls, environ: dict[str, str] | os._Environ[str]) -> "ReconcileConfig":
+        return cls(
+            channel_url=environ.get("LIGHTWEAVE_GITOPS_CHANNEL_URL", DEFAULT_CHANNEL_URL),
+            allowed_repository=environ.get("LIGHTWEAVE_GITOPS_ALLOWED_REPOSITORY", DEFAULT_REPOSITORY),
+            repo=Path(environ.get("LIGHTWEAVE_GITOPS_REPO", "/opt/lightweave")),
+            data_dir=Path(environ.get("LIGHTWEAVE_GITOPS_DATA_DIR", "/var/lib/lightweave")),
+            deployment_dir=Path(
+                environ.get("LIGHTWEAVE_GITOPS_DEPLOYMENT_DIR", "/var/lib/lightweave-gitops")
+            ),
+            backup_dir=Path(environ.get("LIGHTWEAVE_GITOPS_BACKUP_DIR", "/var/backups/lightweave")),
+            stable_script=Path(
+                environ.get(
+                    "LIGHTWEAVE_GITOPS_STABLE_SCRIPT",
+                    "/usr/local/lib/lightweave/gitops_reconcile.py",
+                )
+            ),
+            systemd_dir=Path(
+                environ.get("LIGHTWEAVE_GITOPS_SYSTEMD_DIR", "/etc/systemd/system")
+            ),
+            ota_lock_path=Path(
+                environ.get(
+                    "LIGHTWEAVE_GITOPS_OTA_LOCK",
+                    "/var/lib/lightweave/operations/firmware-ota.lock",
+                )
+            ),
+            health_url=environ.get(
+                "LIGHTWEAVE_GITOPS_HEALTH_URL",
+                "http://127.0.0.1:8000/api/health",
+            ),
+            service_user=environ.get("LIGHTWEAVE_GITOPS_SERVICE_USER", "lightweave"),
+            health_attempts=int(environ.get("LIGHTWEAVE_GITOPS_HEALTH_ATTEMPTS", "30")),
+            health_delay_s=float(environ.get("LIGHTWEAVE_GITOPS_HEALTH_DELAY_S", "2")),
+        )
+
+
+def _load_release_module(repo: Path):
+    repo_text = str(repo)
+    if repo_text not in sys.path:
+        sys.path.insert(0, repo_text)
+    from control import releases
+
+    return releases
+
+
+def _atomic_write(path: Path, data: bytes, mode: int = 0o640) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    path: Path
+    data: bytes | None
+    mode: int | None
+
+
+class GitOpsReconciler:
+    def __init__(
+        self,
+        config: ReconcileConfig,
+        *,
+        http_get: Callable[[str, int], bytes] | None = None,
+        clock: Callable[[], datetime] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.config = config
+        self.http_get = http_get or self._http_get
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.sleep = sleep
+        self.releases = _load_release_module(config.repo)
+
+    @staticmethod
+    def _http_get(url: str, maximum: int) -> bytes:
+        request = urllib.request.Request(url, headers={"User-Agent": "lightweave-gitops/1"})
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = response.read(maximum + 1)
+        if len(data) > maximum:
+            raise ReconcileError(f"download exceeds {maximum} bytes")
+        return data
+
+    def _run(self, args: list[str], *, timeout: int = 300) -> None:
+        subprocess.run(args, check=True, timeout=timeout)
+
+    def _output(self, args: list[str], *, timeout: int = 60) -> str:
+        return subprocess.check_output(args, text=True, timeout=timeout).strip()
+
+    def _git(self, *args: str, timeout: int = 120) -> None:
+        self._run(["git", "-C", str(self.config.repo), *args], timeout=timeout)
+
+    def _git_output(self, *args: str) -> str:
+        return self._output(["git", "-C", str(self.config.repo), *args])
+
+    def _json_download(self, url: str, maximum: int, name: str) -> tuple[bytes, Any]:
+        data = self.http_get(url, maximum)
+        try:
+            return data, json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ReconcileError(f"{name} is not valid JSON") from error
+
+    def desired_manifest(self):
+        _, channel_document = self._json_download(
+            self.config.channel_url,
+            MAX_CHANNEL_BYTES,
+            "release channel",
+        )
+        channel = self.releases.parse_release_channel(channel_document)
+        if not channel["enabled"]:
+            return None
+        manifest_bytes, manifest_document = self._json_download(
+            channel["manifest_url"],
+            MAX_MANIFEST_BYTES,
+            "release manifest",
+        )
+        if hashlib.sha256(manifest_bytes).hexdigest() != channel["manifest_sha256"]:
+            raise ReconcileError("release manifest SHA-256 mismatch")
+        manifest = self.releases.parse_release_manifest(manifest_document)
+        if manifest.repository != self.config.allowed_repository:
+            raise ReconcileError("release manifest repository is not allowed")
+        return manifest
+
+    def _current_record_path(self) -> Path:
+        return self.config.deployment_dir / "current.json"
+
+    def _current_record(self) -> dict[str, Any] | None:
+        return self.releases.load_deployment_record(self._current_record_path())
+
+    def _service_account(self) -> pwd.struct_passwd:
+        return pwd.getpwnam(self.config.service_user)
+
+    def _prepare_deployment_dir(self) -> None:
+        path = self.config.deployment_dir
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            try:
+                path.mkdir(mode=0o750)
+            except OSError as error:
+                raise ReconcileError(f"cannot create root-owned deployment directory: {error}") from error
+            status = path.lstat()
+        if path.is_symlink() or not path.is_dir():
+            raise ReconcileError("deployment directory must be a real directory")
+        if status.st_uid != os.geteuid():
+            raise ReconcileError("deployment directory is not owned by the reconciler user")
+        if status.st_mode & 0o022:
+            raise ReconcileError("deployment directory must not be group/world writable")
+        service = self._service_account()
+        os.chown(path, os.geteuid(), service.pw_gid)
+        os.chmod(path, 0o750)
+
+    def _set_service_readable(self, path: Path) -> None:
+        service = self._service_account()
+        os.chown(path, os.geteuid(), service.pw_gid)
+        os.chmod(path, 0o640)
+
+    def _prepare_release_dir(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        service = self._service_account()
+        os.chown(path, os.geteuid(), service.pw_gid)
+        os.chmod(path, 0o750)
+
+    def _verify_origin(self) -> None:
+        actual = self._git_output("remote", "get-url", "origin").rstrip("/")
+        expected = self.config.allowed_repository.rstrip("/")
+        if actual.removesuffix(".git") != expected.removesuffix(".git"):
+            raise ReconcileError("repository origin does not match the allowed repository")
+        if self._git_output("status", "--porcelain", "--untracked-files=all"):
+            raise ReconcileError("repository working tree is not clean")
+
+    def _download_firmware(self, manifest) -> bytes:
+        data = self.http_get(str(manifest.firmware["url"]), MAX_FIRMWARE_BYTES)
+        if len(data) != manifest.firmware["size"]:
+            raise ReconcileError("firmware size mismatch")
+        if hashlib.sha256(data).hexdigest() != manifest.firmware["sha256"]:
+            raise ReconcileError("firmware SHA-256 mismatch")
+        if zlib.crc32(data) & 0xFFFFFFFF != manifest.firmware["crc32"]:
+            raise ReconcileError("firmware CRC32 mismatch")
+        return data
+
+    def _record_has_verified_firmware(self, record: dict[str, Any], manifest) -> bool:
+        deployed = self.releases.parse_release_manifest(record["manifest"])
+        if deployed.commit != manifest.commit:
+            return False
+        try:
+            data = Path(record["firmware_local_path"]).read_bytes()
+        except OSError:
+            return False
+        return (
+            len(data) == manifest.firmware["size"]
+            and hashlib.sha256(data).hexdigest() == manifest.firmware["sha256"]
+            and zlib.crc32(data) & 0xFFFFFFFF == manifest.firmware["crc32"]
+        )
+
+    def _backup(self, timestamp: str) -> Path:
+        self.config.backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = self.config.backup_dir / f"pre-gitops-{timestamp}.tgz"
+        self._run(
+            [
+                "tar",
+                "-C",
+                str(self.config.data_dir.parent),
+                "--exclude",
+                f"{self.config.data_dir.name}/operations/firmware-ota.lock",
+                "-czf",
+                str(backup),
+                self.config.data_dir.name,
+            ],
+            timeout=180,
+        )
+        return backup
+
+    def _install_python(self) -> None:
+        python = self.config.repo / ".venv" / "bin" / "python"
+        self._run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--require-hashes",
+                "--only-binary=:all:",
+                "--requirement",
+                str(self.config.repo / "control" / "requirements.lock"),
+            ],
+            timeout=600,
+        )
+        self._run([str(python), "-m", "pip", "check"], timeout=120)
+
+    def _install_control_unit(self) -> None:
+        _atomic_write(
+            self.config.systemd_dir / "lightweave-control.service",
+            (self.config.repo / "deploy" / "pi" / "lightweave-control.service").read_bytes(),
+            mode=0o644,
+        )
+
+    def _install_gitops_runtime(self) -> None:
+        _atomic_write(
+            self.config.stable_script,
+            (self.config.repo / "deploy" / "pi" / "gitops_reconcile.py").read_bytes(),
+            mode=0o755,
+        )
+        for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+            _atomic_write(
+                self.config.systemd_dir / name,
+                (self.config.repo / "deploy" / "pi" / name).read_bytes(),
+                mode=0o644,
+            )
+
+    def _runtime_paths(self) -> tuple[Path, ...]:
+        return (
+            self.config.stable_script,
+            self.config.systemd_dir / "lightweave-gitops.service",
+            self.config.systemd_dir / "lightweave-gitops.timer",
+        )
+
+    def _snapshot_runtime(self) -> tuple[FileSnapshot, ...]:
+        snapshots = []
+        for path in self._runtime_paths():
+            try:
+                status = path.stat()
+                snapshots.append(FileSnapshot(path, path.read_bytes(), status.st_mode & 0o777))
+            except FileNotFoundError:
+                snapshots.append(FileSnapshot(path, None, None))
+        return tuple(snapshots)
+
+    def _restore_runtime(self, snapshots: tuple[FileSnapshot, ...]) -> None:
+        for snapshot in snapshots:
+            if snapshot.data is None:
+                snapshot.path.unlink(missing_ok=True)
+            else:
+                _atomic_write(snapshot.path, snapshot.data, mode=snapshot.mode or 0o644)
+
+    def _healthcheck(self, expected_commit: str) -> None:
+        last_error: Exception | None = None
+        for _ in range(self.config.health_attempts):
+            try:
+                document = json.loads(self.http_get(self.config.health_url, 4096))
+                if (
+                    isinstance(document, dict)
+                    and document.get("ok") is True
+                    and document.get("commit") == expected_commit
+                ):
+                    return
+                last_error = ReconcileError("health response does not identify the expected commit")
+            except Exception as error:
+                last_error = error
+            self.sleep(self.config.health_delay_s)
+        raise ReconcileError(f"control health check failed: {last_error}")
+
+    def _write_history(self, record: dict[str, Any]) -> None:
+        history = self.config.deployment_dir / "history.jsonl"
+        with history.open("ab") as handle:
+            handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+        os.chmod(history, 0o600)
+
+    def _restore_record(self, previous: bytes | None) -> None:
+        path = self._current_record_path()
+        if previous is None:
+            path.unlink(missing_ok=True)
+            return
+        _atomic_write(path, previous)
+        self._set_service_readable(path)
+
+    @contextlib.contextmanager
+    def _ota_guard(self):
+        try:
+            lock = self.config.ota_lock_path.open("r+")
+        except OSError as error:
+            raise ReconcileError(f"cannot open the installed OTA operation lock: {error}") from error
+        with lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def reconcile(self) -> dict[str, Any]:
+        manifest = self.desired_manifest()
+        if manifest is None:
+            return {"status": "disabled"}
+        self._verify_origin()
+        self._prepare_deployment_dir()
+        current_commit = self._git_output("rev-parse", "HEAD").lower()
+        current_record = self._current_record()
+        if (
+            current_commit == manifest.commit
+            and current_record
+            and self._record_has_verified_firmware(current_record, manifest)
+        ):
+            return {"status": "current", "release": manifest.release, "commit": manifest.commit}
+
+        firmware = self._download_firmware(manifest)
+        self._git("fetch", "origin", f"{manifest.ref}:{manifest.ref}")
+        resolved = self._git_output("rev-parse", f"{manifest.ref}^{{commit}}").lower()
+        if resolved != manifest.commit:
+            raise ReconcileError("release tag does not resolve to the manifest commit")
+
+        with self._ota_guard() as ota_available:
+            if not ota_available:
+                return {"status": "deferred", "reason": "ota_active", "release": manifest.release}
+            return self._deploy(manifest, firmware, current_commit)
+
+    def _deploy(self, manifest, firmware: bytes, current_commit: str) -> dict[str, Any]:
+        now = self.clock()
+        timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+        backup = self._backup(timestamp)
+        release_dir = self.config.deployment_dir / "releases" / manifest.release
+        self._prepare_release_dir(release_dir)
+        firmware_path = release_dir / str(manifest.firmware["filename"])
+        _atomic_write(firmware_path, firmware, mode=0o640)
+        self._set_service_readable(firmware_path)
+        previous_record = (
+            self._current_record_path().read_bytes()
+            if self._current_record_path().exists()
+            else None
+        )
+        record = {
+            "schema_version": 1,
+            "deployed_at": now.isoformat().replace("+00:00", "Z"),
+            "previous_commit": current_commit,
+            "backup": str(backup),
+            "firmware_local_path": str(firmware_path),
+            "manifest": manifest.as_dict(),
+        }
+
+        runtime_snapshots = self._snapshot_runtime()
+        self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
+        try:
+            self._git("checkout", "--detach", manifest.commit)
+            self._install_python()
+            self._install_control_unit()
+            _atomic_write(
+                self._current_record_path(),
+                json.dumps(record, sort_keys=True, indent=2).encode() + b"\n",
+            )
+            self._set_service_readable(self._current_record_path())
+            self._run(["systemctl", "daemon-reload"])
+            self._run(["systemctl", "start", "lightweave-control.service"])
+            self._healthcheck(manifest.commit)
+            self._install_gitops_runtime()
+            self._run(["systemctl", "daemon-reload"])
+            self._run(["systemctl", "enable", "--now", "lightweave-gitops.timer"])
+            self._write_history(record)
+            return {"status": "deployed", "release": manifest.release, "commit": manifest.commit}
+        except Exception as deploy_error:
+            try:
+                self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
+                self._git("checkout", "--detach", current_commit)
+                self._install_python()
+                self._install_control_unit()
+                self._restore_record(previous_record)
+                self._restore_runtime(runtime_snapshots)
+                self._run(["systemctl", "daemon-reload"])
+                self._run(["systemctl", "start", "lightweave-control.service"])
+                self._healthcheck(current_commit)
+            except Exception as rollback_error:
+                raise ReconcileError(
+                    f"deployment failed ({deploy_error}); rollback also failed ({rollback_error})"
+                ) from rollback_error
+            raise ReconcileError(f"deployment failed and was rolled back: {deploy_error}") from deploy_error
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Reconcile the Pi to the approved Lightweave release")
+    parser.add_argument("--check", action="store_true", help="validate desired state without deploying")
+    args = parser.parse_args()
+    config = ReconcileConfig.from_environ(os.environ)
+    reconciler = GitOpsReconciler(config)
+    lock_path = Path("/run/lock/lightweave-gitops.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if args.check:
+            manifest = reconciler.desired_manifest()
+            result = {"status": "disabled"} if manifest is None else {
+                "status": "valid",
+                "release": manifest.release,
+                "commit": manifest.commit,
+            }
+        else:
+            result = reconciler.reconcile()
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BlockingIOError:
+        print("lightweave GitOps reconciliation is already running", file=sys.stderr)
+        raise SystemExit(0)
+    except Exception as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1)

@@ -4,6 +4,8 @@ This document records the stable production architecture and operator contract f
 Execution status and implementation gates live in [`plans/remote-administration.md`](../plans/remote-administration.md).
 Installation, upgrade, rollback, and recovery commands live in
 [`deploy/pi/README.md`](../deploy/pi/README.md).
+The release-authoring and production-promotion procedure lives in
+[`RELEASING.md`](RELEASING.md).
 
 ## Runtime boundary
 
@@ -91,12 +93,31 @@ Bench development enables network mutation only through explicit development con
 ## Service and data layout
 
 Application code and the Python virtual environment live under read-only `/opt/lightweave`.
-Mutable OTA, pattern, and calibration data live under `/var/lib/lightweave`.
+Mutable OTA, pattern, and calibration data live under `/var/lib/lightweave`;
+root-owned release records and staged release firmware live under
+`/var/lib/lightweave-gitops` and are only group-readable by the service.
 The FastAPI service runs as an unprivileged `lightweave` user with serial access and write access only to its state directory.
 
 `cloudflared` runs as a separate unprivileged service.
 Its tunnel token is stored outside the application environment in a restricted root-owned file.
 Tunnel credentials and application password configuration remain separate.
+
+## Pull-based releases
+
+The Pi polls an HTTPS production-channel document from GitHub every five minutes.
+That document points to one hash-pinned, immutable release manifest. The
+reconciler verifies the approved repository, exact tag and full commit, downloads
+and verifies the canonical firmware, backs up mutable state, deploys the control
+plane, and rolls code back automatically if the loopback health check fails.
+The health check must report the exact promoted commit. A shared operation lock
+defers reconciliation while a manual ESP32 OTA is active.
+
+Reconciliation changes only the Pi software and staged firmware artifact. It
+never starts ESP32 OTA. An authenticated operator still chooses a maintenance
+window and starts field OTA against the frozen online performer cohort; offline
+rows remain deferred for a later run. The Operations UI reports control-plane
+and field-firmware deployment states separately and shows their separate release
+notes.
 
 The field service environment includes:
 

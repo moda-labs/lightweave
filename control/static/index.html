@@ -156,6 +156,47 @@
               <div class="ops-value" id="firmware-consistency">--</div>
             </div>
           </div>
+          <div class="ops-section release-section">
+            <div class="section-head">
+              <h3>Deployed changes</h3>
+              <div class="chip" id="release-overall-status">--</div>
+            </div>
+            <p class="release-intro">The web control plane and field firmware move independently. This shows what is actually running, not only what was published.</p>
+            <div class="release-grid">
+              <article class="release-card">
+                <div class="release-card-head">
+                  <div>
+                    <div class="label">Web control plane</div>
+                    <div class="release-version" id="control-release-version">--</div>
+                  </div>
+                  <div class="chip" id="control-release-status">--</div>
+                </div>
+                <div class="release-meta" id="control-release-meta">--</div>
+                <h4 id="control-release-title">Release notes unavailable</h4>
+                <ul class="release-changes" id="control-release-changes"></ul>
+              </article>
+              <article class="release-card">
+                <div class="release-card-head">
+                  <div>
+                    <div class="label">Field firmware</div>
+                    <div class="release-version" id="field-release-version">--</div>
+                  </div>
+                  <div class="chip" id="field-release-status">--</div>
+                </div>
+                <div class="release-meta" id="field-release-meta">--</div>
+                <h4 id="field-release-title">Release notes unavailable</h4>
+                <ul class="release-changes" id="field-release-changes"></ul>
+                <div class="release-pending" id="field-release-pending" hidden>
+                  <h4 id="field-release-pending-title">Staged firmware changes</h4>
+                  <ul class="release-changes" id="field-release-pending-changes"></ul>
+                </div>
+              </article>
+            </div>
+            <details class="release-history">
+              <summary>Full release changelog</summary>
+              <div id="release-history-list"></div>
+            </details>
+          </div>
           <div class="ops-section recovery-section" id="recovery-section">
             <div class="section-head">
               <h3>Recovery</h3>

@@ -32,12 +32,18 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   native unit tests, so sync math, pattern math, roster/table logic, power policy,
   and OTA helpers can be tested without hardware.
 
-Current release: `0.3.0`. The bench system has been verified with one conductor
+Current release: `0.4.0`. The bench system has been verified with one conductor
 and two performers for sync, layout assignment, pattern control, runtime power
 policy, and the local web control plane. Field-wide OTA is implemented and has
 completed successful bench installs, including same-protocol mixed-firmware
 recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
 the exact latest state.
+
+Production Pi updates use a pull-based, hash-pinned release channel with health
+checks and automatic code rollback. Each promoted release stages its immutable
+firmware artifact, but an operator still explicitly starts field OTA. The UI
+shows separate web-control and field-firmware versions and changelogs. See
+[docs/RELEASING.md](docs/RELEASING.md) for the release procedure.
 
 ## System overview
 

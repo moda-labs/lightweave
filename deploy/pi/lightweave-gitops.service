@@ -1,0 +1,26 @@
+[Unit]
+Description=Reconcile Lightweave to the approved GitOps release
+Documentation=https://github.com/underminedsk/lightweave/tree/main/deploy/pi
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/lightweave/gitops.env
+ExecStart=/usr/local/lib/lightweave/gitops_reconcile.py
+TimeoutStartSec=20min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/opt/lightweave /var/lib/lightweave /var/lib/lightweave-gitops /var/backups/lightweave /usr/local/lib/lightweave /etc/systemd/system
