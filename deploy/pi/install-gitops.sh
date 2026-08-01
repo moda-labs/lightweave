@@ -74,6 +74,9 @@ install -o root -g root -m 0755 \
   "$repo/deploy/pi/gitops_reconcile.py" \
   /usr/local/lib/lightweave/gitops_reconcile.py
 install -o root -g root -m 0644 \
+  "$repo/deploy/pi/lightweave-gitops-recovery.service" \
+  /etc/systemd/system/lightweave-gitops-recovery.service
+install -o root -g root -m 0644 \
   "$repo/deploy/pi/lightweave-gitops.service" \
   /etc/systemd/system/lightweave-gitops.service
 install -o root -g root -m 0644 \
@@ -81,6 +84,8 @@ install -o root -g root -m 0644 \
   /etc/systemd/system/lightweave-gitops.timer
 systemctl daemon-reload
 systemd-analyze verify \
+  /etc/systemd/system/lightweave-control.service \
+  /etc/systemd/system/lightweave-gitops-recovery.service \
   /etc/systemd/system/lightweave-gitops.service \
   /etc/systemd/system/lightweave-gitops.timer
 systemctl restart lightweave-control.service

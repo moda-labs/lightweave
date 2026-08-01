@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**145 pass**) is green; control tests (**263 pass**) are green; all three
+(**145 pass**) is green; control tests (**266 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest locally (2026-08-01): **pull-based Pi releases and separate deployed-change

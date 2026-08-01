@@ -149,6 +149,11 @@ Before the checkout changes, the reconciler durably records the prior commit,
 environment pointer, deployment record, and stable runtime snapshots. If power
 is lost at any later boundary, the next timer invocation restores and
 health-checks that complete prior state before attempting another deployment.
+At boot, a root recovery-only unit is ordered before the control service. It
+restores any pending transaction without starting control itself, so partially
+deployed code cannot touch production data during the timer's startup delay;
+the normal reconciler later health-checks the restored process and clears the
+transaction.
 
 The root reconciler writes the exact checked-out commit to a group-readable
 marker in the release directory before starting control. The unprivileged web

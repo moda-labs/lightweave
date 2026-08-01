@@ -1,0 +1,27 @@
+[Unit]
+Description=Restore an interrupted Lightweave deployment before control starts
+Documentation=https://github.com/underminedsk/lightweave/tree/main/deploy/pi
+After=local-fs.target
+Before=lightweave-control.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/lightweave/gitops.env
+ExecStart=/usr/local/lib/lightweave/gitops_reconcile.py --recover-only
+RemainAfterExit=yes
+TimeoutStartSec=5min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/opt/lightweave /var/lib/lightweave-gitops /usr/local/lib/lightweave /etc/systemd/system

@@ -104,13 +104,48 @@ def _atomic_write(path: Path, data: bytes, mode: int = 0o640) -> None:
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
+            os.fchmod(handle.fileno(), mode)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _durable_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_directory(path.parent)
+
+
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_tree(path: Path) -> None:
+    for root, _directories, filenames in os.walk(path, topdown=False):
+        directory = Path(root)
+        for filename in filenames:
+            candidate = directory / filename
+            if not candidate.is_symlink():
+                _fsync_file(candidate)
+        _fsync_directory(directory)
 
 
 def _atomic_symlink(target: Path, link: Path) -> None:
@@ -119,6 +154,7 @@ def _atomic_symlink(target: Path, link: Path) -> None:
     try:
         temporary.symlink_to(target)
         os.replace(temporary, link)
+        _fsync_directory(link.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -138,12 +174,13 @@ class GitOpsReconciler:
         http_get: Callable[[str, int], bytes] | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        load_releases: bool = True,
     ) -> None:
         self.config = config
         self.http_get = http_get or self._http_get
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.sleep = sleep
-        self.releases = _load_release_module(config.repo)
+        self.releases = _load_release_module(config.repo) if load_releases else None
 
     @staticmethod
     def _http_get(url: str, maximum: int) -> bytes:
@@ -174,6 +211,8 @@ class GitOpsReconciler:
             raise ReconcileError(f"{name} is not valid JSON") from error
 
     def desired_manifest(self):
+        if self.releases is None:
+            raise ReconcileError("release metadata is unavailable in recovery-only mode")
         _, channel_document = self._json_download(
             self.config.channel_url,
             MAX_CHANNEL_BYTES,
@@ -213,6 +252,8 @@ class GitOpsReconciler:
         return self.config.repo / ".venv"
 
     def _current_record(self) -> dict[str, Any] | None:
+        if self.releases is None:
+            raise ReconcileError("release metadata is unavailable in recovery-only mode")
         return self.releases.load_deployment_record(self._current_record_path())
 
     def _service_account(self) -> pwd.struct_passwd:
@@ -242,12 +283,19 @@ class GitOpsReconciler:
         service = self._service_account()
         os.chown(path, os.geteuid(), service.pw_gid)
         os.chmod(path, 0o640)
+        _fsync_file(path)
 
     def _prepare_release_dir(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
         service = self._service_account()
         os.chown(path, os.geteuid(), service.pw_gid)
         os.chmod(path, 0o750)
+        current = path
+        while True:
+            _fsync_directory(current)
+            if current == self.config.deployment_dir:
+                break
+            current = current.parent
 
     def _verify_origin(self) -> None:
         actual = self._git_output("remote", "get-url", "origin").rstrip("/")
@@ -268,6 +316,8 @@ class GitOpsReconciler:
         return data
 
     def _record_has_verified_firmware(self, record: dict[str, Any], manifest) -> bool:
+        if self.releases is None:
+            raise ReconcileError("release metadata is unavailable in recovery-only mode")
         deployed = self.releases.parse_release_manifest(record["manifest"])
         if deployed.commit != manifest.commit:
             return False
@@ -326,7 +376,9 @@ class GitOpsReconciler:
                 timeout=600,
             )
             self._run([str(python), "-m", "pip", "check"], timeout=120)
+            _fsync_tree(temporary)
             os.replace(temporary, target)
+            _fsync_directory(root)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
@@ -348,7 +400,11 @@ class GitOpsReconciler:
             (self.config.repo / "deploy" / "pi" / "gitops_reconcile.py").read_bytes(),
             mode=0o755,
         )
-        for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+        for name in (
+            "lightweave-gitops-recovery.service",
+            "lightweave-gitops.service",
+            "lightweave-gitops.timer",
+        ):
             _atomic_write(
                 self.config.systemd_dir / name,
                 (self.config.repo / "deploy" / "pi" / name).read_bytes(),
@@ -358,6 +414,7 @@ class GitOpsReconciler:
     def _runtime_paths(self) -> tuple[Path, ...]:
         return (
             self.config.stable_script,
+            self.config.systemd_dir / "lightweave-gitops-recovery.service",
             self.config.systemd_dir / "lightweave-gitops.service",
             self.config.systemd_dir / "lightweave-gitops.timer",
         )
@@ -375,7 +432,7 @@ class GitOpsReconciler:
     def _restore_runtime(self, snapshots: tuple[FileSnapshot, ...]) -> None:
         for snapshot in snapshots:
             if snapshot.data is None:
-                snapshot.path.unlink(missing_ok=True)
+                _durable_unlink(snapshot.path)
             else:
                 _atomic_write(snapshot.path, snapshot.data, mode=snapshot.mode or 0o644)
 
@@ -400,12 +457,15 @@ class GitOpsReconciler:
         history = self.config.deployment_dir / "history.jsonl"
         with history.open("ab") as handle:
             handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n")
-        os.chmod(history, 0o600)
+            os.chmod(history, 0o600)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(history.parent)
 
     def _restore_record(self, previous: bytes | None) -> None:
         path = self._current_record_path()
         if previous is None:
-            path.unlink(missing_ok=True)
+            _durable_unlink(path)
             return
         _atomic_write(path, previous)
         self._set_service_readable(path)
@@ -521,27 +581,52 @@ class GitOpsReconciler:
             tuple(snapshots),
         )
 
+    def _restore_transaction_state(
+        self,
+        transaction: tuple[str, Path, bytes | None, tuple[FileSnapshot, ...]],
+        *,
+        finalize: bool,
+    ) -> str:
+        previous_commit, previous_venv, previous_record, runtime_snapshots = transaction
+        if finalize:
+            with contextlib.suppress(Exception):
+                self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
+        self._git("checkout", "--detach", previous_commit)
+        self._install_control_unit()
+        self._switch_python(previous_venv)
+        self._write_running_commit(previous_commit)
+        self._restore_record(previous_record)
+        self._restore_runtime(runtime_snapshots)
+        self._run(["systemctl", "daemon-reload"])
+        if finalize:
+            self._run(["systemctl", "start", "lightweave-control.service"])
+            self._healthcheck(previous_commit)
+            _durable_unlink(self._transaction_path())
+        return previous_commit
+
     def _recover_interrupted_deployment(self) -> dict[str, Any] | None:
         transaction = self._load_transaction()
         if transaction is None:
             return None
-        previous_commit, previous_venv, previous_record, runtime_snapshots = transaction
         try:
-            with contextlib.suppress(Exception):
-                self._run(["systemctl", "stop", "lightweave-control.service"], timeout=180)
-            self._git("checkout", "--detach", previous_commit)
-            self._install_control_unit()
-            self._switch_python(previous_venv)
-            self._write_running_commit(previous_commit)
-            self._restore_record(previous_record)
-            self._restore_runtime(runtime_snapshots)
-            self._run(["systemctl", "daemon-reload"])
-            self._run(["systemctl", "start", "lightweave-control.service"])
-            self._healthcheck(previous_commit)
-            self._transaction_path().unlink()
+            previous_commit = self._restore_transaction_state(transaction, finalize=True)
         except Exception as error:
             raise ReconcileError(f"interrupted deployment recovery failed: {error}") from error
         return {"status": "recovered", "commit": previous_commit}
+
+    def recover_before_control_start(self) -> dict[str, Any]:
+        self._prepare_deployment_dir()
+        transaction = self._load_transaction()
+        if transaction is None:
+            return {"status": "clean"}
+        with self._ota_guard() as ota_available:
+            if not ota_available:
+                raise ReconcileError("cannot restore interrupted deployment while OTA is active")
+            try:
+                previous_commit = self._restore_transaction_state(transaction, finalize=False)
+            except Exception as error:
+                raise ReconcileError(f"boot deployment recovery failed: {error}") from error
+        return {"status": "restored", "commit": previous_commit}
 
     def _write_running_commit(self, commit: str) -> None:
         _atomic_write(self._running_commit_path(), f"{commit}\n".encode(), mode=0o640)
@@ -664,7 +749,7 @@ class GitOpsReconciler:
             self._run(["systemctl", "daemon-reload"])
             self._run(["systemctl", "enable", "--now", "lightweave-gitops.timer"])
             self._write_history(record)
-            self._transaction_path().unlink()
+            _durable_unlink(self._transaction_path())
             return {"status": "deployed", "release": manifest.release, "commit": manifest.commit}
         except Exception as deploy_error:
             try:
@@ -679,7 +764,7 @@ class GitOpsReconciler:
                 self._run(["systemctl", "daemon-reload"])
                 self._run(["systemctl", "start", "lightweave-control.service"])
                 self._healthcheck(current_commit)
-                self._transaction_path().unlink()
+                _durable_unlink(self._transaction_path())
             except Exception as rollback_error:
                 raise ReconcileError(
                     f"deployment failed ({deploy_error}); rollback also failed ({rollback_error})"
@@ -690,14 +775,21 @@ class GitOpsReconciler:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reconcile the Pi to the approved Lightweave release")
     parser.add_argument("--check", action="store_true", help="validate desired state without deploying")
+    parser.add_argument(
+        "--recover-only",
+        action="store_true",
+        help="restore any interrupted deployment without starting the control service",
+    )
     args = parser.parse_args()
     config = ReconcileConfig.from_environ(os.environ)
-    reconciler = GitOpsReconciler(config)
+    reconciler = GitOpsReconciler(config, load_releases=not args.recover_only)
     lock_path = Path("/run/lock/lightweave-gitops.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if args.check:
+        if args.recover_only:
+            result = reconciler.recover_before_control_start()
+        elif args.check:
             manifest = reconciler.desired_manifest()
             result = {"status": "disabled"} if manifest is None else {
                 "status": "valid",

@@ -265,7 +265,9 @@ runtime and from variable performer availability. See
 Before changing the checkout, the reconciler persists a root-only transaction
 containing the prior commit, environment pointer, deployment record, and stable
 runtime snapshots. An interrupted invocation recovers and health-checks that
-state before reading desired state again. The no-op path likewise requires the
+state before reading desired state again. A recovery-only root oneshot is a
+required predecessor of control at boot and restores the prior filesystem state
+without creating a service-start dependency cycle. The no-op path likewise requires the
 checkout, environment link, commit marker, staged firmware, and live health
 response to agree.
 

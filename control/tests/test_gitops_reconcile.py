@@ -13,6 +13,11 @@ import pytest
 
 
 SCRIPT = Path(__file__).parents[2] / "deploy" / "pi" / "gitops_reconcile.py"
+GITOPS_UNITS = (
+    "lightweave-gitops-recovery.service",
+    "lightweave-gitops.service",
+    "lightweave-gitops.timer",
+)
 SPEC = importlib.util.spec_from_file_location("gitops_reconcile", SCRIPT)
 assert SPEC and SPEC.loader
 gitops = importlib.util.module_from_spec(SPEC)
@@ -84,6 +89,23 @@ def test_disabled_channel_is_a_safe_noop(tmp_path: Path) -> None:
     reconciler = gitops.GitOpsReconciler(config(tmp_path), http_get=lambda _url, _max: disabled)
 
     assert reconciler.reconcile() == {"status": "disabled"}
+
+
+def test_atomic_state_replacements_and_deletions_sync_the_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced = []
+    monkeypatch.setattr(gitops, "_fsync_directory", synced.append)
+    state = tmp_path / "state"
+    state.mkdir()
+    record = state / "record.json"
+    link = state / "current"
+
+    gitops._atomic_write(record, b"state")
+    gitops._atomic_symlink(record, link)
+    gitops._durable_unlink(record)
+
+    assert synced == [state, state, state]
 
 
 def test_manifest_hash_is_verified_before_parsing_or_git(tmp_path: Path) -> None:
@@ -382,7 +404,7 @@ def test_late_failure_restores_the_previous_gitops_runtime(tmp_path: Path) -> No
     configuration.stable_script.parent.mkdir(parents=True)
     configuration.systemd_dir.mkdir(parents=True)
     configuration.stable_script.write_bytes(b"old runtime")
-    for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+    for name in GITOPS_UNITS:
         (configuration.systemd_dir / name).write_bytes(b"old unit")
     reconciler = LateFailingReconciler(configuration, fake_responses(configuration))
 
@@ -443,6 +465,7 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert "install -d -o root -g root -m 0700 /var/backups/lightweave" in installer
     assert 'release_venv="$repo/.venvs/$running_commit"' in installer
     assert 'mv -Tf "$repo/.venv.new" "$repo/.venv"' in installer
+    assert "lightweave-gitops-recovery.service" in installer
     assert "systemctl restart lightweave-control.service" in installer
     assert 'if [ "$health_commit" != "$running_commit" ]' in installer
     assert "ReadOnlyPaths=-/var/lib/lightweave-gitops" in control_unit
@@ -455,6 +478,11 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert "running-commit.new" in emergency_upgrade
     assert "pip install" not in emergency_rollback
     assert '"/opt/lightweave/.venvs/$previous_commit"' in emergency_rollback
+    assert "disable --now lightweave-gitops.timer" in emergency_rollback
+    assert "systemctl start lightweave-gitops.timer" not in emergency_rollback
+    assert runbook.index("install-gitops.sh") < runbook.index(
+        "enable --now lightweave-control.service"
+    )
 
 
 class EnvironmentBuildingReconciler(FakeReconciler):
@@ -510,7 +538,7 @@ def test_interrupted_deployment_recovers_durable_previous_state(
     configuration.stable_script.parent.mkdir(parents=True)
     configuration.systemd_dir.mkdir(parents=True)
     configuration.stable_script.write_bytes(b"old runtime")
-    for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+    for name in GITOPS_UNITS:
         (configuration.systemd_dir / name).write_bytes(b"old unit")
     runtime_snapshots = reconciler._snapshot_runtime()
     reconciler._write_transaction(
@@ -530,7 +558,7 @@ def test_interrupted_deployment_recovers_durable_previous_state(
         reconciler._current_record_path().write_bytes(b'{"target":"record"}\n')
     if boundary >= 5:
         configuration.stable_script.write_bytes(b"new runtime")
-        for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+        for name in GITOPS_UNITS:
             (configuration.systemd_dir / name).write_bytes(b"new unit")
 
     result = reconciler.reconcile()
@@ -541,7 +569,48 @@ def test_interrupted_deployment_recovers_durable_previous_state(
     assert reconciler._running_commit_path().read_text().strip() == previous_commit
     assert reconciler._current_record_path().read_bytes() == previous_record
     assert configuration.stable_script.read_bytes() == b"old runtime"
-    for name in ("lightweave-gitops.service", "lightweave-gitops.timer"):
+    for name in GITOPS_UNITS:
         assert (configuration.systemd_dir / name).read_bytes() == b"old unit"
     assert not reconciler._transaction_path().exists()
     assert ("healthcheck", previous_commit) in reconciler.commands
+
+
+def test_boot_recovery_restores_state_without_starting_control(tmp_path: Path) -> None:
+    configuration = config(tmp_path)
+    reconciler = FakeReconciler(configuration, fake_responses(configuration))
+    previous_commit = "b" * 40
+    previous_venv = reconciler._venv_path(previous_commit)
+    reconciler._write_transaction(
+        previous_commit,
+        previous_venv,
+        None,
+        reconciler._snapshot_runtime(),
+    )
+    reconciler.commit = "a" * 40
+    target_venv = reconciler._venv_path("a" * 40)
+    target_venv.mkdir()
+    reconciler._switch_python(target_venv)
+    reconciler.commands.clear()
+
+    result = reconciler.recover_before_control_start()
+
+    assert result == {"status": "restored", "commit": previous_commit}
+    assert reconciler.commit == previous_commit
+    assert reconciler._venv_link().resolve() == previous_venv
+    assert reconciler._transaction_path().exists()
+    assert ("systemctl", "daemon-reload") in reconciler.commands
+    assert ("systemctl", "start", "lightweave-control.service") not in reconciler.commands
+    assert not any(command[0] == "healthcheck" for command in reconciler.commands)
+
+
+def test_systemd_orders_boot_recovery_before_control_start() -> None:
+    control_unit = (SCRIPT.parent / "lightweave-control.service").read_text(encoding="utf-8")
+    recovery_unit = (SCRIPT.parent / "lightweave-gitops-recovery.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Requires=lightweave-gitops-recovery.service" in control_unit
+    assert "After=network-online.target lightweave-gitops-recovery.service" in control_unit
+    assert "Before=lightweave-control.service" in recovery_unit
+    assert "ExecStart=/usr/local/lib/lightweave/gitops_reconcile.py --recover-only" in recovery_unit
+    assert "RemainAfterExit=yes" in recovery_unit

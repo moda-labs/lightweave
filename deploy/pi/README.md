@@ -146,6 +146,7 @@ sudoedit /etc/lightweave/control.env
 sudo install -o root -g root -m 0644 \
   /opt/lightweave/deploy/pi/lightweave-control.service \
   /etc/systemd/system/lightweave-control.service
+sudo /opt/lightweave/deploy/pi/install-gitops.sh
 sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/lightweave-control.service
 ```
@@ -161,7 +162,11 @@ CONTROL_DATA_DIR=/var/lib/lightweave
 CONTROL_SERIAL_RESET_ON_OPEN=0
 ```
 
-The unit requires `/etc/lightweave/control.env`; a missing file prevents startup.
+The GitOps installer is a prerequisite for this control unit because it installs
+the root recovery gate that must run before control. The initial production
+channel is disabled, so this first invocation only enrolls the Pi and verifies
+the current release; it does not pull a different version. The control unit also
+requires `/etc/lightweave/control.env`; a missing file prevents startup.
 `StateDirectory=lightweave` creates `/var/lib/lightweave` as mode 0700. Combined
 with `ProtectSystem=strict`, that state directory is the service's only writable
 persistent location. It contains `ota/`, `patterns/`, and `calibration/`.
@@ -381,8 +386,9 @@ Never delete the named tunnel itself when the intent is to delete its connectors
 
 ## 12. Upgrade
 
-After the first `v0.4.0` installation, enroll the Pi in the production release
-channel:
+The initial `v0.4.0` procedure enrolls the Pi before control first starts.
+Re-run the idempotent installer after an older manual installation, or use these
+commands to verify enrollment:
 
 ```bash
 sudo /opt/lightweave/deploy/pi/install-gitops.sh
@@ -396,7 +402,8 @@ health endpoint, migrates the initial Python environment into an immutable
 commit-specific environment under `/opt/lightweave/.venvs`, installs the
 root-owned shared OTA/deployment lock, creates the sandboxed backup path, copies
 the reconciler outside the mutable Git checkout, verifies the systemd units,
-restarts control so its process identity uses the root-written commit marker, enables
+installs a recovery-only boot gate ahead of control, restarts control so its
+process identity uses the root-written commit marker, enables
 the five-minute timer, and performs one immediate check. Normal upgrades are
 then authorized by merging a reviewed channel
 promotion as documented in
@@ -482,7 +489,8 @@ Use the exact commit recorded before the upgrade:
 ```bash
 previous_commit=PREVIOUS_RELEASE_COMMIT
 test -x "/opt/lightweave/.venvs/$previous_commit/bin/python"
-sudo systemctl stop lightweave-gitops.service lightweave-gitops.timer
+sudo systemctl stop lightweave-gitops.service
+sudo systemctl disable --now lightweave-gitops.timer
 sudo systemctl stop lightweave-control
 sudo git -C /opt/lightweave checkout --detach "$previous_commit"
 sudo install -o root -g root -m 0644 \
@@ -505,11 +513,16 @@ sudo chmod 0640 /var/lib/lightweave-gitops/running-commit.new
 sudo mv -f /var/lib/lightweave-gitops/running-commit.new \
   /var/lib/lightweave-gitops/running-commit
 sudo systemctl start lightweave-control
-sudo systemctl start lightweave-gitops.timer
 sudo systemctl restart cloudflared
 sudo systemctl status lightweave-control
 sudo systemctl status cloudflared
 ```
+
+Leave the GitOps timer disabled after an emergency rollback. First merge a
+production-channel freeze or a promotion to the restored release and verify
+that change on `main`. Only then run
+`sudo systemctl enable --now lightweave-gitops.timer`; otherwise the still-current
+failed release pointer will simply be deployed again.
 
 Do not restore `/var/lib/lightweave` blindly. First check the release notes and
 application logs for state-format compatibility. If restoration is required,
