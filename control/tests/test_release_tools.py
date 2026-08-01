@@ -1,7 +1,9 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import zipfile
 
@@ -11,6 +13,87 @@ import pytest
 REPO_ROOT = Path(__file__).parents[2]
 VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 TAG = f"v{VERSION}"
+PUBLISHER = REPO_ROOT / "scripts" / "publish_release.sh"
+
+FAKE_GH = r'''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+
+args = sys.argv[1:]
+state_path = Path(os.environ["FAKE_GH_STATE"])
+remote = Path(os.environ["FAKE_GH_REMOTE"])
+mode = os.environ["FAKE_GH_MODE"]
+state = json.loads(state_path.read_text())
+state["calls"].append(args)
+
+def save():
+    state_path.write_text(json.dumps(state))
+
+def assets():
+    names = sorted(path.name for path in remote.iterdir() if path.is_file())
+    if mode == "asset_mismatch":
+        names = [name for name in names if not name.endswith(".zip")]
+    print("\n".join(names))
+
+if args[0] == "api":
+    target = next(item for item in args if item.startswith("repos/"))
+    query = args[args.index("--jq") + 1]
+    if "/releases/tags/" in target and query == ".draft":
+        save()
+        if mode == "published":
+            print("false")
+            raise SystemExit(0)
+        if mode == "api_error":
+            print("gh: server failed (HTTP 500)", file=sys.stderr)
+            raise SystemExit(1)
+        print("gh: Not Found (HTTP 404)", file=sys.stderr)
+        raise SystemExit(1)
+    if target.endswith("/releases?per_page=100"):
+        state["list_calls"] += 1
+        save()
+        if mode == "multiple":
+            print("42\n43")
+        elif mode != "missing" or state["list_calls"] > 1:
+            print("42")
+        raise SystemExit(0)
+    save()
+    assets()
+    raise SystemExit(0)
+
+if args[:2] == ["release", "create"]:
+    state["create_calls"] += 1
+    save()
+    print("https://github.com/example/releases/tag/untagged-test")
+    raise SystemExit(0)
+
+if args[:2] == ["release", "upload"]:
+    state["upload_calls"] += 1
+    for source in args[3:args.index("--clobber")]:
+        shutil.copy2(source, remote / Path(source).name)
+    save()
+    raise SystemExit(0)
+
+if args[:2] == ["release", "download"]:
+    state["download_calls"] += 1
+    destination = Path(args[args.index("--dir") + 1])
+    destination.mkdir(parents=True, exist_ok=True)
+    for source in remote.iterdir():
+        if source.is_file():
+            shutil.copy2(source, destination / source.name)
+    save()
+    raise SystemExit(0)
+
+if args[:2] == ["release", "edit"]:
+    state["edit_calls"] += 1
+    save()
+    raise SystemExit(0)
+
+save()
+raise SystemExit(f"unexpected gh invocation: {args}")
+'''
 
 
 def load_script(name: str):
@@ -21,6 +104,63 @@ def load_script(name: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def run_fake_publisher(tmp_path: Path, mode: str, *, partial: bool = False):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    assets = {
+        "lightweave-release.json": b'{"release":"v0.4.0"}\n',
+        f"lightweave-field-{TAG}.bin": b"firmware",
+        f"lightweave-serial-flash-{TAG}.zip": b"serial bundle",
+    }
+    for name, data in assets.items():
+        (dist / name).write_bytes(data)
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    if mode == "published":
+        for name, data in assets.items():
+            (remote / name).write_bytes(data)
+    elif partial:
+        (remote / "lightweave-release.json").write_bytes(b"interrupted")
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "calls": [],
+                "list_calls": 0,
+                "create_calls": 0,
+                "upload_calls": 0,
+                "download_calls": 0,
+                "edit_calls": 0,
+            }
+        )
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(FAKE_GH)
+    fake_gh.chmod(0o755)
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "GITHUB_REPOSITORY": "underminedsk/lightweave",
+            "RELEASE_TAG": TAG,
+            "FAKE_GH_MODE": mode,
+            "FAKE_GH_STATE": str(state_path),
+            "FAKE_GH_REMOTE": str(remote),
+        }
+    )
+    result = subprocess.run(
+        [str(PUBLISHER), str(dist)],
+        cwd=REPO_ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result, json.loads(state_path.read_text()), remote, assets
 
 
 build = load_script("build_release_manifest")
@@ -504,27 +644,76 @@ def test_release_publisher_is_retry_safe_and_verifies_assets_before_publish() ->
     workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
         encoding="utf-8"
     )
+    publisher = PUBLISHER.read_text(encoding="utf-8")
 
-    assert "gh release create \"$RELEASE_TAG\"" in workflow
-    assert "--draft" in workflow
-    assert "gh release upload" in workflow
-    assert "--clobber" in workflow
-    assert "verify_asset_set" in workflow
-    assert "find_draft_id" in workflow
-    assert 'release_api="repos/${GITHUB_REPOSITORY}/releases/${draft_id}"' in workflow
-    assert "'.assets[].name'" in workflow
+    assert "scripts/publish_release.sh dist" in workflow
+    assert "actions/checkout@" in workflow
+    assert "gh release create \"$RELEASE_TAG\"" in publisher
+    assert "--draft" in publisher
+    assert "gh release upload" in publisher
+    assert "--clobber" in publisher
+    assert "verify_asset_set" in publisher
+    assert "find_draft_id" in publisher
+    assert 'release_api="repos/${GITHUB_REPOSITORY}/releases/${draft_id}"' in publisher
+    assert "'.assets[].name'" in publisher
     assert '--published-at "$RELEASE_PUBLISHED_AT"' in workflow
-    assert "grep -q 'HTTP 404'" in workflow
-    assert workflow.count("cmp \"$manifest\"") == 2
-    assert workflow.count("cmp \"$firmware\"") == 2
-    assert workflow.count("cmp \"$serial_flash\"") == 2
+    assert "grep -q 'HTTP 404'" in publisher
+    assert publisher.count("cmp \"$manifest\"") == 2
+    assert publisher.count("cmp \"$firmware\"") == 2
+    assert publisher.count("cmp \"$serial_flash\"") == 2
     assert "build_serial_flash_bundle.py" in workflow
-    assert "gh release edit \"$RELEASE_TAG\" --draft=false" in workflow
+    assert "gh release edit \"$RELEASE_TAG\" --draft=false" in publisher
 
     ci_workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
     assert "build_serial_flash_bundle.py" in ci_workflow
+
+
+@pytest.mark.parametrize(
+    ("mode", "partial", "creates", "uploads", "edits"),
+    [
+        ("published", False, 0, 0, 0),
+        ("existing", False, 0, 1, 1),
+        ("missing", False, 1, 1, 1),
+        ("interrupted", True, 0, 1, 1),
+    ],
+)
+def test_release_publisher_handles_published_new_and_resumed_drafts(
+    tmp_path: Path,
+    mode: str,
+    partial: bool,
+    creates: int,
+    uploads: int,
+    edits: int,
+) -> None:
+    result, state, remote, assets = run_fake_publisher(tmp_path, mode, partial=partial)
+
+    assert result.returncode == 0, result.stderr
+    assert state["create_calls"] == creates
+    assert state["upload_calls"] == uploads
+    assert state["edit_calls"] == edits
+    assert {path.name: path.read_bytes() for path in remote.iterdir()} == assets
+
+
+@pytest.mark.parametrize("mode", ["multiple", "api_error"])
+def test_release_publisher_fails_closed_before_mutation_for_ambiguous_lookup(
+    tmp_path: Path, mode: str
+) -> None:
+    result, state, _remote, _assets = run_fake_publisher(tmp_path, mode)
+
+    assert result.returncode != 0
+    assert state["create_calls"] == 0
+    assert state["upload_calls"] == 0
+    assert state["edit_calls"] == 0
+
+
+def test_release_publisher_never_publishes_an_asset_set_mismatch(tmp_path: Path) -> None:
+    result, state, _remote, _assets = run_fake_publisher(tmp_path, "asset_mismatch")
+
+    assert result.returncode != 0
+    assert state["upload_calls"] == 1
+    assert state["edit_calls"] == 0
 
 
 def test_firmware_release_inputs_are_exactly_pinned() -> None:
