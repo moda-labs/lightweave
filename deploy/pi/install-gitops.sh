@@ -12,14 +12,24 @@ if [ ! -f "$repo/deploy/pi/gitops_reconcile.py" ]; then
 fi
 
 install -d -o root -g root -m 0755 /etc/lightweave /usr/local/lib/lightweave
+if [ -L /var/lib/lightweave-gitops ]; then
+  printf '%s\n' "/var/lib/lightweave-gitops must not be a symlink" >&2
+  exit 1
+fi
 install -d -o root -g lightweave -m 0750 /var/lib/lightweave-gitops
-install -d -o lightweave -g lightweave -m 0700 /var/lib/lightweave/operations
-if [ ! -e /var/lib/lightweave/operations/firmware-ota.lock ]; then
-  install -o lightweave -g lightweave -m 0600 /dev/null \
-    /var/lib/lightweave/operations/firmware-ota.lock
+if [ -L /var/lib/lightweave-gitops/firmware-ota.lock ]; then
+  printf '%s\n' "firmware OTA lock must not be a symlink" >&2
+  exit 1
+fi
+if [ ! -e /var/lib/lightweave-gitops/firmware-ota.lock ]; then
+  install -o root -g lightweave -m 0640 /dev/null \
+    /var/lib/lightweave-gitops/firmware-ota.lock
+elif [ ! -f /var/lib/lightweave-gitops/firmware-ota.lock ]; then
+  printf '%s\n' "firmware OTA lock must be a regular file" >&2
+  exit 1
 else
-  chown lightweave:lightweave /var/lib/lightweave/operations/firmware-ota.lock
-  chmod 0600 /var/lib/lightweave/operations/firmware-ota.lock
+  chown root:lightweave /var/lib/lightweave-gitops/firmware-ota.lock
+  chmod 0640 /var/lib/lightweave-gitops/firmware-ota.lock
 fi
 if [ ! -f /etc/lightweave/gitops.env ]; then
   install -o root -g root -m 0644 \

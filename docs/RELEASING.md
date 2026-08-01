@@ -135,9 +135,9 @@ reconciler, and units automatically. Privileged release records and firmware
 live under root-owned `/var/lib/lightweave-gitops`; backups are retained under
 `/var/backups/lightweave` for manual data recovery.
 
-The reconciler and manual OTA share a cross-process lock. If OTA is already
-running when the timer fires, deployment reports `deferred` and the next timer
-run retries without stopping the control plane.
+The reconciler and manual OTA share a root-owned, service-readable cross-process
+lock. If OTA is already running when the timer fires, deployment reports
+`deferred` and the next timer run retries without stopping the control plane.
 
 The Operations page's **Deployed changes** section shows two independent states:
 

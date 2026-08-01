@@ -44,7 +44,7 @@ class ReconcileConfig:
     backup_dir: Path = Path("/var/backups/lightweave")
     stable_script: Path = Path("/usr/local/lib/lightweave/gitops_reconcile.py")
     systemd_dir: Path = Path("/etc/systemd/system")
-    ota_lock_path: Path = Path("/var/lib/lightweave/operations/firmware-ota.lock")
+    ota_lock_path: Path = Path("/var/lib/lightweave-gitops/firmware-ota.lock")
     health_url: str = "http://127.0.0.1:8000/api/health"
     service_user: str = "lightweave"
     health_attempts: int = 30
@@ -73,7 +73,7 @@ class ReconcileConfig:
             ota_lock_path=Path(
                 environ.get(
                     "LIGHTWEAVE_GITOPS_OTA_LOCK",
-                    "/var/lib/lightweave/operations/firmware-ota.lock",
+                    "/var/lib/lightweave-gitops/firmware-ota.lock",
                 )
             ),
             health_url=environ.get(
@@ -261,8 +261,6 @@ class GitOpsReconciler:
                 "tar",
                 "-C",
                 str(self.config.data_dir.parent),
-                "--exclude",
-                f"{self.config.data_dir.name}/operations/firmware-ota.lock",
                 "-czf",
                 str(backup),
                 self.config.data_dir.name,
@@ -366,7 +364,7 @@ class GitOpsReconciler:
     @contextlib.contextmanager
     def _ota_guard(self):
         try:
-            lock = self.config.ota_lock_path.open("r+")
+            lock = self.config.ota_lock_path.open("r")
         except OSError as error:
             raise ReconcileError(f"cannot open the installed OTA operation lock: {error}") from error
         with lock:

@@ -380,9 +380,13 @@ def create_app(
         path = app.state.ota_operation_lock_path
         if path is None:
             return None
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("a+")
-        os.chmod(path, 0o600)
+        try:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(mode=0o600)
+            handle = path.open("r")
+        except OSError as error:
+            raise HTTPException(status_code=503, detail=f"OTA operation lock is unavailable: {error}") from error
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

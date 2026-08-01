@@ -59,7 +59,7 @@ def channel(manifest_bytes: bytes) -> bytes:
 
 
 def config(tmp_path: Path) -> object:
-    ota_lock = tmp_path / "data" / "operations" / "firmware-ota.lock"
+    ota_lock = tmp_path / "firmware-ota.lock"
     ota_lock.parent.mkdir(parents=True, exist_ok=True)
     ota_lock.touch()
     return gitops.ReconcileConfig(
@@ -301,7 +301,7 @@ def test_insecure_or_symlinked_deployment_directory_is_rejected(tmp_path: Path) 
 def test_active_ota_defers_deployment_before_backup_or_service_stop(tmp_path: Path) -> None:
     configuration = config(tmp_path)
     reconciler = FakeReconciler(configuration, fake_responses(configuration))
-    with configuration.ota_lock_path.open("r+") as lock:
+    with configuration.ota_lock_path.open("r") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = reconciler.reconcile()
 

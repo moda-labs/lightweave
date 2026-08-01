@@ -1393,7 +1393,7 @@ def test_ota_install_defers_while_software_deployment_holds_lock(tmp_path, manag
     client = managed_client(app)
     store.stage("firmware.bin", b"\xe9\x00")
 
-    with lock_path.open("r+") as lock:
+    with lock_path.open("r") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         response = client.post("/api/operations/ota-install")
 
