@@ -8,10 +8,27 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**145 pass**) is green; control tests (**293 pass**) are green; all three
+(**149 pass**) is green; control tests (**299 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-01): **the production release now also drives batch
+Latest locally (2026-08-03): **physical boards now have permanent numeric IDs
+backed by their immutable MAC addresses.** The conductor persists every learned
+`MAC → ID` inventory row independently of field position, shows the ID while a
+board is offline, rejects duplicate/conflicting reports, and sends the
+authoritative ID plus optional position back to an erased performer. Existing
+v7 position-only NVS tables migrate without losing coordinates; the wire change
+bumps the field to protocol v8. The FireBeetle watcher upgrades its existing
+device registry in place, adopts a valid on-board ID or allocates the lowest
+unused positive number, writes and reads it back over serial, and prints a large
+`BOARD #n - LABEL THIS BOARD` banner even when firmware is already current.
+Hardware rollout is pending the next promoted release; flash all boards together
+for the v8 protocol change. Before inventorying, rerun the documented
+`firebeetle_autoflash.py install --factory` command: the LaunchAgent runs a
+copied script and does not gain this behavior from firmware promotion alone.
+The existing `devices.json` is preserved; its first safe migration may require
+one scan of every previously known board before any unnumbered board is assigned.
+
+Previous latest (2026-08-01): **the production release now also drives batch
 FireBeetle provisioning.** Tag CI builds a deterministic, manifest-bound serial
 ZIP containing the bootloader, partition table, OTA boot helper, field firmware,
 and verified flash plan. The checked-in macOS LaunchAgent watcher follows only
@@ -407,16 +424,16 @@ power measurement):
   shown in `info`; **bidirectional ESP-NOW** — performers unicast `REGISTER`
   every 10 s and the conductor builds a **MAC-keyed roster** (`roster` command).
   Sync hot path unchanged (still `LOCKED gaps` flat after the rework).
-- **Protocol foundation Half 2** (hardware-verified): **conductor-authoritative
-  `MAC→(x,y)` layout table** in NVS, broadcast as chunked `MSG_TABLE`; a node finds
-  its row, adopts its `(x,y)`, and caches it (survives reboot, no laptop needed).
+- **Protocol foundation Half 2** (v7 position path hardware-verified; v8 ID path
+  code-complete): **conductor-authoritative `MAC→permanent ID + optional (x,y)`
+  inventory** in NVS, broadcast as chunked `MSG_TABLE`; a node finds its row,
+  adopts its number and placement, and caches both (survives reboot, no laptop needed).
   Conductor edits it with `assign <mac> <x> <y>` / `table` / `forget <mac>`.
   Verified: a node took a position set only on the conductor, no serial to it.
   Re-adoption hardware check 2026-07-06: performer #2 was erased/reflashed after
   its table row existed; it registered as `#?` but re-adopted `(0.6115, 0.4646)`
   from the conductor's single-row table reply within the normal roster window.
-  Its friendly id was then restored with `id 2` over performer serial, and the
-  control plane returned to `#1` / `#2` with `attention=0`.
+  Protocol v8 extends that same reply to restore `#2` automatically.
 - **GPIO2 heartbeat** blinks on the synced beat (zero-wiring sync check).
 - **Serial commands:** `info`, `roster` / `table` / `assign` / `forget`
   (conductor), `role conductor|performer`, `id <n>`, `pos <x> <y>`,
@@ -430,7 +447,8 @@ power measurement):
   serial input** — hit Enter in a monitor to revive a quiet node (see
   FLASHING.md). Exception: the conductor's `[power]` telemetry log is
   deliberately ungated (it's the overnight audit trail).
-- **Wire protocol is v7** (`PROTO_VERSION 7`; BEACON now includes runtime
+- **Wire protocol is v8** (`PROTO_VERSION 8`; `MSG_TABLE` now includes permanent
+  board ID plus optional-position flags; BEACON includes runtime
   `PowerPolicy` with UTC epoch seconds plus USB power-bank `KeepAliveConfig`,
   and REGISTER includes release version, protocol, build id, and
   dirty flag for OTA version consistency; OTA begin/chunk/end messages carry
@@ -902,12 +920,12 @@ node's diag** (headless nodes no longer burn ~13 ms/s of UART drain).
 - ✅ **Field build env** `field` (one canonical ESP32 profile +
   `-D HEARTBEAT_LED=0`; see "Build envs" near the top and
   FLASHING.md's env table).
-- ✅ **Table rebroadcast stretched** 5 s → 60 s steady-state backstop
-  (`TABLE_INTERVAL_US`); targeted delivery is a **single-row MSG_TABLE reply
-  (23 B, broadcast)** to any REGISTER from a node that is *new to the roster
-  or unprovisioned (id 0)* — sent while that node's radio is provably up (it
-  just transmitted), retried for free by its next REGISTER, zero table traffic
-  in steady state. `assign` still broadcasts the full table immediately.
+- ✅ **Inventory rebroadcast stretched** 5 s → 60 s steady-state backstop
+  (`TABLE_INTERVAL_US`); targeted delivery is a **single-row MSG_TABLE reply**
+  to any REGISTER from a node that is new to the roster, unprovisioned, or in
+  conflict with the conductor's permanent ID. It is sent while that node's
+  radio is provably up, retried by its next REGISTER, and costs zero targeted
+  traffic in steady state. `assign` still broadcasts the full inventory immediately.
 - ✅ **Host-unreachable logic extracted + tested** (83 total):
   `parseMac`/`macStr` → `macaddr.h` (parseMac rejects trailing garbage — a
   pasted EUI-64 must not silently truncate to its prefix MAC); `broadcastTable`

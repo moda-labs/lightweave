@@ -7,7 +7,8 @@
 //
 // Every board runs THIS SAME binary. Role (conductor/performer) is a runtime
 // value stored in NVS, default performer, set once over serial with `role …`.
-// So you flash one image everywhere, then provision role/id/pos per board; each
+// So you flash one image everywhere, then provision role/position per board;
+// factory tooling and the conductor reconcile the permanent MAC-keyed ID. Each
 // node then boots into its role unattended (important for battery field nodes).
 //
 // The sync logic lives in include/sync.h (dependency-free, unit-tested); this
@@ -179,7 +180,7 @@ static uint32_t     g_power_q_dropped = 0;
 static portMUX_TYPE g_power_mux = portMUX_INITIALIZER_UNLOCKED;
 static PowerTable   g_power_table;
 
-// Conductor's authoritative layout table (table.h logic, host-tested). Declared
+// Conductor's authoritative board inventory (table.h logic, host-tested). Declared
 // here so the NVS load/save below can reach it; edited only over serial on the
 // conductor and read by the broadcast — both in loop() — so it needs no spinlock
 // (unlike the roster, which the recv callback writes).
@@ -273,14 +274,32 @@ static void roleSave() {
   g_prefs.end();
 }
 
-// The conductor's layout table persists as a single NVS blob, so it survives a
-// power-cycle and the field runs with no laptop. (Performers don't broadcast, so
-// an empty/absent blob just means "no table to advertise".)
+// Protocol v7 stored only MAC + position. Keep the exact old native layout so a
+// v8 conductor migrates existing placements instead of discarding them.
+// The conductor's inventory persists as one NVS blob. Current rows carry a
+// permanent ID plus optional placement; legacy position-only rows migrate with
+// id=0 and learn the existing number from the performer's next REGISTER.
 static void tableLoad() {
   g_prefs.begin("node", /*readonly*/ true);
-  size_t got = g_prefs.getBytes("table", &g_table, sizeof(g_table));
+  size_t stored = g_prefs.getBytesLength("table");
+  bool current = false;
+  bool migrated = false;
+  tableInit(g_table);
+  if (stored == sizeof(g_table)) {
+    current = g_prefs.getBytes("table", &g_table, sizeof(g_table)) == sizeof(g_table) &&
+              tableValid(g_table);
+  } else if (stored == sizeof(LegacyLayoutTable)) {
+    LegacyLayoutTable legacy = {};
+    if (g_prefs.getBytes("table", &legacy, sizeof(legacy)) == sizeof(legacy))
+      migrated = tableMigrateLegacy(legacy, g_table);
+  }
   g_prefs.end();
-  if (got != sizeof(g_table) || g_table.count > TABLE_MAX) tableInit(g_table);
+  if (!current && !migrated) tableInit(g_table);
+  if (migrated && isConductor()) {
+    g_prefs.begin("node", /*readonly*/ false);
+    g_prefs.putBytes("table", &g_table, sizeof(g_table));
+    g_prefs.end();
+  }
 }
 
 static void tableSave() {
@@ -316,15 +335,19 @@ static int64_t  g_next_register_us = 0;
 // command). The lock wraps each access, mirroring g_sync_mux around syncOnBeacon.
 static Roster       g_roster;
 static portMUX_TYPE g_roster_mux = portMUX_INITIALIZER_UNLOCKED;
-// Row-reply requests: the recv callback stashes the MAC of a REGISTER that
-// earns an immediate single-row table reply (tableRowReplyWanted — new to the
-// roster or unprovisioned), and loop() drains + broadcasts the rows. Same
+// Registration requests: the recv callback stashes MAC + reported ID, and loop()
+// reconciles the persistent inventory and sends any authoritative row reply. Same
 // stash-under-lock/drain-in-loop shape as the power-report queue: no radio
 // work in the callback. Written under g_roster_mux (the REGISTER path already
 // holds it). Overflow just drops the request — the node's next REGISTER (10 s)
 // retries it, so nothing is permanently lost.
+struct RegistrationRequest {
+  uint8_t mac[6];
+  uint16_t reported_id;
+  bool mac_known;
+};
 static constexpr uint8_t ROWREQ_MAX = 8;
-static uint8_t      g_rowreq[ROWREQ_MAX][6];
+static RegistrationRequest g_rowreq[ROWREQ_MAX];
 static volatile uint8_t g_rowreq_n = 0;
 // Next steady-state table broadcast. File-scope (not a loop-local static) so
 // the `role` command can zero it: a re-promoted conductor must advertise the
@@ -337,12 +360,10 @@ static int64_t      g_next_cal_roster_us = 0;
 // calibration until the next roster chunk arrives.
 static uint16_t     g_calibration_rank = 0;
 
-// Performer position adopted from a MSG_TABLE row. The recv callback can't write
-// flash, so it stashes the new (x,y) here (under g_sync_mux) and loop() applies +
-// caches it to NVS.
-static bool  g_pos_pending = false;
-static float g_pos_pending_x = 0.0f;
-static float g_pos_pending_y = 0.0f;
+// Performer identity/position adopted from a MSG_TABLE row. The recv callback
+// cannot write flash, so loop() applies and caches the assignment.
+static bool g_assignment_pending = false;
+static TableAssignment g_assignment_pending_value = {0, 0.0f, 0.0f, false};
 
 static inline int64_t now_us() { return esp_timer_get_time(); }
 
@@ -530,18 +551,24 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       if (len != (int)sizeof(RegisterMsg)) return;
       RegisterMsg r;
       memcpy(&r, data, sizeof(r));
+      // The packet body is diagnostic data, not an identity authority. Binding
+      // it to ESP-NOW's transport sender address prevents a buggy peer from
+      // permanently claiming another board's MAC in conductor NVS.
+      if (memcmp(r.mac, src, 6) != 0) return;
       portENTER_CRITICAL(&g_roster_mux);
       // Known-ness is checked BEFORE the upsert so a full roster (which drops
       // the insert without a count change) can't mask a new node.
       bool known = rosterFind(g_roster, r.mac) >= 0;
       rosterUpsert(g_roster, r.mac, r.id, r.fw, r.build, r.dirty, r.version,
                    now_us());
-      // A first-join or unprovisioned node needs its table row NOW — its radio
-      // is provably on (it just transmitted), and the 60 s steady-state
-      // rebroadcast is a lottery through the ~13% radio duty cycle. Stash the
-      // MAC; loop() replies with just its row (tableRowBuild).
-      if (tableRowReplyWanted(known, r.id) && g_rowreq_n < ROWREQ_MAX) {
-        memcpy(g_rowreq[g_rowreq_n], r.mac, 6);
+      // Loop owns the persistent inventory and NVS writes. Queue every report
+      // so it can learn a factory-assigned ID, detect conflicts, and decide
+      // whether this performer needs the authoritative row sent back.
+      if (g_rowreq_n < ROWREQ_MAX) {
+        RegistrationRequest& request = g_rowreq[g_rowreq_n];
+        memcpy(request.mac, r.mac, 6);
+        request.reported_id = r.id;
+        request.mac_known = known;
         g_rowreq_n = g_rowreq_n + 1;
       }
       portEXIT_CRITICAL(&g_roster_mux);
@@ -563,19 +590,20 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     }
     case MSG_TABLE: {
       if (isConductor()) return;  // conductor is the source, never adopts
+      if (!g_have_conductor || memcmp(src, g_conductor_mac, 6) != 0) return;
       // Two-step validation (table_wire.h, host-tested): bounds before the
       // copy, exact length-vs-row-count after it.
       if (!tableMsgLenPlausible(len)) return;
       TableMsg m;
       memcpy(&m, data, len);
       if (!tableMsgLenValid(len, m.n)) return;
-      // Find our own row; stash the position for loop() to adopt + persist.
-      float px, py;
-      if (tableMsgFindRow(m, g_mac, px, py)) {
+      // Find our own row; stash identity + optional position for loop() to
+      // adopt and persist outside the radio callback.
+      TableAssignment assignment;
+      if (tableMsgFindRow(m, g_mac, assignment)) {
         portENTER_CRITICAL(&g_sync_mux);
-        g_pos_pending = true;
-        g_pos_pending_x = px;
-        g_pos_pending_y = py;
+        g_assignment_pending = true;
+        g_assignment_pending_value = assignment;
         portEXIT_CRITICAL(&g_sync_mux);
       }
       break;
@@ -820,10 +848,9 @@ static void drainPowerReports() {
                   (unsigned long)dropped);
 }
 
-// Conductor: broadcast the authoritative layout table, split into chunks that fit
-// one ESP-NOW payload. Sent occasionally (positions are static); a node hears it,
-// adopts its own row, and caches to NVS. Chunk math lives in table_wire.h
-// (host-tested); this is just the radio call per chunk.
+// Conductor: broadcast the authoritative inventory in ESP-NOW-sized chunks. A
+// node adopts its permanent ID and optional placement, then caches both in NVS.
+// Chunk math lives in table_wire.h; this is just the radio call per chunk.
 static void broadcastTable() {
   uint8_t chunks = tableChunkCount(g_table.count);  // 0 when table empty
   for (uint8_t c = 0; c < chunks; c++) {
@@ -882,23 +909,42 @@ static void broadcastCalibrationRoster() {
   }
 }
 
-// Performer: apply a position handed down by the conductor's table (stashed in the
-// recv callback). Saves to NVS so the node keeps its spot across a reboot without
-// hearing the table again — the "field runs with no laptop" guarantee.
-static void maybeAdoptPosition() {
+// Performer: apply the conductor's permanent ID and optional position. Saves to
+// NVS so an erased/reflashed board rehydrates itself from its MAC-keyed row.
+static void maybeAdoptTableAssignment() {
   bool pending;
-  float px, py;
+  TableAssignment assignment;
   portENTER_CRITICAL(&g_sync_mux);
-  pending = g_pos_pending;
-  px = g_pos_pending_x;
-  py = g_pos_pending_y;
-  g_pos_pending = false;
+  pending = g_assignment_pending;
+  assignment = g_assignment_pending_value;
+  g_assignment_pending = false;
   portEXIT_CRITICAL(&g_sync_mux);
-  if (!pending || (px == g_id.x && py == g_id.y)) return;  // unchanged: no write
-  g_id.x = px;
-  g_id.y = py;
+  if (!pending) return;
+  TableIdentityDecision id_decision =
+      tableIdentityDecision(g_id.id, assignment.id);
+  if (id_decision == TABLE_ID_AUTHORITY_CONFLICT) {
+    Serial.printf("[table] ID CONFLICT: board is #%u, conductor says #%u; "
+                  "keeping physical board ID\n",
+                  g_id.id, assignment.id);
+  }
+  uint16_t next_id = id_decision == TABLE_ID_ADOPT_AUTHORITY
+                         ? assignment.id
+                         : g_id.id;
+  float next_x = assignment.has_position ? assignment.x : 0.0f;
+  float next_y = assignment.has_position ? assignment.y : 0.0f;
+  if (next_id == g_id.id && next_x == g_id.x && next_y == g_id.y) return;
+  bool id_changed = next_id != g_id.id;
+  g_id.id = next_id;
+  g_id.x = next_x;
+  g_id.y = next_y;
   identitySave();
-  Serial.printf("[table] adopted position x=%.2f y=%.2f from conductor\n", px, py);
+  if (id_changed)
+    Serial.printf("[table] adopted permanent ID #%u from conductor\n", g_id.id);
+  if (assignment.has_position)
+    Serial.printf("[table] adopted position x=%.2f y=%.2f from conductor\n",
+                  g_id.x, g_id.y);
+  else
+    Serial.println("[table] placement cleared by conductor");
 }
 
 // ---- Daytime deep-sleep entry (Lever 2) ---------------------------------------
@@ -975,9 +1021,9 @@ static void printDiag() {
 // Flash identical firmware to every board, then provision each over serial:
 //   info                 print role + identity (incl. MAC) + pattern state
 //   roster               (conductor) list nodes that have registered (MAC/id/fw)
-//   table                (conductor) print the authoritative MAC->(x,y) table
+//   table                (conductor) print permanent IDs + optional positions
 //   assign <mac> <x> <y> (conductor) set a node's position by MAC; saved+broadcast
-//   forget <mac>         (conductor) drop a node from the table (node replacement)
+//   forget <mac>         (conductor) clear position; permanent ID remains
 //   role <conductor|performer>   set this node's role and save to NVS
 //   id <n>               set this node's id and save to NVS
 //   pos <x> <y>          set this node's own (x,y) coordinate and save to NVS
@@ -1076,18 +1122,23 @@ static void printRoster() {
   }
 }
 
-// Conductor-only: print the authoritative layout table.
+// Conductor-only: print the authoritative board inventory and placement.
 static void printTable() {
   if (!isConductor()) {
     Serial.println("(table lives on the conductor)");
     return;
   }
-  Serial.printf("table: %u row(s)\n", g_table.count);
+  Serial.printf("inventory: %u board(s), %u positioned\n", g_table.count,
+                tablePositionedCount(g_table));
   for (uint8_t i = 0; i < g_table.count; i++) {
     char mac[18];
-    Serial.printf("  [%u] %s  x=%.2f  y=%.2f\n", i,
-                  macStr(g_table.entries[i].mac, mac), g_table.entries[i].x,
-                  g_table.entries[i].y);
+    const TableEntry& row = g_table.entries[i];
+    if (tableHasPosition(row))
+      Serial.printf("  [%u] %s  id=#%u  x=%.2f  y=%.2f\n", i,
+                    macStr(row.mac, mac), row.id, row.x, row.y);
+    else
+      Serial.printf("  [%u] %s  id=#%u  unpositioned\n", i,
+                    macStr(row.mac, mac), row.id);
   }
 }
 
@@ -1419,6 +1470,7 @@ static void handleOtaBegin(const SerialJsonCommand& cmd) {
   portEXIT_CRITICAL(&g_roster_mux);
   int64_t t = now_us();
   for (uint8_t i = 0; i < g_table.count; i++) {
+    if (!tableHasPosition(g_table.entries[i])) continue;
     const uint8_t* mac = g_table.entries[i].mac;
     if (memcmp(mac, g_mac, 6) == 0) continue;
     int r = rosterFind(roster, mac);
@@ -1620,7 +1672,9 @@ static void printMachineState(uint32_t id) {
   uint8_t firmware_seen = 0;
   uint8_t firmware_matching = 0;
   bool firmware_mixed = false;
+  uint8_t placed_total = tablePositionedCount(g_table);
   for (uint8_t i = 0; i < g_table.count; i++) {
+    if (!tableHasPosition(g_table.entries[i])) continue;
     int r = rosterFind(g_state_roster_snapshot, g_table.entries[i].mac);
     if (r >= 0 && !otaSeenRecently(g_state_roster_snapshot.entries[r].last_us,
                                    t, OTA_COHORT_FRESH_US)) {
@@ -1645,7 +1699,13 @@ static void printMachineState(uint32_t id) {
       continue;
     }
     FirmwareVersion fw = rosterEntryFirmware(g_state_roster_snapshot.entries[i]);
-    if (tableFind(g_table, g_state_roster_snapshot.entries[i].mac) < 0) attention++;
+    int inventory = tableFind(g_table, g_state_roster_snapshot.entries[i].mac);
+    bool placement_attention =
+        inventory < 0 || !tableHasPosition(g_table.entries[inventory]);
+    bool id_conflict = tableReportedIdConflict(
+        g_table, g_state_roster_snapshot.entries[i].mac,
+        g_state_roster_snapshot.entries[i].id);
+    if (placement_attention || id_conflict) attention++;
     if (!firmwareSame(conductor_fw, fw)) firmware_mixed = true;
   }
 
@@ -1665,9 +1725,9 @@ static void printMachineState(uint32_t id) {
                 "\"table_rows\":%u,\"firmware\":{\"consistent\":%s,"
                 "\"matching\":%u,\"seen\":%u,\"expected\":%u,"
                 "\"version\":\"%s\",\"build_label\":\"%08lx\",\"dirty\":%s}},",
-                placed_alive, g_table.count, attention, g_table.count,
+                placed_alive, placed_total, attention, placed_total,
                 firmware_mixed ? "false" : "true", firmware_matching,
-                firmware_seen, g_table.count,
+                firmware_seen, placed_total,
                 conductor_fw.version,
                 (unsigned long)conductor_fw.build_id,
                 conductor_fw.dirty ? "true" : "false");
@@ -1677,7 +1737,7 @@ static void printMachineState(uint32_t id) {
   Serial.print(",");
   printKeepAliveJson(isConductor() ? g_keepalive : b.keepalive);
   Serial.print(",");
-  printOtaJson(g_table.count, placed_alive, firmware_matching, firmware_mixed, t);
+  printOtaJson(placed_total, placed_alive, firmware_matching, firmware_mixed, t);
   Serial.print(",\"lanterns\":[");
   bool first = true;
   for (uint8_t i = 0; i < g_table.count; i++) {
@@ -1688,25 +1748,40 @@ static void printMachineState(uint32_t id) {
       r = -1;
     }
     char label[16];
-    if (r >= 0 && g_state_roster_snapshot.entries[r].id) {
-      snprintf(label, sizeof(label), "#%u", g_state_roster_snapshot.entries[r].id);
-    }
+    uint16_t node_id = row.id;
+    uint16_t reported_id =
+        r >= 0 ? g_state_roster_snapshot.entries[r].id : 0;
+    bool id_conflict =
+        r >= 0 && tableReportedIdConflict(g_table, row.mac, reported_id);
+    if (!node_id && r >= 0 && !id_conflict) node_id = reported_id;
+    if (node_id) snprintf(label, sizeof(label), "#%u", node_id);
     else snprintf(label, sizeof(label), "#?");
     if (!first) Serial.print(",");
     first = false;
     int64_t age_s = r >= 0 ? (t - g_state_roster_snapshot.entries[r].last_us) / 1000000 : -1;
     FirmwareVersion fw;
     FirmwareVersion* fw_ptr = nullptr;
-    const char* attention_text = r >= 0 ? "None" : "Not seen";
+    char attention_buf[48];
+    const char* attention_text;
+    if (id_conflict) {
+      snprintf(attention_buf, sizeof(attention_buf),
+               "ID conflict: reports #%u", reported_id);
+      attention_text = attention_buf;
+    } else {
+      attention_text = tableHasPosition(row)
+                           ? (r >= 0 ? "None" : "Not seen")
+                           : "Needs position";
+    }
     if (r >= 0) {
       fw = rosterEntryFirmware(g_state_roster_snapshot.entries[r]);
       fw_ptr = &fw;
-      if (!firmwareSame(conductor_fw, fw)) attention_text = "Firmware mismatch";
+      if (!firmwareSame(conductor_fw, fw) && !id_conflict)
+        attention_text = "Firmware mismatch";
     }
     int p = powerTableFind(g_power_table, row.mac);
-    printLanternJson(row.mac, label, r >= 0 ? g_state_roster_snapshot.entries[r].id : 0,
+    printLanternJson(row.mac, label, node_id,
                      r >= 0 ? "alive" : "missing", age_s, row.x,
-                     row.y, true, attention_text, fw_ptr,
+                     row.y, tableHasPosition(row), attention_text, fw_ptr,
                      p >= 0 ? &g_power_table.entries[p] : nullptr, t);
   }
   for (uint8_t i = 0; i < g_state_roster_snapshot.count; i++) {
@@ -1714,16 +1789,26 @@ static void printMachineState(uint32_t id) {
     if (!otaSeenRecently(row.last_us, t, OTA_COHORT_FRESH_US)) continue;
     if (tableFind(g_table, row.mac) >= 0) continue;
     char label[16];
-    if (row.id) snprintf(label, sizeof(label), "#%u", row.id);
+    bool id_conflict = tableReportedIdConflict(g_table, row.mac, row.id);
+    if (row.id && !id_conflict) snprintf(label, sizeof(label), "#%u", row.id);
     else snprintf(label, sizeof(label), "Unknown");
     if (!first) Serial.print(",");
     first = false;
     int64_t age_s = (t - row.last_us) / 1000000;
     FirmwareVersion fw = rosterEntryFirmware(row);
-    const char* attention_text = firmwareSame(conductor_fw, fw) ? "Needs position"
-                                                                : "Firmware mismatch";
+    char attention_buf[48];
+    const char* attention_text;
+    if (id_conflict) {
+      snprintf(attention_buf, sizeof(attention_buf),
+               "ID conflict: reports #%u", row.id);
+      attention_text = attention_buf;
+    } else {
+      attention_text = firmwareSame(conductor_fw, fw) ? "Needs position"
+                                                       : "Firmware mismatch";
+    }
     int p = powerTableFind(g_power_table, row.mac);
-    printLanternJson(row.mac, label, row.id, "alive", age_s, 0.0f, 0.0f, false,
+    printLanternJson(row.mac, label, id_conflict ? 0 : row.id, "alive", age_s,
+                     0.0f, 0.0f, false,
                      attention_text, &fw,
                      p >= 0 ? &g_power_table.entries[p] : nullptr, t);
   }
@@ -1748,8 +1833,9 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
   } else if (cmd.kind == SJ_FORGET) {
     if (!isConductor()) {
       jsonError(cmd.id, "forget is conductor-only");
-    } else if (tableRemove(g_table, cmd.mac)) {
+    } else if (tableClearPosition(g_table, cmd.mac)) {
       tableSave();
+      broadcastTable();
       jsonOk(cmd.id, "forgot");
     } else {
       jsonError(cmd.id, "unknown lantern");
@@ -1760,14 +1846,15 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       return;
     }
     float x = 0.0f, y = 0.0f;
+    int replacement = tableFind(g_table, cmd.new_mac);
     if (!tableLookup(g_table, cmd.old_mac, x, y)) {
       jsonError(cmd.id, "old lantern has no position");
-    } else if (tableFind(g_table, cmd.new_mac) >= 0) {
+    } else if (replacement >= 0 && tableHasPosition(g_table.entries[replacement])) {
       jsonError(cmd.id, "replacement lantern already has a position");
     } else if (!tableSet(g_table, cmd.new_mac, x, y)) {
       jsonError(cmd.id, "table full");
     } else {
-      tableRemove(g_table, cmd.old_mac);
+      tableClearPosition(g_table, cmd.old_mac);
       tableSave();
       broadcastTable();
       jsonOk(cmd.id, "replaced");
@@ -1872,7 +1959,11 @@ static void handleCommand(char* line) {
     if (!isConductor()) {
       Serial.println("? forget is conductor-only");
     } else if (am && parseMac(am, mac)) {
-      if (tableRemove(g_table, mac)) { tableSave(); printTable(); }
+      if (tableClearPosition(g_table, mac)) {
+        tableSave();
+        broadcastTable();
+        printTable();
+      }
       else Serial.println("? no such mac in table");
     } else {
       Serial.println("? forget <mac>");
@@ -2214,25 +2305,46 @@ void loop() {
       broadcastCalibrationRoster();
       g_next_cal_roster_us = t + CAL_ROSTER_INTERVAL_US;
     }
-    // Row replies: answer each queued first-join/unprovisioned REGISTER with
-    // just that node's row, while its radio is still up (it transmitted
-    // moments ago). The volatile pre-check keeps the ~60 Hz loop from taking
-    // the spinlock when the queue is empty (nearly always); at worst a request
-    // is seen one 16 ms pass late.
+    // Inventory adoption + row replies. A factory-flashed performer reports its
+    // permanent number; the conductor records it once, then remains authoritative
+    // and sends it back after any later erase. NVS writes stay out of the radio
+    // callback. At worst an overflow retries on the next 10 s REGISTER.
     if (g_rowreq_n) {
-      uint8_t req[ROWREQ_MAX][6];
+      RegistrationRequest req[ROWREQ_MAX];
       uint8_t n;
       portENTER_CRITICAL(&g_roster_mux);
       n = g_rowreq_n;
-      if (n) memcpy(req, g_rowreq, sizeof(uint8_t) * 6 * n);
+      if (n) memcpy(req, g_rowreq, sizeof(RegistrationRequest) * n);
       g_rowreq_n = 0;
       portEXIT_CRITICAL(&g_roster_mux);
+      bool inventory_changed = false;
       for (uint8_t i = 0; i < n; i++) {
+        TableIdentityResult adopted =
+            tableAdoptIdentity(g_table, req[i].mac, req[i].reported_id);
+        if (adopted == TABLE_ID_ADOPTED) {
+          inventory_changed = true;
+          char mac[18];
+          Serial.printf("[inventory] assigned %s permanent ID #%u\n",
+                        macStr(req[i].mac, mac), req[i].reported_id);
+        } else if (adopted == TABLE_ID_CONFLICT) {
+          char mac[18];
+          Serial.printf(
+              "[inventory] ID CONFLICT from %s: reported #%u; "
+              "keeping conductor assignment\n",
+              macStr(req[i].mac, mac), req[i].reported_id);
+        } else if (adopted == TABLE_ID_FULL) {
+          Serial.println("[inventory] table full; could not retain reported ID");
+        }
+        int entry = tableFind(g_table, req[i].mac);
+        bool reply = tableRowReplyWanted(
+            req[i].mac_known, req[i].reported_id, entry >= 0,
+            entry >= 0 ? g_table.entries[entry].id : 0);
+        if (!reply) continue;
         TableMsg m;
-        size_t len = tableRowBuild(g_table, req[i], m);
+        size_t len = tableRowBuild(g_table, req[i].mac, m);
         if (len) esp_now_send(BROADCAST_ADDR, (const uint8_t*)&m, len);
-        // len == 0: no row assigned yet — `assign` broadcasts when there is.
       }
+      if (inventory_changed) tableSave();
     }
     drainPowerReports();  // log performers' MSG_POWER (ungated — overnight audit)
     // A conductor carrying the chip logs its own draw on the same cadence, so a
@@ -2263,7 +2375,7 @@ void loop() {
     if (g_radio_on) maybeRegister(t);  // TX only when the radio is powered
     maybePowerReport(t);   // no-op without the INA228; defers until radio-on
     maybeOtaStatusReport();
-    maybeAdoptPosition();  // pure NVS; flush a pending table adoption regardless
+    maybeAdoptTableAssignment();  // flush pending identity/position NVS adoption
 
     // Primary field sleep policy: when the broadcast schedule says LEDs are off,
     // clear the pixels and deep-sleep until the next check interval. A recent

@@ -252,6 +252,179 @@ def test_autoflash_erases_only_unrecognized_firmware_and_skips_approved_clean_bu
     assert autoflash.should_skip(dirty, manifest) is False
 
 
+def test_autoflash_allows_id_rehydration_but_not_role_or_position_drift() -> None:
+    before = autoflash.DeviceInfo(
+        "PERFORMER", 0, "C0:CD:D6:C8:03:E0", 0.3, 0.45, "0.3.0", 7, "b" * 8, False
+    )
+    rehydrated = autoflash.DeviceInfo(
+        "PERFORMER", 4, before.mac, 0.3, 0.45, "0.4.0", 8, "a" * 8, False
+    )
+    moved = autoflash.DeviceInfo(
+        "PERFORMER", 4, before.mac, 0.8, 0.45, "0.4.0", 8, "a" * 8, False
+    )
+
+    assert autoflash.preserves_role_position(before, rehydrated) is True
+    assert autoflash.preserves_role_position(before, moved) is False
+
+
+def test_autoflash_registry_migrates_and_allocates_unique_permanent_ids(tmp_path: Path) -> None:
+    registry = tmp_path / "devices.json"
+    first = "C0:CD:D6:C8:03:E0"
+    second = "C0:CD:D6:C8:03:E1"
+    registry.write_text(
+        json.dumps({"schema_version": 1, "devices": {first: "known"}})
+    )
+
+    adopted, recorded = autoflash.ensure_node_id(registry, first, 4)
+    autoflash.write_device_state(registry, second, "known")
+    allocated, allocated_new = autoflash.ensure_node_id(registry, second, 0)
+
+    assert (adopted, recorded) == (4, True)
+    assert (allocated, allocated_new) == (1, True)
+    assert autoflash.load_device_registry(registry) == {
+        first: autoflash.DeviceRecord("known", 4),
+        second: autoflash.DeviceRecord("known", 1),
+    }
+    document = json.loads(registry.read_text())
+    assert document["schema_version"] == 2
+
+
+def test_autoflash_legacy_migration_cannot_allocate_by_plug_order(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "devices.json"
+    unnumbered = "C0:CD:D6:C8:03:E0"
+    existing_one = "C0:CD:D6:C8:03:E1"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "devices": {unnumbered: "known", existing_one: "known"},
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="scan 1 remaining known board"):
+        autoflash.ensure_node_id(registry, unnumbered, 0)
+
+    assert autoflash.ensure_node_id(registry, existing_one, 1) == (1, True)
+    assert autoflash.ensure_node_id(registry, unnumbered, 0) == (2, True)
+    assert autoflash.load_device_registry(registry) == {
+        unnumbered: autoflash.DeviceRecord("known", 2),
+        existing_one: autoflash.DeviceRecord("known", 1),
+    }
+
+
+def test_autoflash_registry_rejects_duplicate_or_changed_ids(tmp_path: Path) -> None:
+    registry = tmp_path / "devices.json"
+    first = "C0:CD:D6:C8:03:E0"
+    second = "C0:CD:D6:C8:03:E1"
+    autoflash.write_device_state(registry, first, "known")
+    autoflash.ensure_node_id(registry, first, 4)
+    autoflash.write_device_state(registry, second, "known")
+
+    with pytest.raises(RuntimeError, match="already belongs"):
+        autoflash.ensure_node_id(registry, second, 4)
+    with pytest.raises(RuntimeError, match="permanently assigns #4"):
+        autoflash.ensure_node_id(registry, first, 5)
+
+
+def test_autoflash_current_board_gets_missing_id_without_reflash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mac = "C0:CD:D6:C8:03:E0"
+    manifest = {"commit": "a" * 40}
+    current = autoflash.DeviceInfo(
+        "PERFORMER", 0, mac, 0.0, 0.0, "0.4.0", 8, "a" * 8, False
+    )
+    assigned = autoflash.DeviceInfo(
+        "PERFORMER", 1, mac, 0.0, 0.0, "0.4.0", 8, "a" * 8, False
+    )
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(
+        autoflash,
+        "probe_board",
+        lambda _port: {"mac": mac},
+    )
+    writes = []
+    monkeypatch.setattr(
+        autoflash,
+        "write_node_id",
+        lambda _port, node_id: writes.append(node_id) or assigned,
+    )
+    monkeypatch.setattr(
+        autoflash,
+        "flash_board",
+        lambda *_args: pytest.fail("approved firmware must not be reflashed"),
+    )
+    messages = []
+    monkeypatch.setattr(autoflash, "log", messages.append)
+
+    result = autoflash.process_port(
+        "/dev/cu.wchusbserial-test",
+        manifest,
+        tmp_path / "unused.zip",
+        tmp_path / "work",
+        device_registry=tmp_path / "devices.json",
+        factory_authorized=False,
+    )
+
+    assert writes == [1]
+    assert "permanent ID #1 verified" in result
+    assert any("BOARD #1  NEW ID - LABEL THIS BOARD" in message for message in messages)
+
+
+def test_autoflash_factory_board_is_numbered_after_flash_and_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mac = "C0:CD:D6:C8:03:E0"
+    manifest = {"commit": "a" * 40}
+    flashed = autoflash.DeviceInfo(
+        "PERFORMER", 0, mac, 0.0, 0.0, "0.4.0", 8, "a" * 8, False
+    )
+    assigned = autoflash.DeviceInfo(
+        "PERFORMER", 1, mac, 0.0, 0.0, "0.4.0", 8, "a" * 8, False
+    )
+    responses = iter([None, None, flashed])
+    monkeypatch.setattr(
+        autoflash, "read_info", lambda *_args, **_kwargs: next(responses)
+    )
+    monkeypatch.setattr(autoflash, "probe_board", lambda _port: {"mac": mac})
+    monkeypatch.setattr(
+        autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []}
+    )
+    erased = []
+    monkeypatch.setattr(autoflash, "erase_board", lambda _port: erased.append(True))
+    monkeypatch.setattr(autoflash, "flash_board", lambda *_args: None)
+    writes = []
+    monkeypatch.setattr(
+        autoflash,
+        "write_node_id",
+        lambda _port, node_id: writes.append(node_id) or assigned,
+    )
+    messages = []
+    monkeypatch.setattr(autoflash, "log", messages.append)
+    monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
+    registry = tmp_path / "devices.json"
+
+    result = autoflash.process_port(
+        "/dev/cu.wchusbserial-test",
+        manifest,
+        tmp_path / "bundle.zip",
+        tmp_path / "work",
+        device_registry=registry,
+        factory_authorized=True,
+    )
+
+    assert erased == [True]
+    assert writes == [1]
+    assert autoflash.load_device_registry(registry) == {
+        mac: autoflash.DeviceRecord("known", 1)
+    }
+    assert "permanent ID #1 verified" in result
+    assert any("BOARD #1  NEW ID - LABEL THIS BOARD" in message for message in messages)
+
+
 @pytest.mark.parametrize(
     ("wakes_after_probe", "factory_authorized", "expected_erase"),
     [(True, False, False), (False, True, True)],
@@ -397,7 +570,9 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
 
     with pytest.raises(RuntimeError, match="erase failure"):
         call()
-    assert autoflash.load_device_registry(registry) == {mac: "erase_pending"}
+    assert autoflash.load_device_registry(registry) == {
+        mac: autoflash.DeviceRecord("erase_pending", None)
+    }
     with pytest.raises(RuntimeError) as error:
         call()
     assert f"ambiguous result for {mac}" in str(error.value)
@@ -422,7 +597,9 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
     )
     with pytest.raises(RuntimeError, match="write failure"):
         call()
-    assert autoflash.load_device_registry(registry) == {mac: "known"}
+    assert autoflash.load_device_registry(registry) == {
+        mac: autoflash.DeviceRecord("known", None)
+    }
 
     with pytest.raises(RuntimeError, match="write failure"):
         call()

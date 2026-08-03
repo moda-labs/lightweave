@@ -248,17 +248,18 @@ class MockConductor:
         if new.status != "alive":
             return {"ok": False, "error": "replacement lantern is not awake"}
         old_label = old.label
+        new_label = new.label
         new.x = old.x
         new.y = old.y
-        new.label = old_label
         old.x = None
         old.y = None
-        old.label = f"{old_label} retired"
-        old.status = "retired"
-        self._event(f"replace old={old.mac} new={new.mac} label={old_label}")
+        self._event(
+            f"replace old={old.mac} label={old_label} "
+            f"new={new.mac} label={new_label}"
+        )
         return {
             "ok": True,
-            "message": f"moved {old_label} to replacement lantern",
+            "message": f"moved position from {old_label} to {new_label}",
             "old_mac": old.mac,
             "new_mac": new.mac,
         }

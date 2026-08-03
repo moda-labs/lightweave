@@ -143,7 +143,7 @@ batch notes.
   tracking.
 - Patterns: Pulse, Palette Drift, Sweep, Glow, Firefly, Ocean Wave, White,
   ring-addressable Fire Flicker, and Solid test mode.
-- MAC-keyed roster and conductor-authoritative layout table.
+- MAC-keyed roster and conductor-authoritative permanent board IDs plus optional layout positions.
 - Persistent role, position, pattern, brightness, and power policy in NVS.
 - Radio duty cycling, CPU light-sleep support, and schedule-driven deep-sleep
   policy.

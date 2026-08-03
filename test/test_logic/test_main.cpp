@@ -976,6 +976,65 @@ void test_table_set_updates_in_place() {
   TEST_ASSERT_EQUAL_FLOAT(8.0f, y);
 }
 
+void test_table_permanent_ids_are_unique_and_survive_position_changes() {
+  LayoutTable t;
+  tableInit(t);
+  uint8_t a[6], b[6];
+  macN(a, 1);
+  macN(b, 2);
+  TEST_ASSERT_EQUAL(TABLE_ID_ADOPTED, tableAdoptIdentity(t, a, 7));
+  TEST_ASSERT_EQUAL(TABLE_ID_UNCHANGED, tableAdoptIdentity(t, a, 7));
+  TEST_ASSERT_EQUAL(TABLE_ID_CONFLICT, tableAdoptIdentity(t, b, 7));
+  TEST_ASSERT_EQUAL(TABLE_ID_CONFLICT, tableAdoptIdentity(t, a, 8));
+  TEST_ASSERT_EQUAL(TABLE_ID_ADOPTED, tableAdoptIdentity(t, b, 8));
+  TEST_ASSERT_TRUE(tableSet(t, a, 1.0f, 2.0f));
+  TEST_ASSERT_TRUE(tableClearPosition(t, a));
+  TEST_ASSERT_EQUAL_UINT16(7, t.entries[tableFind(t, a)].id);
+  TEST_ASSERT_FALSE(tableHasPosition(t.entries[tableFind(t, a)]));
+  TEST_ASSERT_EQUAL_UINT8(0, tablePositionedCount(t));
+  TEST_ASSERT_TRUE(tableValid(t));
+}
+
+void test_table_reports_live_identity_conflicts() {
+  LayoutTable t;
+  tableInit(t);
+  uint8_t a[6], b[6], c[6];
+  macN(a, 1);
+  macN(b, 2);
+  macN(c, 3);
+  TEST_ASSERT_EQUAL(TABLE_ID_ADOPTED, tableAdoptIdentity(t, a, 7));
+  TEST_ASSERT_EQUAL(TABLE_ID_ADOPTED, tableAdoptIdentity(t, b, 8));
+  TEST_ASSERT_FALSE(tableReportedIdConflict(t, a, 7));
+  TEST_ASSERT_TRUE(tableReportedIdConflict(t, a, 8));
+  TEST_ASSERT_TRUE(tableReportedIdConflict(t, c, 7));
+  TEST_ASSERT_FALSE(tableReportedIdConflict(t, c, 9));
+  TEST_ASSERT_FALSE(tableReportedIdConflict(t, c, 0));
+}
+
+void test_table_migrates_legacy_positions_without_inventing_ids() {
+  LegacyLayoutTable legacy = {};
+  legacy.count = 2;
+  macN(legacy.entries[0].mac, 1);
+  legacy.entries[0].x = 0.25f;
+  legacy.entries[0].y = 0.75f;
+  macN(legacy.entries[1].mac, 2);
+  legacy.entries[1].x = 0.5f;
+  legacy.entries[1].y = 0.1f;
+  LayoutTable current;
+
+  TEST_ASSERT_TRUE(tableMigrateLegacy(legacy, current));
+  TEST_ASSERT_EQUAL_UINT8(2, current.count);
+  TEST_ASSERT_EQUAL_UINT8(2, tablePositionedCount(current));
+  TEST_ASSERT_EQUAL_UINT16(0, current.entries[0].id);
+  float x = 0.0f, y = 0.0f;
+  TEST_ASSERT_TRUE(tableLookup(current, legacy.entries[1].mac, x, y));
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, x);
+  TEST_ASSERT_EQUAL_FLOAT(0.1f, y);
+
+  legacy.count = LEGACY_TABLE_MAX + 1;
+  TEST_ASSERT_FALSE(tableMigrateLegacy(legacy, current));
+}
+
 void test_table_remove() {
   // Node replacement: dropping a MAC leaves the others intact and findable.
   LayoutTable t;
@@ -1842,7 +1901,18 @@ void test_table_chunk_count() {
   TEST_ASSERT_EQUAL_UINT8(1, tableChunkCount(TABLE_ROWS_PER_MSG));
   TEST_ASSERT_EQUAL_UINT8(2, tableChunkCount(TABLE_ROWS_PER_MSG + 1));
   TEST_ASSERT_EQUAL_UINT8(2, tableChunkCount(2 * TABLE_ROWS_PER_MSG));
-  TEST_ASSERT_EQUAL_UINT8(4, tableChunkCount(TABLE_MAX));  // 64 nodes -> 4 chunks
+  TEST_ASSERT_EQUAL_UINT8(
+      (TABLE_MAX + TABLE_ROWS_PER_MSG - 1) / TABLE_ROWS_PER_MSG,
+      tableChunkCount(TABLE_MAX));
+}
+
+void test_table_identity_rehydrates_only_unprovisioned_boards() {
+  TEST_ASSERT_EQUAL(TABLE_ID_KEEP_LOCAL, tableIdentityDecision(0, 0));
+  TEST_ASSERT_EQUAL(TABLE_ID_ADOPT_AUTHORITY, tableIdentityDecision(0, 17));
+  TEST_ASSERT_EQUAL(TABLE_ID_KEEP_LOCAL, tableIdentityDecision(17, 17));
+  TEST_ASSERT_EQUAL(TABLE_ID_KEEP_LOCAL, tableIdentityDecision(17, 0));
+  TEST_ASSERT_EQUAL(TABLE_ID_AUTHORITY_CONFLICT,
+                    tableIdentityDecision(17, 18));
 }
 
 void test_table_chunk_build_single_chunk() {
@@ -1853,6 +1923,8 @@ void test_table_chunk_build_single_chunk() {
   macN(b, 2);
   tableSet(t, a, 1.5f, -2.0f);
   tableSet(t, b, 3.0f, 4.0f);
+  tableAdoptIdentity(t, a, 11);
+  tableAdoptIdentity(t, b, 12);
 
   TableMsg m;
   size_t len = tableChunkBuild(t, 0, m);
@@ -1864,6 +1936,8 @@ void test_table_chunk_build_single_chunk() {
   TEST_ASSERT_EQUAL_UINT8(1, m.chunks);
   TEST_ASSERT_EQUAL_UINT8(2, m.n);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(b, m.rows[1].mac, 6);
+  TEST_ASSERT_EQUAL_UINT16(12, m.rows[1].id);
+  TEST_ASSERT_TRUE((m.rows[1].flags & TABLE_FLAG_POSITIONED) != 0);
   TEST_ASSERT_EQUAL_FLOAT(3.0f, m.rows[1].x);
   TEST_ASSERT_EQUAL_FLOAT(4.0f, m.rows[1].y);
   // Out-of-range chunk: nothing to send.
@@ -1877,7 +1951,7 @@ void test_table_chunk_build_single_chunk() {
 void test_table_chunk_build_splits_across_chunks() {
   LayoutTable t;
   tableInit(t);
-  const uint8_t N = TABLE_ROWS_PER_MSG + 3;  // 20 nodes -> 17 + 3
+  const uint8_t N = TABLE_ROWS_PER_MSG + 3;
   for (uint8_t i = 0; i < N; i++) {
     uint8_t m[6];
     macN(m, i);
@@ -1890,7 +1964,7 @@ void test_table_chunk_build_splits_across_chunks() {
   TEST_ASSERT_EQUAL_UINT8(2, c0.chunks);
   TEST_ASSERT_EQUAL_UINT8(2, c1.chunks);
   TEST_ASSERT_EQUAL_UINT8(1, c1.chunk);
-  // Chunk 1's first row is table entry 17 — the split loses and repeats nothing.
+  // Chunk 1's first row is exactly the first entry after a full chunk.
   uint8_t want[6];
   macN(want, TABLE_ROWS_PER_MSG);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(want, c1.rows[0].mac, 6);
@@ -1923,17 +1997,20 @@ void test_table_msg_find_row() {
   macN(absent, 99);
   tableSet(t, a, 1.0f, 2.0f);
   tableSet(t, b, -7.5f, 0.25f);
+  tableAdoptIdentity(t, b, 22);
   TableMsg m;
   tableChunkBuild(t, 0, m);
 
-  float x = 0, y = 0;
-  TEST_ASSERT_TRUE(tableMsgFindRow(m, b, x, y));   // "find our own row"
-  TEST_ASSERT_EQUAL_FLOAT(-7.5f, x);
-  TEST_ASSERT_EQUAL_FLOAT(0.25f, y);
-  TEST_ASSERT_FALSE(tableMsgFindRow(m, absent, x, y));
+  TableAssignment assignment;
+  TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
+  TEST_ASSERT_EQUAL_UINT16(22, assignment.id);
+  TEST_ASSERT_TRUE(assignment.has_position);
+  TEST_ASSERT_EQUAL_FLOAT(-7.5f, assignment.x);
+  TEST_ASSERT_EQUAL_FLOAT(0.25f, assignment.y);
+  TEST_ASSERT_FALSE(tableMsgFindRow(m, absent, assignment));
   // Defensive clamp: a lying n can't walk the scan past rows[].
   m.n = 200;
-  TEST_ASSERT_FALSE(tableMsgFindRow(m, absent, x, y));
+  TEST_ASSERT_FALSE(tableMsgFindRow(m, absent, assignment));
 }
 
 // ---- Targeted row reply (table_wire.h) -------------------------------------
@@ -1945,13 +2022,17 @@ void test_table_msg_find_row() {
 void test_table_row_reply_wanted() {
   // First join since conductor boot (or a full roster dropped the insert —
   // known-ness is computed BEFORE the upsert, so full can't mask new).
-  TEST_ASSERT_TRUE(tableRowReplyWanted(/*mac_known*/ false, /*id*/ 7));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(/*mac_known*/ false, /*reported*/ 7,
+                                       /*have_authoritative*/ true, 7));
   // Unprovisioned (id 0): fresh flash / erase_flash recovery — its NVS
   // position cache is gone even though the conductor has seen the MAC.
-  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 0));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 0, true, 7));
+  // A conflicting board gets the authoritative row so it can log the conflict;
+  // receiver logic refuses to silently change a non-zero physical-board ID.
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 8, true, 7));
   // Known + provisioned re-register (every 10 s, all night): no reply —
   // steady state costs zero table traffic.
-  TEST_ASSERT_FALSE(tableRowReplyWanted(true, 7));
+  TEST_ASSERT_FALSE(tableRowReplyWanted(true, 7, true, 7));
 }
 
 void test_table_row_build() {
@@ -1963,24 +2044,34 @@ void test_table_row_build() {
   macN(absent, 99);
   tableSet(t, a, 1.0f, 2.0f);
   tableSet(t, b, -7.5f, 0.25f);
+  tableAdoptIdentity(t, b, 42);
 
   TableMsg m;
   size_t len = tableRowBuild(t, b, m);
-  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);  // 23 B on the wire
+  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);
   TEST_ASSERT_EQUAL_UINT32(BEACON_MAGIC, m.hdr.magic);
   TEST_ASSERT_EQUAL_UINT8(PROTO_VERSION, m.hdr.version);
   TEST_ASSERT_EQUAL_UINT8(MSG_TABLE, m.hdr.type);
   TEST_ASSERT_EQUAL_UINT8(1, m.n);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(b, m.rows[0].mac, 6);
+  TEST_ASSERT_EQUAL_UINT16(42, m.rows[0].id);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, m.rows[0].x);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, m.rows[0].y);
   // The receiver-side path accepts it end to end: length gates + own-row scan.
   TEST_ASSERT_TRUE(tableMsgLenPlausible((int)len));
   TEST_ASSERT_TRUE(tableMsgLenValid((int)len, m.n));
-  float x = 0, y = 0;
-  TEST_ASSERT_TRUE(tableMsgFindRow(m, b, x, y));
-  TEST_ASSERT_EQUAL_FLOAT(-7.5f, x);
-  // No row assigned yet: nothing to say (assign broadcasts when there is).
+  TableAssignment assignment;
+  TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
+  TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
+  TEST_ASSERT_EQUAL_FLOAT(-7.5f, assignment.x);
+  TEST_ASSERT_TRUE(assignment.has_position);
+  TEST_ASSERT_TRUE(tableClearPosition(t, b));
+  len = tableRowBuild(t, b, m);
+  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);
+  TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
+  TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
+  TEST_ASSERT_FALSE(assignment.has_position);
+  // No inventory row yet: nothing to say.
   TEST_ASSERT_EQUAL_size_t(0, tableRowBuild(t, absent, m));
 }
 
@@ -2125,6 +2216,9 @@ int main(int, char**) {
   RUN_TEST(test_ota_online_freshness_has_explicit_boundary);
   RUN_TEST(test_table_set_and_lookup);
   RUN_TEST(test_table_set_updates_in_place);
+  RUN_TEST(test_table_permanent_ids_are_unique_and_survive_position_changes);
+  RUN_TEST(test_table_reports_live_identity_conflicts);
+  RUN_TEST(test_table_migrates_legacy_positions_without_inventing_ids);
   RUN_TEST(test_table_remove);
   RUN_TEST(test_table_overflow_drops_new);
   RUN_TEST(test_heartbeat_square_wave);
@@ -2186,6 +2280,7 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_rejects_bad_command);
   RUN_TEST(test_table_wire_len_fits_espnow);
   RUN_TEST(test_table_chunk_count);
+  RUN_TEST(test_table_identity_rehydrates_only_unprovisioned_boards);
   RUN_TEST(test_table_chunk_build_single_chunk);
   RUN_TEST(test_table_chunk_build_splits_across_chunks);
   RUN_TEST(test_table_msg_len_validation);

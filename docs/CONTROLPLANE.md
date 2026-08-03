@@ -359,9 +359,10 @@ the API exposes as HTTP `503`.
 Firmware support lives beside the human CLI: lines beginning with `{` enter
 the machine parser in `include/serial_json.h`, while `info`, `table`, `assign`,
 and the other text commands keep working. The firmware `state` response derives
-lanterns from the conductor's persistent layout table plus the live roster:
-positioned table rows show on the map, roster-only MACs show as "Needs
-position", and table rows not currently registered show as "Not seen".
+lanterns from the conductor's persistent board inventory plus the live roster:
+positioned rows show on the map, inventory rows without coordinates show as
+"Needs position", and rows not currently registered retain their permanent
+number while showing "Not seen".
 
 ## Features
 
