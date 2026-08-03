@@ -438,7 +438,7 @@ def test_health_endpoint_identifies_the_running_release(monkeypatch) -> None:
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "version": "0.5.0", "commit": "a" * 40}
+    assert response.json() == {"ok": True, "version": "0.5.1", "commit": "a" * 40}
 
 
 def test_health_endpoint_identifies_the_started_process_when_marker_changes(

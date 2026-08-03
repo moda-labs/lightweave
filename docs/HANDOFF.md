@@ -8,11 +8,20 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**149 pass**) is green; control tests (**299 pass**) are green; all three
+(**149 pass**) is green; control tests (**301 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-03): **the v0.5.0 release adds permanent numeric IDs
-backed by their immutable MAC addresses.** The conductor persists every learned
+Latest locally (2026-08-03): **the v0.5.1 hotfix makes the permanent-ID release
+deploy reliably on the Pi.** The first v0.5.0 production reconcile exposed that
+fresh commit-specific Python environments retained `0700` mode from their
+temporary build directory, so the unprivileged control service could not execute
+them. Automatic rollback restored healthy v0.4.0. The reconciler now publishes
+fresh environments with traversable permissions and repairs a complete existing
+environment before reuse. v0.5.1 rebuilds the same protocol-v8 firmware from the
+reviewed hotfix commit.
+
+The v0.5.0 feature release adds permanent numeric IDs
+backed by their immutable MAC addresses. The conductor persists every learned
 `MAC → ID` inventory row independently of field position, shows the ID while a
 board is offline, rejects duplicate/conflicting reports, and sends the
 authoritative ID plus optional position back to an erased performer. Existing
@@ -23,7 +32,7 @@ unused positive number, writes and reads it back over serial, and prints a large
 `BOARD #n - LABEL THIS BOARD` banner even when firmware is already current. The
 Pi-attached conductor has been direct-flashed to protocol v8 with its NVS
 inventory preserved. Performer inventory/tagging remains pending the promoted
-v0.5.0 artifact; after publication, refresh the conductor from that exact
+v0.5.1 artifact; after publication, refresh the conductor from that exact
 artifact and flash all performers together for the v8 protocol change. Before
 inventorying, rerun the documented
 `firebeetle_autoflash.py install --factory` command: the LaunchAgent runs a
