@@ -56,6 +56,11 @@ if args[0] == "api":
         save()
         if mode == "multiple":
             print("42\n43")
+        elif mode == "delayed":
+            if state["list_calls"] > 3:
+                print("42")
+        elif mode == "never_visible":
+            pass
         elif mode != "missing" or state["list_calls"] > 1:
             print("42")
         raise SystemExit(0)
@@ -150,6 +155,7 @@ def run_fake_publisher(tmp_path: Path, mode: str, *, partial: bool = False):
             "FAKE_GH_MODE": mode,
             "FAKE_GH_STATE": str(state_path),
             "FAKE_GH_REMOTE": str(remote),
+            "RELEASE_DRAFT_LOOKUP_DELAY_S": "0",
         }
     )
     result = subprocess.run(
@@ -859,6 +865,7 @@ def test_release_publisher_is_retry_safe_and_verifies_assets_before_publish() ->
         ("published", False, 0, 0, 0),
         ("existing", False, 0, 1, 1),
         ("missing", False, 1, 1, 1),
+        ("delayed", False, 1, 1, 1),
         ("interrupted", True, 0, 1, 1),
     ],
 )
@@ -876,6 +883,8 @@ def test_release_publisher_handles_published_new_and_resumed_drafts(
     assert state["create_calls"] == creates
     assert state["upload_calls"] == uploads
     assert state["edit_calls"] == edits
+    if mode == "delayed":
+        assert state["list_calls"] == 4
     assert {path.name: path.read_bytes() for path in remote.iterdir()} == assets
 
 
@@ -896,6 +905,19 @@ def test_release_publisher_never_publishes_an_asset_set_mismatch(tmp_path: Path)
 
     assert result.returncode != 0
     assert state["upload_calls"] == 1
+    assert state["edit_calls"] == 0
+
+
+def test_release_publisher_stops_when_new_draft_never_becomes_visible(
+    tmp_path: Path,
+) -> None:
+    result, state, _remote, _assets = run_fake_publisher(tmp_path, "never_visible")
+
+    assert result.returncode != 0
+    assert "draft release did not become visible after 10 attempts" in result.stderr
+    assert state["list_calls"] == 11
+    assert state["create_calls"] == 1
+    assert state["upload_calls"] == 0
     assert state["edit_calls"] == 0
 
 
