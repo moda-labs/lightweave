@@ -624,6 +624,7 @@ def test_python_environment_is_built_fresh_and_reused_only_after_completion(
 
     assert target == reconciler._venv_path(commit)
     assert (target / "bin" / "python").is_file()
+    assert target.stat().st_mode & 0o777 == 0o755
     install = next(command for command in reconciler.commands if "install" in command)
     assert "--require-hashes" in install
     assert "--only-binary=:all:" in install
@@ -632,12 +633,14 @@ def test_python_environment_is_built_fresh_and_reused_only_after_completion(
     ]
     assert len(venv_commands) == 1
 
+    target.chmod(0o700)
     reconciler._install_python(commit)
 
     venv_commands = [
         command for command in reconciler.commands if command[1:3] == ("-m", "venv")
     ]
     assert len(venv_commands) == 1
+    assert target.stat().st_mode & 0o777 == 0o755
 
 
 @pytest.mark.parametrize("boundary", [1, 2, 3, 4, 5])

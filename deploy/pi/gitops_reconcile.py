@@ -366,6 +366,8 @@ class GitOpsReconciler:
             if not python.is_file():
                 raise ReconcileError(f"release environment is incomplete: {target}")
             self._run([str(python), "-m", "pip", "check"], timeout=120)
+            os.chmod(target, 0o755)
+            _fsync_directory(target)
             return target
 
         temporary = Path(tempfile.mkdtemp(prefix=f".{commit}.", dir=root))
@@ -386,6 +388,7 @@ class GitOpsReconciler:
                 timeout=600,
             )
             self._run([str(python), "-m", "pip", "check"], timeout=120)
+            os.chmod(temporary, 0o755)
             _fsync_tree(temporary)
             os.replace(temporary, target)
             _fsync_directory(root)
