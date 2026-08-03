@@ -1,6 +1,6 @@
-// The layout table on the wire: chunking, validation, and broadcast cadence.
+// The node inventory on the wire: chunking, validation, and broadcast cadence.
 //
-// table.h is the pure MAC->(x,y) data structure; beacon.h is the packet layout.
+// table.h is the pure MAC->ID+optional-position store; beacon.h is the packet layout.
 // This header is everything in between — the logic that used to live inline in
 // main.cpp's broadcastTable()/onRecv() where it was host-unreachable:
 //   - sender side: how many MSG_TABLE chunks a table needs, and filling one
@@ -50,6 +50,8 @@ inline size_t tableChunkBuild(const LayoutTable& t, uint8_t c, TableMsg& m) {
   m.n = n;
   for (uint8_t i = 0; i < n; i++) {
     memcpy(m.rows[i].mac, t.entries[start + i].mac, 6);
+    m.rows[i].id = t.entries[start + i].id;
+    m.rows[i].flags = t.entries[start + i].flags;
     m.rows[i].x = t.entries[start + i].x;
     m.rows[i].y = t.entries[start + i].y;
   }
@@ -72,15 +74,40 @@ inline bool tableMsgLenValid(int len, uint8_t n) {
   return len == (int)tableMsgWireLen(n);
 }
 
-// Scan a validated chunk for this node's own row. Writes (x, y) and returns
-// true when found. (Reads packed members by value — never by reference.)
-inline bool tableMsgFindRow(const TableMsg& m, const uint8_t mac[6], float& x,
-                            float& y) {
+struct TableAssignment {
+  uint16_t id;
+  float x;
+  float y;
+  bool has_position;
+};
+
+enum TableIdentityDecision : uint8_t {
+  TABLE_ID_KEEP_LOCAL = 0,
+  TABLE_ID_ADOPT_AUTHORITY,
+  TABLE_ID_AUTHORITY_CONFLICT,
+};
+
+// A conductor can rehydrate an erased board, but it may never silently relabel
+// a board that already carries a different non-zero permanent number.
+inline TableIdentityDecision tableIdentityDecision(uint16_t local_id,
+                                                   uint16_t authoritative_id) {
+  if (authoritative_id == 0 || authoritative_id == local_id)
+    return TABLE_ID_KEEP_LOCAL;
+  if (local_id == 0) return TABLE_ID_ADOPT_AUTHORITY;
+  return TABLE_ID_AUTHORITY_CONFLICT;
+}
+
+// Scan a validated chunk for this node's own inventory row. Reads packed
+// members by value, never by reference.
+inline bool tableMsgFindRow(const TableMsg& m, const uint8_t mac[6],
+                            TableAssignment& assignment) {
   uint8_t n = m.n > TABLE_ROWS_PER_MSG ? TABLE_ROWS_PER_MSG : m.n;
   for (uint8_t i = 0; i < n; i++) {
     if (memcmp(m.rows[i].mac, mac, 6) == 0) {
-      x = m.rows[i].x;
-      y = m.rows[i].y;
+      assignment.id = m.rows[i].id;
+      assignment.x = m.rows[i].x;
+      assignment.y = m.rows[i].y;
+      assignment.has_position = (m.rows[i].flags & TABLE_FLAG_POSITIONED) != 0;
       return true;
     }
   }
@@ -93,7 +120,7 @@ inline bool tableMsgFindRow(const TableMsg& m, const uint8_t mac[6], float& x,
 // erase_flash recovery) must not wait out that cadence through a ~13% radio
 // duty cycle. A REGISTER is the one moment the conductor provably knows the
 // sender's radio is on RIGHT NOW (TX is gated on radio-up), so the fix is a
-// targeted reply: broadcast just that node's row (23 B) immediately. Any
+// targeted reply: broadcast just that node's row immediately. Any
 // single broadcast the node missed is retried for free by its next REGISTER
 // (10 s cadence), so delivery needs no scheduler, no burst flag, and no
 // rate-limit machinery.
@@ -101,25 +128,23 @@ inline bool tableMsgFindRow(const TableMsg& m, const uint8_t mac[6], float& x,
 // Should a REGISTER trigger a row reply? Reply when the sender is new to the
 // roster (first join since conductor boot, or a REGISTER dropped by a full
 // roster — mac_known is computed BEFORE the upsert, so a full roster can't
-// mask a new node) or is unprovisioned (id == 0: a fresh flash / erase_flash
-// recovery — its NVS position cache is gone even though the conductor has
-// seen the MAC before). Provisioned, known nodes re-registering every 10 s
-// get no reply: they hold their position in NVS, so steady state costs zero
-// table traffic. Worst case an unprovisioned node re-triggers one 23 B packet
-// per REGISTER interval until someone provisions it — bounded, and the roster
-// shows id=0 so the cause is visible.
-inline bool tableRowReplyWanted(bool mac_known, uint16_t id) {
-  return !mac_known || id == 0;
+// mask a new node), is unprovisioned, or disagrees with the conductor's
+// permanent ID. Provisioned known nodes that agree get no reply, so steady
+// state costs zero targeted traffic.
+inline bool tableRowReplyWanted(bool mac_known, uint16_t reported_id,
+                                bool have_authoritative,
+                                uint16_t authoritative_id) {
+  return !mac_known || reported_id == 0 ||
+         (have_authoritative && reported_id != authoritative_id);
 }
 
-// Fill `m` with a single-row MSG_TABLE carrying this MAC's position. Returns
-// the wire length to send, or 0 when the MAC has no row (nothing to say —
-// the operator hasn't assigned it yet; `assign` broadcasts when they do).
+// Fill `m` with a single-row MSG_TABLE carrying this MAC's permanent ID and
+// optional position. Returns 0 only when the MAC is not inventoried.
 // Receivers treat it exactly like a full-table chunk: scan for their own MAC.
 inline size_t tableRowBuild(const LayoutTable& t, const uint8_t mac[6],
                             TableMsg& m) {
-  float x, y;
-  if (!tableLookup(t, mac, x, y)) return 0;
+  int i = tableFind(t, mac);
+  if (i < 0) return 0;
   m.hdr.magic = BEACON_MAGIC;
   m.hdr.version = PROTO_VERSION;
   m.hdr.type = MSG_TABLE;
@@ -127,7 +152,9 @@ inline size_t tableRowBuild(const LayoutTable& t, const uint8_t mac[6],
   m.chunks = 1;
   m.n = 1;
   memcpy(m.rows[0].mac, mac, 6);
-  m.rows[0].x = x;
-  m.rows[0].y = y;
+  m.rows[0].id = t.entries[i].id;
+  m.rows[0].flags = t.entries[i].flags;
+  m.rows[0].x = t.entries[i].x;
+  m.rows[0].y = t.entries[i].y;
   return tableMsgWireLen(1);
 }

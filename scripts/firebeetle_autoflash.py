@@ -15,6 +15,7 @@ import sys
 import time
 import urllib.request
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +70,13 @@ class DeviceInfo:
     proto: int
     build: str
     dirty: bool
+
+
+@dataclass(frozen=True)
+class DeviceRecord:
+    state: str
+    node_id: int | None = None
+    legacy_identity_pending: bool = False
 
 
 def parse_device_info(text: str) -> DeviceInfo | None:
@@ -204,25 +212,87 @@ def _write_atomic(path: Path, data: bytes) -> None:
         os.close(descriptor)
 
 
-def load_device_registry(path: Path) -> dict[str, str]:
+def load_device_registry(path: Path) -> dict[str, DeviceRecord]:
     if not path.is_file():
         return {}
     document = _json(path.read_bytes(), "known-device registry")
-    if set(document) != {"schema_version", "devices"} or document["schema_version"] != 1:
+    if (
+        set(document) != {"schema_version", "devices"}
+        or document["schema_version"] not in {1, 2}
+    ):
         raise ValueError("known-device registry is invalid")
     devices = document["devices"]
-    if (
-        not isinstance(devices, dict)
-        or any(
-            not isinstance(mac, str)
-            or not MAC_RE.fullmatch(mac)
-            or not isinstance(state, str)
-            or state not in {"known", "erase_pending", "erase_authorized"}
-            for mac, state in devices.items()
-        )
-    ):
+    if not isinstance(devices, dict):
         raise ValueError("known-device registry entries are invalid")
-    return dict(devices)
+    records: dict[str, DeviceRecord] = {}
+    for mac, value in devices.items():
+        if not isinstance(mac, str) or not MAC_RE.fullmatch(mac):
+            raise ValueError("known-device registry entries are invalid")
+        if document["schema_version"] == 1:
+            state = value
+            node_id = None
+            legacy_identity_pending = True
+        elif (
+            isinstance(value, dict)
+            and set(value)
+            in (
+                {"state", "node_id"},
+                {"state", "node_id", "legacy_identity_pending"},
+            )
+        ):
+            state = value["state"]
+            node_id = value["node_id"]
+            legacy_identity_pending = value.get("legacy_identity_pending", False)
+        else:
+            raise ValueError("known-device registry entries are invalid")
+        if (
+            state not in {"known", "erase_pending", "erase_authorized"}
+            or (
+                node_id is not None
+                and (
+                    not isinstance(node_id, int)
+                    or isinstance(node_id, bool)
+                    or not 1 <= node_id <= 65535
+                )
+            )
+            or not isinstance(legacy_identity_pending, bool)
+        ):
+            raise ValueError("known-device registry entries are invalid")
+        records[mac] = DeviceRecord(state, node_id, legacy_identity_pending)
+    assigned = [record.node_id for record in records.values() if record.node_id is not None]
+    if len(assigned) != len(set(assigned)):
+        raise ValueError("known-device registry contains duplicate board IDs")
+    return records
+
+
+@contextmanager
+def _device_registry_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_name(f".{path.name}.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _write_device_registry_unlocked(
+    path: Path, devices: dict[str, DeviceRecord]
+) -> None:
+    document = {
+        "schema_version": 2,
+        "devices": {
+            mac: {
+                "state": record.state,
+                "node_id": record.node_id,
+                "legacy_identity_pending": record.legacy_identity_pending,
+            }
+            for mac, record in sorted(devices.items())
+        },
+    }
+    _write_atomic(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+
+
+def write_device_registry(path: Path, devices: dict[str, DeviceRecord]) -> None:
+    with _device_registry_lock(path):
+        _write_device_registry_unlocked(path, devices)
 
 
 def write_device_state(path: Path, mac: str, state: str) -> None:
@@ -230,17 +300,77 @@ def write_device_state(path: Path, mac: str, state: str) -> None:
         raise ValueError("cannot remember an invalid ROM MAC")
     if state not in {"known", "erase_pending", "erase_authorized"}:
         raise ValueError("cannot remember an invalid device state")
-    devices = load_device_registry(path)
-    devices[mac] = state
-    document = {"schema_version": 1, "devices": dict(sorted(devices.items()))}
-    _write_atomic(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+    with _device_registry_lock(path):
+        devices = load_device_registry(path)
+        prior = devices.get(mac)
+        devices[mac] = DeviceRecord(
+            state,
+            prior.node_id if prior else None,
+            prior.legacy_identity_pending if prior else False,
+        )
+        _write_device_registry_unlocked(path, devices)
+
+
+def ensure_node_id(path: Path, mac: str, reported_id: int) -> tuple[int, bool]:
+    if not MAC_RE.fullmatch(mac) or not 0 <= reported_id <= 65535:
+        raise ValueError("invalid board identity")
+    with _device_registry_lock(path):
+        devices = load_device_registry(path)
+        record = devices.get(mac)
+        if record is None:
+            raise ValueError("board state must be recorded before assigning an ID")
+        if record.node_id is not None:
+            if reported_id not in {0, record.node_id}:
+                raise RuntimeError(
+                    f"board {mac} reports ID #{reported_id}, but registry permanently assigns "
+                    f"#{record.node_id}"
+                )
+            if record.legacy_identity_pending:
+                devices[mac] = DeviceRecord(record.state, record.node_id, False)
+                _write_device_registry_unlocked(path, devices)
+            return record.node_id, False
+        used = {item.node_id for item in devices.values() if item.node_id is not None}
+        if reported_id:
+            if reported_id in used:
+                owner = next(
+                    key for key, item in devices.items() if item.node_id == reported_id
+                )
+                raise RuntimeError(f"board ID #{reported_id} already belongs to {owner}")
+            node_id = reported_id
+        else:
+            if record.legacy_identity_pending:
+                devices[mac] = DeviceRecord(record.state, None, False)
+            pending = [
+                key for key, item in devices.items() if item.legacy_identity_pending
+            ]
+            if pending:
+                if record.legacy_identity_pending:
+                    _write_device_registry_unlocked(path, devices)
+                raise RuntimeError(
+                    "legacy ID inventory is incomplete; scan "
+                    f"{len(pending)} remaining known board(s), then reconnect {mac}"
+                )
+            node_id = next(
+                (candidate for candidate in range(1, 65536) if candidate not in used),
+                0,
+            )
+            if node_id == 0:
+                raise RuntimeError("no board IDs remain")
+        devices[mac] = DeviceRecord(record.state, node_id, False)
+        _write_device_registry_unlocked(path, devices)
+        return node_id, True
 
 
 def authorize_factory_retry(path: Path, mac: str) -> None:
-    devices = load_device_registry(path)
-    if devices.get(mac) != "erase_pending":
-        raise ValueError("device does not have an ambiguous factory erase")
-    write_device_state(path, mac, "erase_authorized")
+    with _device_registry_lock(path):
+        devices = load_device_registry(path)
+        if not devices.get(mac) or devices[mac].state != "erase_pending":
+            raise ValueError("device does not have an ambiguous factory erase")
+        prior = devices[mac]
+        devices[mac] = DeviceRecord(
+            "erase_authorized", prior.node_id, prior.legacy_identity_pending
+        )
+        _write_device_registry_unlocked(path, devices)
 
 
 def refresh_artifact(channel_url: str, cache: Path) -> tuple[dict[str, Any], Path] | None:
@@ -348,7 +478,9 @@ def extract_bundle(bundle: Path, destination: Path) -> dict[str, Any]:
     return plan
 
 
-def read_info(port: str, duration: float = 3.0) -> DeviceInfo | None:
+def exchange_info(
+    port: str, *, command: str | None = None, duration: float = 3.0
+) -> DeviceInfo | None:
     import serial
 
     connection = serial.Serial()
@@ -364,6 +496,10 @@ def read_info(port: str, duration: float = 3.0) -> DeviceInfo | None:
         connection.write(b"\n")
         connection.flush()
         time.sleep(0.2)
+        if command is not None:
+            connection.write(command.encode("ascii") + b"\n")
+            connection.flush()
+            time.sleep(0.5)
         connection.write(b"info\n")
         connection.flush()
         deadline = time.monotonic() + duration
@@ -373,6 +509,24 @@ def read_info(port: str, duration: float = 3.0) -> DeviceInfo | None:
         return parse_device_info(output.decode(errors="replace"))
     finally:
         connection.close()
+
+
+def read_info(port: str, duration: float = 3.0) -> DeviceInfo | None:
+    return exchange_info(port, duration=duration)
+
+
+def write_node_id(port: str, node_id: int) -> DeviceInfo | None:
+    if not 1 <= node_id <= 65535:
+        raise ValueError("board ID is out of range")
+    return exchange_info(port, command=f"id {node_id}", duration=5.0)
+
+
+def log_board_id(port: str, mac: str, node_id: int, *, newly_assigned: bool) -> None:
+    status = "NEW ID - LABEL THIS BOARD" if newly_assigned else "VERIFIED - LABEL THIS BOARD"
+    log(f"{port}: ============================================================")
+    log(f"{port}: BOARD #{node_id}  {status}")
+    log(f"{port}: MAC {mac}")
+    log(f"{port}: ============================================================")
 
 
 def stable_platformio_python(interpreter: Path) -> Path:
@@ -427,10 +581,9 @@ def flash_board(port: str, plan: dict[str, Any], directory: Path) -> None:
     run_tool(arguments)
 
 
-def preserves_identity(before: DeviceInfo, after: DeviceInfo) -> bool:
+def preserves_role_position(before: DeviceInfo, after: DeviceInfo) -> bool:
     return (
         before.role == after.role
-        and before.node_id == after.node_id
         and abs(before.x - after.x) < 0.0001
         and abs(before.y - after.y) < 0.0001
     )
@@ -455,7 +608,8 @@ def process_port(
         before = read_info(port, 5.0)
     if before and before.mac != probe["mac"]:
         raise RuntimeError("serial identity and ROM MAC disagree")
-    device_state = devices.get(probe["mac"])
+    record = devices.get(probe["mac"])
+    device_state = record.state if record else None
     if before is not None:
         write_device_state(device_registry, probe["mac"], "known")
         device_state = "known"
@@ -468,38 +622,80 @@ def process_port(
             f"prior factory erase has an ambiguous result for {probe['mac']}; "
             f"run: {retry_command}"
         )
-    if before is None and device_state not in {"known", "erase_authorized"} and not factory_authorized:
+    if (
+        before is None
+        and device_state not in {"known", "erase_authorized"}
+        and not factory_authorized
+    ):
         raise RuntimeError(
             "device is not recognized; not flashing without explicit factory authorization"
         )
+    assigned_id: int | None = None
+    allocated_new = False
+    if before is not None:
+        assigned_id, recorded = ensure_node_id(
+            device_registry, probe["mac"], before.node_id
+        )
+        allocated_new = recorded and before.node_id == 0
+
     if should_skip(before, manifest):
-        return f"{probe['mac']} already runs approved build {approved_build(manifest)}"
-    log(
-        f"{port}: starting flash of {probe['mac']} "
-        f"to production build {approved_build(manifest)}"
+        after = before
+        action = f"already runs approved build {approved_build(manifest)}"
+    else:
+        log(
+            f"{port}: starting flash of {probe['mac']} "
+            f"to production build {approved_build(manifest)}"
+        )
+        destination = work / probe["mac"].replace(":", "")
+        plan = extract_bundle(bundle, destination)
+        erase = should_erase(
+            before,
+            device_state=device_state,
+            factory_authorized=factory_authorized,
+        )
+        if erase:
+            # A pending marker is intentionally ambiguous. A crash or command
+            # error requires explicit per-MAC operator authorization.
+            write_device_state(device_registry, probe["mac"], "erase_pending")
+            erase_board(port)
+            write_device_state(device_registry, probe["mac"], "known")
+        flash_board(port, plan, destination)
+        time.sleep(1.5)
+        after = read_info(port, 5.0)
+        if not after or after.build != approved_build(manifest) or after.dirty:
+            raise RuntimeError("post-flash firmware identity did not match the production release")
+        if after.mac != probe["mac"]:
+            raise RuntimeError("post-flash firmware and ROM MAC disagree")
+        if before and not preserves_role_position(before, after):
+            raise RuntimeError("post-flash NVS role/position changed")
+        action = f"flashed build {after.build}; role/position verified"
+
+    if after is None:
+        raise RuntimeError("board identity unavailable after provisioning")
+    if assigned_id is None:
+        assigned_id, recorded = ensure_node_id(
+            device_registry, probe["mac"], after.node_id
+        )
+        allocated_new = recorded and after.node_id == 0
+    if after.node_id != assigned_id:
+        before_id_write = after
+        after = write_node_id(port, assigned_id)
+        if (
+            not after
+            or after.mac != probe["mac"]
+            or after.node_id != assigned_id
+            or after.build != approved_build(manifest)
+            or after.dirty
+            or not preserves_role_position(before_id_write, after)
+        ):
+            raise RuntimeError(f"failed to persist and verify permanent board ID #{assigned_id}")
+    log_board_id(
+        port,
+        probe["mac"],
+        assigned_id,
+        newly_assigned=allocated_new,
     )
-    plan = extract_bundle(bundle, work / probe["mac"].replace(":", ""))
-    erase = should_erase(
-        before,
-        device_state=device_state,
-        factory_authorized=factory_authorized,
-    )
-    if erase:
-        # A pending marker is intentionally ambiguous. A crash or command error
-        # leaves it in place and requires explicit per-MAC operator authorization.
-        write_device_state(device_registry, probe["mac"], "erase_pending")
-        erase_board(port)
-        write_device_state(device_registry, probe["mac"], "known")
-    flash_board(port, plan, work / probe["mac"].replace(":", ""))
-    time.sleep(1.5)
-    after = read_info(port, 5.0)
-    if not after or after.build != approved_build(manifest) or after.dirty:
-        raise RuntimeError("post-flash firmware identity did not match the production release")
-    if after.mac != probe["mac"]:
-        raise RuntimeError("post-flash firmware and ROM MAC disagree")
-    if before and not preserves_identity(before, after):
-        raise RuntimeError("post-flash NVS identity/position changed")
-    return f"{after.mac} flashed build {after.build}; role/position verified"
+    return f"{after.mac} {action}; permanent ID #{assigned_id} verified"
 
 
 def candidate_ports() -> set[str]:

@@ -193,7 +193,7 @@ def test_blackout_preserves_pattern_and_sets_brightness_zero() -> None:
     }
 
 
-def test_replace_moves_label_and_position_to_unpositioned_spare() -> None:
+def test_replace_moves_only_position_to_unpositioned_spare() -> None:
     conductor = MockConductor()
     old_mac = "A0:B7:65:11:44:91"
     new_mac = "8C:94:DF:57:7F:14"
@@ -205,11 +205,11 @@ def test_replace_moves_label_and_position_to_unpositioned_spare() -> None:
 
     assert ack["ok"] is True
     assert old["position"] == "Missing"
-    assert old["label"] == "#18 retired"
-    assert old["status"] == "retired"
-    assert old["attention"] == "Retired"
+    assert old["label"] == "#18"
+    assert old["status"] == "missing"
+    assert old["attention"] == "Not seen"
     assert new["position"] == "Set"
-    assert new["label"] == "#18"
+    assert new["label"] == "#57"
     assert new["x"] == 0.66
     assert new["y"] == 0.69
 

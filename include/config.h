@@ -75,13 +75,9 @@ static constexpr int64_t BEACON_STALE_US = 2000000;  // 2s
 // capacity ROSTER_MAX live in the dependency-free, host-tested include/roster.h.)
 static constexpr int64_t REGISTER_INTERVAL_US = 10000000;  // 10s
 
-// The conductor re-broadcasts the full layout table this often. Positions are
-// static and every node caches its row in NVS, so steady-state is a slow
-// backstop — the moments that actually need the table travel out of band:
-// `assign` broadcasts the table immediately, and a REGISTER from a node that
-// is new to the roster or unprovisioned gets an immediate single-row reply
-// (table_wire.h, tableRowReplyWanted/tableRowBuild) — sent while that node's
-// radio is provably on, and retried for free by its next REGISTER.
+// The conductor re-broadcasts its inventory this often. IDs and positions are
+// cached in node NVS, so this is a slow backstop. REGISTER drives immediate ID
+// reconciliation and a targeted row reply while the sender's radio is on.
 static constexpr int64_t TABLE_INTERVAL_US = 60000000;  // 60s steady-state backstop
 
 // While the live calibration locator is active, the conductor rebroadcasts the

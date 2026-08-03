@@ -266,7 +266,32 @@ the WCH `1A86:7522` port, confirms ESP32-D0WD-V3/40 MHz/4 MB through the ROM,
 skips the current clean build, preserves Lightweave NVS, and full-erases only a
 previously unseen board in explicit factory mode after both normal and post-reset
 `info` attempts fail. It verifies the production build and preserved
-role/ID/position after flashing.
+role/ID/position after flashing. On every successful connection, including an
+already-current board, it prints a banner like:
+
+```text
+BOARD #17  NEW ID - LABEL THIS BOARD
+MAC C0:CD:D6:C8:03:E0
+```
+
+If the board already has an ID, the watcher records and reuses it. If neither
+the board nor registry has one, it reserves the lowest unused positive number,
+writes `id <n>` over serial, reads `info` back, and prints the banner only after
+verification. Numbers never move between MAC addresses.
+
+The durable inventory is
+`~/Library/Application Support/Lightweave/autoflash/devices.json`. Keep this
+file when reinstalling or moving the factory station. It also retains the
+one-time erase state. The conductor learns each reported MAC/ID pair and becomes
+the field-side authority, so an erased deployed performer recovers its number
+from the conductor after registering.
+
+The LaunchAgent runs a copied snapshot of this script. After deploying the
+permanent-ID release, rerun the `install --factory` command above once so an
+existing factory station gets the ID-assignment/banner behavior. Reinstalling
+preserves `devices.json`. On its first run with a legacy registry, the watcher
+may ask you to scan the remaining known boards before it allocates a new number;
+this prevents plug order from duplicating a number already stored on a board.
 
 The USB/chip signature is a strong fleet check, not a unique board-model ID; do
 not attach unrelated CH340 ESP32 hardware while enabled. A failure is retried

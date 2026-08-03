@@ -29,9 +29,10 @@
 // v5: BeaconMsg carries runtime power policy (sleep intervals + LED schedule).
 // v6: PowerPolicy carries UTC epoch seconds for aligned sleep/update rendezvous.
 // v7: BeaconMsg carries USB power-bank keepalive pulse settings.
+// v8: TableRow carries a permanent numeric ID and optional-position flags.
 // MSG_ROSTER was added without a protocol bump: it is a new optional message
 // type, and older receivers safely ignore unknown types.
-static constexpr uint8_t PROTO_VERSION = 7;
+static constexpr uint8_t PROTO_VERSION = 8;
 
 // BeaconMsg.flags bits.
 // FIELD_AWAKE: conductor-commanded override — "the field should be awake now,
@@ -46,7 +47,7 @@ enum MsgType : uint8_t {
   MSG_BEACON   = 0,  // conductor -> all: clock + pattern config (hot path)
   MSG_REGISTER = 1,  // performer -> conductor: announce my MAC + firmware
   MSG_ROSTER   = 2,  // conductor -> all: finalized roster        (Half 2)
-  MSG_TABLE    = 3,  // conductor -> all: MAC->(x,y) layout chunk  (Half 2)
+  MSG_TABLE    = 3,  // conductor -> all: MAC->ID+optional position inventory
   MSG_ACK      = 4,  // generic acknowledgement                   (Half 2)
   MSG_POWER    = 5,  // performer -> conductor: INA228 energy telemetry
   MSG_OTA_BEGIN = 6, // conductor -> all: begin field firmware OTA
@@ -120,21 +121,23 @@ typedef struct __attribute__((packed)) {
   char      version[FIRMWARE_VERSION_MAX];  // human release version, NUL-padded
 } RegisterMsg;
 
-// One row of the layout table on the wire: a node's MAC and its (x,y) position.
+// One row of the conductor inventory on the wire. ID belongs to the physical
+// board; position is optional and deployment-specific.
 typedef struct __attribute__((packed)) {
-  uint8_t mac[6];
-  float   x;
-  float   y;
-} TableRow;  // 14 bytes
+  uint8_t  mac[6];
+  uint16_t id;
+  uint8_t  flags;
+  float    x;
+  float    y;
+} TableRow;  // 17 bytes
 
 // Rows per MSG_TABLE packet. ESP-NOW caps the payload at 250 B; the header + chunk
-// fields are 9 B, so (250 - 9) / 14 = 17 rows fit (a 247 B packet at full).
-static constexpr uint8_t TABLE_ROWS_PER_MSG = 17;
+// fields are 9 B, so (250 - 9) / 17 = 14 rows fit (a 247 B packet at full).
+static constexpr uint8_t TABLE_ROWS_PER_MSG = 14;
 
-// type = MSG_TABLE. The conductor's authoritative MAC->(x,y) map, broadcast in
-// chunks (a 60-node table won't fit one packet). A node scans every chunk for its
-// own MAC and adopts + caches its (x,y). `chunk`/`chunks` let a receiver tell how
-// much of the table it has seen; positions are static, so it is sent occasionally.
+// type = MSG_TABLE. The conductor's authoritative inventory, broadcast in
+// chunks. A node scans for its MAC and adopts + caches its permanent ID and
+// optional position. `chunk`/`chunks` describe one inventory round.
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;
   uint8_t   chunk;   // this chunk's index, 0..chunks-1

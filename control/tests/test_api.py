@@ -2304,4 +2304,4 @@ def test_replace_endpoint_moves_position_to_spare() -> None:
     assert response.json()["new_mac"] == new_mac
     assert old["position"] == "Missing"
     assert new["position"] == "Set"
-    assert new["label"] == "#18"
+    assert new["label"] == "#57"

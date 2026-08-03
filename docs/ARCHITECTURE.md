@@ -45,11 +45,17 @@ two conductors at once). One image + NVS role removes that entirely.
 
 ## 3. Identity vs. position — keep them separate
 
-- **Identity = the ESP32 MAC address.** **[done]** Read at boot
+- **Machine identity = the ESP32 MAC address.** **[done]** Read at boot
   (`esp_read_mac`/`ESP_MAC_WIFI_STA`), shown in `info`, and reported in REGISTER so
   the conductor's roster is MAC-keyed. Globally unique, burned in, zero
-  provisioning, no collisions. The friendly `id` persists as a human label, but the
-  MAC is authoritative. (Layout table keying on MAC is Half 2.)
+  provisioning, no collisions. The MAC remains authoritative for routing.
+- **Board number = permanent human identity.** **[done; hardware rollout pending]**
+  Each MAC receives one unique positive `id` that is printed on and follows the
+  physical board, independent of field placement. The conductor retains the
+  MAC-to-ID inventory while a board is offline and rehydrates erased performer
+  NVS from the next registration. The factory watcher adopts an existing ID or
+  atomically allocates the lowest unused number, verifies it on the board, and
+  prints a prominent label prompt.
 - **Position = `(x, y)`.** **[done, manual]** Per-deployment, changes whenever the
   field is re-laid. **Relative geometry only — no GPS / metric coords needed**;
   patterns (waves, ripples) care about relative positions, so normalized image
@@ -147,23 +153,24 @@ anchor to 100%. Operators can also click **Sync to 100%** per metered node after
 charging. This is a representative-sample tool for sizing Milestone 3's power
 levers (§8.1, Lever 2 below), not a requirement to install INA228 on every node.
 
-## 5. Layout table — conductor-authoritative `MAC → (x,y)` **[done]**
+## 5. Node inventory and layout - conductor-authoritative **[done]**
 
-The conductor holds the authoritative field map and broadcasts it; each node finds
-its own MAC, adopts its `(x,y)`, and **caches it in NVS**. Edit one table to
-re-arrange the whole field.
+The conductor holds `MAC → permanent ID + optional (x,y)` and broadcasts it.
+Each node finds its own MAC, adopts its assignment, and **caches it in NVS**.
+Board identity survives rearrangement because clearing or moving a position does
+not remove its inventory row or change its number.
 
 - **The conductor is authoritative and stores the table in its own NVS.** The
   field runs with **no laptop present** — the conductor is the coordination point
   for the table just as it is for the clock and the pattern config.
 - Resilient: a node needs to hear the table only once, then survives on the cache.
-- Cheap: 14 B/node on the wire (`TableRow`) → ~840 B for 60 nodes → ~4 `MSG_TABLE`
-  packets (17 rows each). Steady-state rebroadcast is a slow backstop
+- Cheap: 17 B/node on the wire (`TableRow`) gives 14 rows per `MSG_TABLE` packet.
+  Steady-state rebroadcast is a slow backstop
   (`TABLE_INTERVAL_US`, 60 s — positions are static and cached in NVS); the
   moments that actually need the table travel out of band: `assign` broadcasts
   the full table immediately, and a REGISTER from a node that is **new to the
-  roster or unprovisioned (id 0)** gets an immediate **single-row reply**
-  (23 B). The row reply is the delivery guarantee under radio duty-cycling: a
+  roster, unprovisioned (id 0), or reporting a conflicting ID** gets an immediate
+  **single-row reply**. The row reply is the delivery guarantee under radio duty-cycling: a
   REGISTER is the one moment the conductor provably knows that node's radio is
   on (TX is gated on radio-up), so the reply lands inside the sender's open
   listen window instead of playing the ~13%-per-broadcast lottery, and a missed
@@ -171,14 +178,17 @@ re-arrange the whole field.
   (all nodes known + provisioned) costs zero table traffic beyond the backstop.
 
 Implementation: the table logic is the dependency-free, host-tested
-`include/table.h` (`tableSet`/`tableLookup`/`tableRemove`); the wire side —
+`include/table.h` (unique-ID adoption, optional placement, legacy migration); the wire side -
 chunk math, receive-side length validation, own-row scan, and the row-reply
 decision + builder (`tableRowReplyWanted`/`tableRowBuild`) — is the equally
 pure, host-tested `include/table_wire.h`; `main.cpp` owns the NVS
 blob, the radio calls, the reply queue (stash in the recv callback, drain in
 `loop()` — same shape as the power-report queue), and the node-side adoption. The conductor edits it
 over serial — `assign <mac> <x> <y>`, `table`, `forget <mac>` — and pushes the
-change immediately. A node stashes its row in the recv callback and applies +
+change immediately.
+REGISTER reports are reconciled in `loop()` so a factory number is persisted
+without writing NVS inside the radio callback.
+A node stashes its row in the recv callback and applies +
 `identitySave()`s it from `loop()` (no flash write in the callback). Verified on
 hardware: a node adopts a position set only on the conductor, with no serial to
 that node, and keeps it across a reboot. Manual `pos x y` over serial remains as a
@@ -186,7 +196,8 @@ fallback/override for tests and stragglers.
 
 ### 5.1 Node replacement **[done via assign + forget]**
 
-A dead lamp's spare has a new MAC, so replacement is a **table edit**, not a
+A dead lamp's spare has a new MAC and keeps its own printed number, so
+replacement is a **table edit**, not a
 re-calibration — because positions are MAC-keyed and the table is
 conductor-authoritative. Physically drop the spare into the dead one's spot, then
 transfer the position from the old MAC to the new one:
@@ -195,7 +206,10 @@ transfer the position from the old MAC to the new one:
 2. Operator runs `assign <newMAC> <x> <y>` then `forget <oldMAC>` on the conductor
    (a single `replace <oldMAC> <newMAC>` convenience command is a possible later
    nicety, but the two existing commands already cover it).
-3. Conductor rebroadcasts; the spare caches its `(x,y)` to NVS and joins the field.
+3. Conductor rebroadcasts; the spare caches its own ID plus `(x,y)` and joins the field.
+
+The old board keeps its permanent number in inventory with no position. Numbers
+follow boards, never locations.
 
 No drone, no re-fly — a single swap is one command. Getting the new MAC: read it
 from the spare's serial `info`, or label spares with their MAC, or let the
@@ -331,8 +345,9 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   builds a MAC-keyed roster (`roster` serial command). `fw` is wire
   compatibility (`PROTO_VERSION`); `version` + `build` + `dirty` are the OTA
   safety marker that catches same-protocol stale firmware.
-- **[done]** `MSG_TABLE`: the conductor broadcasts the layout table in chunks
-  (`TableRow` ×17/packet); nodes adopt their own row. `chunk`/`chunks` fields let a
+- **[done]** `MSG_TABLE`: the conductor broadcasts inventory in chunks
+  (`TableRow` x14/packet); nodes adopt their permanent ID and optional position.
+  `chunk`/`chunks` fields let a
   receiver tell how much it has seen.
 - **[done]** `MSG_POWER`: an INA228-instrumented performer unicasts its
   hardware-accumulated energy/charge to the conductor (§4.2), reusing the
@@ -467,7 +482,7 @@ not required for the main installation behavior.
 | 2 — NVS identity + position-aware sweep | ✅ done, hardware-verified |
 | Refactor — symmetric runtime role + NVS pattern persistence + rainbow drift pattern | ✅ done, hardware-verified |
 | Protocol foundation, Half 1 — typed header, MAC identity, bidirectional ESP-NOW, registration + roster | ✅ done, hardware-verified |
-| Protocol foundation, Half 2 — MAC→(x,y) layout table broadcast + NVS cache (`assign`/`table`/`forget`) | ✅ done, hardware-verified |
+| Protocol foundation, Half 2 - MAC→ID+optional-position inventory broadcast + NVS cache (`assign`/`table`/`forget`) | ✅ code-complete; v7 position path hardware-verified, v8 ID rehydration pending |
 | Control plane - structured machine Pi↔conductor serial (bulk table/show-program) | ✅ UI/API, authenticated remote boundary, and Pi packaging done; physical Pi/tunnel rollout pending |
 | Auto-calibration — register / roster / blink + laptop CV | 📐 planned |
 | 3 — power management (radio duty-cycle, schedule deep-sleep, optional LDR fallback, INA228 energy monitor) | 🛠 in progress — Lever 1 Stage A (performer radio duty-cycle) ✅ done + host-tested + hardware-verified + measured (85→~55 mA @ 12V); Stage B (CPU light-sleep between work, `napsched.h`) ✅ hardware-verified on bench 2026-07-03 (power re-measure owed); schedule-driven deep sleep ✅ code-complete + host-tested + UI/API built, hardware verification owed; photodiode dusk sensing is now optional/fallback; INA228 instrumentation (§4.2) ✅ firmware done + host-tested (`powermon.h`, `MSG_POWER`), awaiting the chip |
