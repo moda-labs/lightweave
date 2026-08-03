@@ -11,7 +11,7 @@ next steps only.
 (**149 pass**) is green; control tests (**299 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-03): **physical boards now have permanent numeric IDs
+Latest locally (2026-08-03): **the v0.5.0 release adds permanent numeric IDs
 backed by their immutable MAC addresses.** The conductor persists every learned
 `MAC → ID` inventory row independently of field position, shows the ID while a
 board is offline, rejects duplicate/conflicting reports, and sends the
@@ -20,9 +20,12 @@ v7 position-only NVS tables migrate without losing coordinates; the wire change
 bumps the field to protocol v8. The FireBeetle watcher upgrades its existing
 device registry in place, adopts a valid on-board ID or allocates the lowest
 unused positive number, writes and reads it back over serial, and prints a large
-`BOARD #n - LABEL THIS BOARD` banner even when firmware is already current.
-Hardware rollout is pending the next promoted release; flash all boards together
-for the v8 protocol change. Before inventorying, rerun the documented
+`BOARD #n - LABEL THIS BOARD` banner even when firmware is already current. The
+Pi-attached conductor has been direct-flashed to protocol v8 with its NVS
+inventory preserved. Performer inventory/tagging remains pending the promoted
+v0.5.0 artifact; after publication, refresh the conductor from that exact
+artifact and flash all performers together for the v8 protocol change. Before
+inventorying, rerun the documented
 `firebeetle_autoflash.py install --factory` command: the LaunchAgent runs a
 copied script and does not gain this behavior from firmware promotion alone.
 The existing `devices.json` is preserved; its first safe migration may require
@@ -456,7 +459,7 @@ power measurement):
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 145) and control tests (293): sync
+- **Host unit tests** (`test/test_logic/`, 149) and control tests (299): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),
@@ -868,7 +871,7 @@ field. Four independent layers guarantee daytime testability:
    and listens for a beacon before it may re-sleep — a flagged beacon pins it
    awake (60 s TTL, continuously refreshed). Summon latency for the whole field:
    ≤ one resample interval. Historical note: this originally grew the wire format
-   to `PROTO_VERSION 2`; the current protocol is **v7**, and every protocol bump
+   to `PROTO_VERSION 2`; the current protocol is **v8**, and every protocol bump
    still means reflashing every board together.
 2. **Any power-cycle boots awake** (cold boot starts in "night", won't dusk-sleep
    for 10 min, 60 s light debounce on top). Per-lantern physical override via the

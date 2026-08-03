@@ -18,8 +18,9 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
 - **Resilient synchronization.** Performers lock to the conductor clock, then
   free-run through missed beacons and re-lock when packets return. A dropped packet
   should not blank the field.
-- **Position-aware patterns.** The conductor stores the field layout as
-  `MAC -> (x, y)`. Each lantern evaluates `f(x, y, t)` locally, which makes waves
+- **Position-aware patterns.** The conductor stores each board as
+  `MAC -> permanent ID + optional (x, y)`. Each lantern evaluates `f(x, y, t)`
+  locally, which makes waves
   and sweeps scale from a few nodes to a full installation without increasing
   radio bandwidth.
 - **Offline operator UI.** A FastAPI control plane can run on a laptop or
@@ -32,7 +33,7 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   native unit tests, so sync math, pattern math, roster/table logic, power policy,
   and OTA helpers can be tested without hardware.
 
-Current release: `0.4.0`. The bench system has been verified with one conductor
+Current release: `0.5.0`. The bench system has been verified with one conductor
 and two performers for sync, layout assignment, pattern control, runtime power
 policy, and the local web control plane. Field-wide OTA is implemented and has
 completed successful bench installs, including same-protocol mixed-firmware
@@ -68,9 +69,10 @@ performer ESP32 lanterns
 SK6812 RGBW rings
 ```
 
-The conductor is authoritative for the field table and live show settings. The
-control server is an admin surface, not a runtime dependency: once settings are
-saved to the conductor, the field keeps running if the laptop or Pi is unplugged.
+The conductor is authoritative for permanent board identity, the field layout,
+and live show settings. The control server is an admin surface, not a runtime
+dependency: once settings are saved to the conductor, the field keeps running if
+the laptop or Pi is unplugged.
 
 ## Captive web UI
 

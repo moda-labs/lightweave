@@ -21,8 +21,13 @@ pio run -e devkitc -t upload --upload-port /dev/cu.usbserial-XXXX
 # 4. Provision + watch it run
 pio device monitor -p /dev/cu.usbserial-XXXX -b 115200   # Ctrl-A then K to quit
 #   then type:  role performer   (or 'role conductor' for the one conductor)
-#               id 1 / pos 0 0   as needed
+#               id <unused-positive-id> / pos 0 0   as needed
 ```
+
+For production FireBeetles, prefer the automatic watcher documented below: it
+allocates the lowest unused permanent ID, verifies it, and prints the physical
+label. Manual `id` assignment is a fallback only; first verify the number is not
+already present in the conductor inventory or the watcher's `devices.json`.
 
 Every node runs the **same image**; role lives in NVS (default performer) and is
 set over serial with `role conductor|performer`. A healthy performer prints
@@ -169,9 +174,9 @@ EOF
 Opening the CP2102 port can still race the ESP32 boot/reset path: the first
 command you write may land while the bootloader/app is still coming up, so it
 gets lost even though later output looks normal. This showed up while setting a
-performer's friendly ID after flashing: `id 1` appeared to do nothing until we
-waited for boot to settle, sent a blank newline to wake the CLI, then sent the
-command and verified with `info`.
+performer's friendly ID after flashing appeared to do nothing until we waited
+for boot to settle, sent a blank newline to wake the CLI, then sent the command
+and verified with `info`.
 
 Reliable scripted shape:
 
@@ -182,7 +187,7 @@ time.sleep(1.0)
 s.reset_input_buffer()
 s.write(b'\n'); s.flush()       # wake/clear the line-oriented CLI
 time.sleep(0.2)
-s.write(b'id 1\n'); s.flush()
+s.write(b'id 17\n'); s.flush()  # example only: first verify 17 is unused
 time.sleep(0.5)
 s.write(b'info\n'); s.flush()   # verify the command actually persisted
 ```

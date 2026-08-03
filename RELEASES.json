@@ -2,6 +2,23 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.5.0",
+      "date": "2026-08-03",
+      "title": "Permanent performer IDs",
+      "control_changes": [
+        "Added stable numeric performer IDs in the control UI, including while boards are offline.",
+        "Separated permanent board identity from deployment position so replacement boards keep their own physical labels.",
+        "Added explicit duplicate-ID conflict visibility and safer performer inventory management."
+      ],
+      "firmware_changes": [
+        "Added conductor-authoritative MAC-to-ID inventory with recovery after performer NVS is erased.",
+        "Added protocol-v8 inventory rows carrying permanent IDs and optional positions.",
+        "Updated the factory-watcher tooling to assign FireBeetle IDs, verify readback, and print physical-label banners after its one-time install --factory refresh.",
+        "Migrated existing protocol-v7 position tables without losing deployment coordinates.",
+        "Protocol v8 requires the conductor and all performers to be flashed together from this release."
+      ]
+    },
+    {
       "version": "0.4.0",
       "date": "2026-08-01",
       "title": "Safe pull-based field releases",
