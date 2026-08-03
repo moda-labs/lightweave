@@ -23,6 +23,32 @@ find_draft_id() {
     --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\" and .draft == true) | .id"
 }
 
+wait_for_draft_id() {
+  attempts=${RELEASE_DRAFT_LOOKUP_ATTEMPTS:-10}
+  delay_s=${RELEASE_DRAFT_LOOKUP_DELAY_S:-1}
+  attempt=1
+  while [ "$attempt" -le "$attempts" ]; do
+    candidate=$(find_draft_id)
+    case "$candidate" in
+      '') ;;
+      *[!0-9]*)
+        echo "expected exactly one numeric draft release ID" >&2
+        return 1
+        ;;
+      *)
+        printf '%s\n' "$candidate"
+        return 0
+        ;;
+    esac
+    if [ "$attempt" -lt "$attempts" ]; then
+      sleep "$delay_s"
+    fi
+    attempt=$((attempt + 1))
+  done
+  echo "draft release did not become visible after ${attempts} attempts" >&2
+  return 1
+}
+
 if draft=$(gh api "$release_api" --jq .draft 2>"$verify_dir/api-error"); then
   if [ "$draft" = false ]; then
     verify_asset_set
@@ -51,7 +77,7 @@ else
       --title "Lightweave ${RELEASE_TAG}" \
       --verify-tag \
       --generate-notes
-    draft_id=$(find_draft_id)
+    draft_id=$(wait_for_draft_id)
   fi
   case "$draft_id" in
     ''|*[!0-9]*) echo "expected exactly one numeric draft release ID" >&2; exit 1 ;;
