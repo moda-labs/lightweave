@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "manifest_sha256": "b4acb354108abbda483f8201094f356ae9399855e54fb25ac07e1a134d85969b",
-  "manifest_url": "https://github.com/underminedsk/lightweave/releases/download/v0.5.0/lightweave-release.json",
+  "manifest_sha256": "6c174b69771c8a1283aea9e0111dadd7c3968e720001a274ef47e6809e935f92",
+  "manifest_url": "https://github.com/underminedsk/lightweave/releases/download/v0.5.1/lightweave-release.json",
   "schema_version": 1
 }
