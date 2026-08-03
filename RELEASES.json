@@ -2,6 +2,19 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.5.1",
+      "date": "2026-08-03",
+      "title": "Reliable Pi release activation",
+      "control_changes": [
+        "Fixed first-time Pi release activation by making commit-specific Python environments accessible to the unprivileged control service.",
+        "Repaired the permissions of an already-built release environment before safely reusing it."
+      ],
+      "firmware_changes": [
+        "Rebuilt the protocol-v8 permanent-ID firmware from the reviewed hotfix commit; runtime performer behavior is unchanged from v0.5.0.",
+        "Protocol v8 still requires the conductor and all protocol-v7 performers to be flashed together."
+      ]
+    },
+    {
       "version": "0.5.0",
       "date": "2026-08-03",
       "title": "Permanent performer IDs",
