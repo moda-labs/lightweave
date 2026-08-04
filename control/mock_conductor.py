@@ -264,6 +264,52 @@ class MockConductor:
             "new_mac": new.mac,
         }
 
+    def reserve_id(self, mac: str, reported_id: int = 0) -> dict[str, Any]:
+        normalized = mac.upper()
+        existing = self._find(normalized)
+        if existing and existing.node_id:
+            if reported_id not in {0, existing.node_id}:
+                return {"ok": False, "error": "permanent ID conflict"}
+            return {
+                "ok": True,
+                "message": "permanent ID already reserved",
+                "node_id": existing.node_id,
+                "created": False,
+            }
+
+        owner = next(
+            (item for item in self._lanterns if reported_id and item.node_id == reported_id),
+            None,
+        )
+        if owner and owner.mac != normalized:
+            return {"ok": False, "error": "permanent ID conflict"}
+        used = {item.node_id for item in self._lanterns if item.node_id}
+        node_id = reported_id or next(
+            candidate for candidate in range(1, 65536) if candidate not in used
+        )
+        if existing:
+            existing.node_id = node_id
+            existing.label = f"#{node_id}"
+        else:
+            self._lanterns.append(
+                Lantern(
+                    mac=normalized,
+                    label=f"#{node_id}",
+                    node_id=node_id,
+                    status="missing",
+                    last_seen_s=0,
+                    x=None,
+                    y=None,
+                )
+            )
+        self._event(f"reserve_id {normalized} id={node_id}")
+        return {
+            "ok": True,
+            "message": "permanent ID reserved",
+            "node_id": node_id,
+            "created": True,
+        }
+
     def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str]) -> dict[str, Any]:
         self.pattern = {"pattern": pattern, "brightness": brightness, "params": dict(params)}
         self._event(f"pattern={pattern} bri={brightness}")

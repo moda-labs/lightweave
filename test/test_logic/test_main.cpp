@@ -995,6 +995,41 @@ void test_table_permanent_ids_are_unique_and_survive_position_changes() {
   TEST_ASSERT_TRUE(tableValid(t));
 }
 
+void test_table_reserves_lowest_unused_identity_once() {
+  LayoutTable t;
+  tableInit(t);
+  uint8_t a[6], b[6], c[6];
+  macN(a, 1);
+  macN(b, 2);
+  macN(c, 3);
+  TEST_ASSERT_EQUAL(TABLE_ID_ADOPTED, tableAdoptIdentity(t, a, 1));
+  TEST_ASSERT_EQUAL(TABLE_ID_ADOPTED, tableAdoptIdentity(t, b, 3));
+
+  TableReserveResult created = tableReserveIdentity(t, c);
+  TEST_ASSERT_EQUAL(TABLE_RESERVE_CREATED, created.status);
+  TEST_ASSERT_EQUAL_UINT16(2, created.id);
+  TEST_ASSERT_EQUAL_UINT16(2, t.entries[tableFind(t, c)].id);
+
+  TableReserveResult existing = tableReserveIdentity(t, c);
+  TEST_ASSERT_EQUAL(TABLE_RESERVE_EXISTING, existing.status);
+  TEST_ASSERT_EQUAL_UINT16(2, existing.id);
+  TEST_ASSERT_EQUAL_UINT8(3, t.count);
+  TEST_ASSERT_TRUE(tableValid(t));
+}
+
+void test_table_reservation_preserves_unpositioned_row() {
+  LayoutTable t;
+  tableInit(t);
+  uint8_t mac[6];
+  macN(mac, 9);
+  TEST_ASSERT_TRUE(tableEnsure(t, mac) >= 0);
+
+  TableReserveResult reserved = tableReserveIdentity(t, mac);
+  TEST_ASSERT_EQUAL(TABLE_RESERVE_CREATED, reserved.status);
+  TEST_ASSERT_EQUAL_UINT16(1, reserved.id);
+  TEST_ASSERT_FALSE(tableHasPosition(t.entries[tableFind(t, mac)]));
+}
+
 void test_table_reports_live_identity_conflicts() {
   LayoutTable t;
   tableInit(t);
@@ -1698,6 +1733,19 @@ void test_serial_json_assign_parses_mac_and_position() {
   TEST_ASSERT_EQUAL_FLOAT(0.75f, cmd.y);
 }
 
+void test_serial_json_reserve_id_parses_mac() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":8,\"cmd\":\"reserve_id\",\"mac\":\"8C:94:DF:57:7F:14\",\"reported_id\":53}",
+      cmd, error));
+  TEST_ASSERT_NULL(error);
+  TEST_ASSERT_EQUAL_INT(SJ_RESERVE_ID, cmd.kind);
+  TEST_ASSERT_EQUAL_HEX8(0x8C, cmd.mac[0]);
+  TEST_ASSERT_EQUAL_UINT16(53, cmd.reported_id);
+}
+
 void test_serial_json_pattern_maps_name_brightness_and_params() {
   SerialJsonCommand cmd;
   const char* error = nullptr;
@@ -2217,6 +2265,8 @@ int main(int, char**) {
   RUN_TEST(test_table_set_and_lookup);
   RUN_TEST(test_table_set_updates_in_place);
   RUN_TEST(test_table_permanent_ids_are_unique_and_survive_position_changes);
+  RUN_TEST(test_table_reserves_lowest_unused_identity_once);
+  RUN_TEST(test_table_reservation_preserves_unpositioned_row);
   RUN_TEST(test_table_reports_live_identity_conflicts);
   RUN_TEST(test_table_migrates_legacy_positions_without_inventing_ids);
   RUN_TEST(test_table_remove);
@@ -2268,6 +2318,7 @@ int main(int, char**) {
   RUN_TEST(test_mac_format_roundtrip);
   RUN_TEST(test_pattern_boot_safe);
   RUN_TEST(test_serial_json_assign_parses_mac_and_position);
+  RUN_TEST(test_serial_json_reserve_id_parses_mac);
   RUN_TEST(test_serial_json_pattern_maps_name_brightness_and_params);
   RUN_TEST(test_serial_json_glow_maps_hue_and_saturation_params);
   RUN_TEST(test_serial_json_white_maps_pattern_name);

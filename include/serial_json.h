@@ -23,6 +23,7 @@ enum SerialJsonKind {
   SJ_ASSIGN,
   SJ_FORGET,
   SJ_REPLACE,
+  SJ_RESERVE_ID,
   SJ_PATTERN,
   SJ_BLACKOUT,
   SJ_POWER_POLICY,
@@ -40,6 +41,7 @@ struct SerialJsonCommand {
   uint8_t mac[6] = {0};
   uint8_t old_mac[6] = {0};
   uint8_t new_mac[6] = {0};
+  uint16_t reported_id = 0;
   float x = 0.0f;
   float y = 0.0f;
   uint16_t pattern_id = patterns::GLOW;
@@ -236,6 +238,20 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
         !sjMac(json, "new_mac", cmd.new_mac)) {
       error = "bad replace";
       return false;
+    }
+  } else if (!strcmp(norm, "reserveid")) {
+    cmd.kind = SJ_RESERVE_ID;
+    if (!sjMac(json, "mac", cmd.mac)) {
+      error = "bad mac";
+      return false;
+    }
+    uint32_t reported_id = 0;
+    if (sjUint(json, "reported_id", reported_id)) {
+      if (reported_id > 65535) {
+        error = "bad reported id";
+        return false;
+      }
+      cmd.reported_id = (uint16_t)reported_id;
     }
   } else if (!strcmp(norm, "pattern")) {
     cmd.kind = SJ_PATTERN;

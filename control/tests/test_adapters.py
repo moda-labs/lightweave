@@ -52,6 +52,30 @@ def test_assign_maps_to_json_command() -> None:
     }
 
 
+def test_reserve_id_maps_to_json_command_and_returns_identity() -> None:
+    transport = FakeTransport([
+        json.dumps({
+            "id": 1,
+            "ok": True,
+            "message": "permanent ID reserved",
+            "node_id": 54,
+            "created": True,
+        })
+    ])
+    conductor = JsonLineSerialConductor(transport)
+
+    ack = conductor.reserve_id("AA:BB:CC:DD:EE:FF", 54)
+
+    assert ack["node_id"] == 54
+    assert ack["created"] is True
+    assert json.loads(transport.writes[0]) == {
+        "id": 1,
+        "cmd": "reserve_id",
+        "mac": "AA:BB:CC:DD:EE:FF",
+        "reported_id": 54,
+    }
+
+
 def test_pattern_command_includes_brightness_and_params() -> None:
     transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "pattern changed to Sweep"})])
     conductor = JsonLineSerialConductor(transport)

@@ -1023,6 +1023,7 @@ static void printDiag() {
 //   roster               (conductor) list nodes that have registered (MAC/id/fw)
 //   table                (conductor) print permanent IDs + optional positions
 //   assign <mac> <x> <y> (conductor) set a node's position by MAC; saved+broadcast
+//   reserve-id <mac>     (conductor JSON RPC) reserve/return permanent ID
 //   forget <mac>         (conductor) clear position; permanent ID remains
 //   role <conductor|performer>   set this node's role and save to NVS
 //   id <n>               set this node's id and save to NVS
@@ -1166,6 +1167,16 @@ static void jsonOk(uint32_t id, const char* message) {
 static void jsonError(uint32_t id, const char* error) {
   Serial.printf("{\"id\":%lu,\"ok\":false,\"error\":\"%s\"}\n",
                 (unsigned long)id, error);
+}
+
+static void jsonReservedId(uint32_t request_id, uint16_t node_id,
+                           bool created) {
+  Serial.printf(
+      "{\"id\":%lu,\"ok\":true,\"message\":\"%s\",\"node_id\":%u,"
+      "\"created\":%s}\n",
+      (unsigned long)request_id,
+      created ? "permanent ID reserved" : "permanent ID already reserved",
+      node_id, created ? "true" : "false");
 }
 
 static void saveBeaconSnapshot() {
@@ -1858,6 +1869,44 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       tableSave();
       broadcastTable();
       jsonOk(cmd.id, "replaced");
+    }
+  } else if (cmd.kind == SJ_RESERVE_ID) {
+    if (!isConductor()) {
+      jsonError(cmd.id, "reserve_id is conductor-only");
+    } else {
+      TableReserveResult reserved = {TABLE_RESERVE_EXISTING, 0};
+      bool created = false;
+      if (cmd.reported_id) {
+        TableIdentityResult adopted =
+            tableAdoptIdentity(g_table, cmd.mac, cmd.reported_id);
+        if (adopted == TABLE_ID_CONFLICT) {
+          jsonError(cmd.id, "permanent ID conflict");
+          return;
+        }
+        if (adopted == TABLE_ID_FULL) {
+          jsonError(cmd.id, "table full");
+          return;
+        }
+        created = adopted == TABLE_ID_ADOPTED;
+        int own = tableFind(g_table, cmd.mac);
+        reserved.id = own >= 0 ? g_table.entries[own].id : 0;
+      } else {
+        reserved = tableReserveIdentity(g_table, cmd.mac);
+        if (reserved.status == TABLE_RESERVE_FULL) {
+          jsonError(cmd.id, "table full");
+          return;
+        }
+        if (reserved.status == TABLE_RESERVE_EXHAUSTED) {
+          jsonError(cmd.id, "no permanent IDs remain");
+          return;
+        }
+        created = reserved.status == TABLE_RESERVE_CREATED;
+      }
+      if (created) {
+        tableSave();
+        broadcastTable();
+      }
+      jsonReservedId(cmd.id, reserved.id, created);
     }
   } else if (cmd.kind == SJ_PATTERN) {
     portENTER_CRITICAL(&g_sync_mux);

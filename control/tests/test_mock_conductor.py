@@ -228,3 +228,31 @@ def test_replace_rejects_unpositioned_old_lantern() -> None:
     ack = conductor.replace("8C:94:DF:57:7F:14", "A0:B7:65:11:44:91")
 
     assert ack == {"ok": False, "error": "old lantern has no position to replace"}
+
+
+def test_reserve_id_is_stable_and_uses_lowest_unused_number() -> None:
+    conductor = MockConductor()
+    mac = "AA:BB:CC:DD:EE:FF"
+
+    created = conductor.reserve_id(mac)
+    repeated = conductor.reserve_id(mac)
+
+    used = {item.node_id for item in conductor._lanterns if item.mac != mac and item.node_id}
+    assert created["node_id"] == next(candidate for candidate in range(1, 65536) if candidate not in used)
+    assert created["created"] is True
+    assert repeated == {
+        "ok": True,
+        "message": "permanent ID already reserved",
+        "node_id": created["node_id"],
+        "created": False,
+    }
+
+
+def test_reserve_id_adopts_unclaimed_reported_id_and_rejects_conflict() -> None:
+    conductor = MockConductor()
+    first = conductor.reserve_id("AA:BB:CC:DD:EE:01", 53)
+    conflict = conductor.reserve_id("AA:BB:CC:DD:EE:02", 53)
+
+    assert first["node_id"] == 53
+    assert first["created"] is True
+    assert conflict == {"ok": False, "error": "permanent ID conflict"}

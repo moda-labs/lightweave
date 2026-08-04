@@ -50,6 +50,18 @@ enum TableIdentityResult : uint8_t {
   TABLE_ID_FULL,
 };
 
+enum TableReserveStatus : uint8_t {
+  TABLE_RESERVE_EXISTING = 0,
+  TABLE_RESERVE_CREATED,
+  TABLE_RESERVE_FULL,
+  TABLE_RESERVE_EXHAUSTED,
+};
+
+struct TableReserveResult {
+  TableReserveStatus status;
+  uint16_t id;
+};
+
 inline void tableInit(LayoutTable& t) { memset(&t, 0, sizeof(t)); }
 
 inline int tableFind(const LayoutTable& t, const uint8_t mac[6]) {
@@ -116,6 +128,27 @@ inline TableIdentityResult tableAdoptIdentity(LayoutTable& t,
   }
   t.entries[own].id = id;
   return TABLE_ID_ADOPTED;
+}
+
+// Reserve the lowest unused permanent ID for a MAC. The conductor is the only
+// allocator, so a Pi station and a laptop station can never independently hand
+// the same physical number to different boards.
+inline TableReserveResult tableReserveIdentity(LayoutTable& t,
+                                               const uint8_t mac[6]) {
+  int own = tableFind(t, mac);
+  if (own >= 0 && t.entries[own].id != 0)
+    return {TABLE_RESERVE_EXISTING, t.entries[own].id};
+
+  uint16_t id = 1;
+  while (id != 0 && tableFindId(t, id) >= 0) id++;
+  if (id == 0) return {TABLE_RESERVE_EXHAUSTED, 0};
+
+  if (own < 0) {
+    own = tableEnsure(t, mac);
+    if (own < 0) return {TABLE_RESERVE_FULL, 0};
+  }
+  t.entries[own].id = id;
+  return {TABLE_RESERVE_CREATED, id};
 }
 
 inline bool tableSet(LayoutTable& t, const uint8_t mac[6], float x, float y) {
