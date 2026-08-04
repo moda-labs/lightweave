@@ -23,6 +23,7 @@ export CONTROL_PASSWORD_HASH="$(
 )"
 CONTROL_CONDUCTOR=serial \
 CONTROL_SERIAL_PORT=/dev/cu.usbserial-XXXX \
+CONTROL_SERIAL_TIMEOUT_S=8.0 \
 CONTROL_DATA_DIR=/tmp/lightweave-control \
 CONTROL_ALLOWED_ORIGINS=https://control.example.com \
 CONTROL_REQUIRE_HTTPS=true \
@@ -42,6 +43,12 @@ By default the serial transport deasserts DTR/RTS after opening so peeking at a
 running conductor does not intentionally reset it. Set
 `CONTROL_SERIAL_RESET_ON_OPEN=1` only when you want normal serial-open reset
 behavior.
+
+Serial requests default to an 8-second timeout so a full 128-board state
+snapshot has time to cross the 115200-baud UART. Keep that default for field
+deployments. If a response times out mid-frame, the transport discards the rest
+of that newline-delimited frame before accepting a later response, so one slow
+snapshot cannot corrupt the next request.
 
 Open:
 

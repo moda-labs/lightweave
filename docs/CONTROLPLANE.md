@@ -328,7 +328,10 @@ JSON and is tested with a fake transport. The serial transport deasserts
 DTR/RTS by default after opening so a running conductor is not intentionally
 reset just because the web server connected. FastAPI serial calls run through
 a serialized `asyncio.to_thread` helper so a blocking serial read does not pin
-the event loop.
+the event loop. Normal serial requests default to an 8-second timeout because a
+full 128-board state snapshot is roughly 50 KiB and needs more than four seconds
+on a 115200-baud UART. The transport reads all currently available bytes at once
+instead of polling one byte at a time.
 
 ### Machine serial protocol
 
@@ -354,7 +357,10 @@ Responses echo the request id:
 The adapter ignores human CLI/diagnostic lines and malformed JSON until it
 sees a valid JSON response with the matching `id`. If no matching response
 arrives before the timeout, the adapter raises `SerialProtocolError`, which
-the API exposes as HTTP `503`.
+the API exposes as HTTP `503`. A timed-out partial frame is never returned as a
+line: the transport discards through that frame's newline before accepting a
+later response, which keeps request IDs aligned after a slow or interrupted
+state snapshot.
 
 Firmware support lives beside the human CLI: lines beginning with `{` enter
 the machine parser in `include/serial_json.h`, while `info`, `table`, `assign`,
