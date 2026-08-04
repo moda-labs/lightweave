@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "groups.h"
+#include "led_profile.h"
 
 // The live field is 60 nodes, but identities survive board replacement. Keep
 // enough conductor-side history for a full second fleet without exhausting the
@@ -27,11 +28,13 @@ struct TableEntry {
   float    y;
   uint8_t  flags;
   uint8_t  group_id;
+  uint8_t  led_count;
 };
 
-// v9 reuses a v8 trailing padding byte for group_id, leaving the table blob size
-// and every existing field offset unchanged. Firmware still stamps an NVS schema
-// version so old padding is never interpreted as membership.
+// v9 reused one v8 trailing padding byte for group_id; v10 uses the next one for
+// led_count. The table blob size and every pre-existing field offset stay fixed.
+// Firmware still stamps an NVS schema version so old padding is never interpreted
+// as configuration.
 static_assert(sizeof(TableEntry) == 20, "TableEntry NVS layout changed");
 
 struct LayoutTable {
@@ -89,6 +92,7 @@ inline bool tableValid(const LayoutTable& t) {
   for (uint8_t i = 0; i < t.count; i++) {
     if (t.entries[i].flags & (uint8_t)~TABLE_FLAG_POSITIONED) return false;
     if (!groupIdValid(t.entries[i].group_id)) return false;
+    if (!ledCountValid(t.entries[i].led_count)) return false;
     for (uint8_t j = 0; j < i; j++) {
       if (memcmp(t.entries[i].mac, t.entries[j].mac, 6) == 0) return false;
       if (t.entries[i].id != 0 && t.entries[i].id == t.entries[j].id)
@@ -105,6 +109,7 @@ inline int tableEnsure(LayoutTable& t, const uint8_t mac[6]) {
   i = t.count++;
   memset(&t.entries[i], 0, sizeof(t.entries[i]));
   memcpy(t.entries[i].mac, mac, 6);
+  t.entries[i].led_count = DEFAULT_LED_COUNT;
   return i;
 }
 
@@ -186,6 +191,17 @@ inline bool tableSetGroup(LayoutTable& t, const uint8_t mac[6],
   return true;
 }
 
+// Change the physical emitter count without touching identity, placement, or
+// show group. Hardware profiles belong to boards, not field positions.
+inline bool tableSetLedCount(LayoutTable& t, const uint8_t mac[6],
+                             uint8_t led_count) {
+  if (!ledCountValid(led_count)) return false;
+  int i = tableFind(t, mac);
+  if (i < 0) return false;
+  t.entries[i].led_count = led_count;
+  return true;
+}
+
 // Look up a node's position. Writes x,y and returns true when present.
 inline bool tableLookup(const LayoutTable& t, const uint8_t mac[6], float& x,
                         float& y) {
@@ -212,6 +228,14 @@ inline bool tableLookupGroup(const LayoutTable& t, const uint8_t mac[6],
   int i = tableFind(t, mac);
   if (i < 0) return false;
   group_id = groupIdSafe(t.entries[i].group_id);
+  return true;
+}
+
+inline bool tableLookupLedCount(const LayoutTable& t, const uint8_t mac[6],
+                                uint8_t& led_count) {
+  int i = tableFind(t, mac);
+  if (i < 0) return false;
+  led_count = ledCountSafe(t.entries[i].led_count);
   return true;
 }
 

@@ -419,7 +419,7 @@ def test_state_endpoint_returns_mock_state() -> None:
     assert body["summary"]["total"] == 9
     assert body["conductor"]["sync"] == "locked"
     assert body["conductor"]["firmware"]["version"] == "0.3.0"
-    assert body["conductor"]["firmware"]["proto"] == 9
+    assert body["conductor"]["firmware"]["proto"] == 10
     assert body["summary"]["firmware"]["consistent"] is True
     assert body["power"]["light_sleep_check_s"] == 4
     assert body["keepalive"] == {"enabled": False, "interval_ms": 10000, "pulse_ms": 100, "brightness": 64}
@@ -2278,6 +2278,21 @@ def test_group_endpoint_accepts_unpositioned_lantern() -> None:
     assert grouped.status_code == 200
     assert lantern["position"] == "Missing"
     assert lantern["group_id"] == 5
+
+
+def test_led_count_endpoint_accepts_supported_profiles_for_unpositioned_lantern() -> None:
+    conductor = MockConductor()
+    client = TestClient(create_app(conductor))
+    mac = "8C:94:DF:57:7F:14"
+
+    configured = client.post(f"/api/lanterns/{mac}/led-count", json={"led_count": 64})
+    rejected = client.post(f"/api/lanterns/{mac}/led-count", json={"led_count": 24})
+    lantern = next(item for item in client.get("/api/lanterns").json() if item["mac"] == mac)
+
+    assert configured.status_code == 200
+    assert rejected.status_code == 422
+    assert lantern["position"] == "Missing"
+    assert lantern["led_count"] == 64
 
 
 def test_calibration_apply_proposal_saves_assignments_and_skips_uncertain() -> None:

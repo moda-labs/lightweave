@@ -27,6 +27,7 @@ let releaseInfo = null;
 
 const MAP_PADDING = 0.08;
 const GROUP_COUNT = 8;
+const LED_COUNTS = [16, 32, 64];
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 3;
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
@@ -668,6 +669,17 @@ function groupOptions(selectedGroupId) {
   ).join("");
 }
 
+function ledCountSafe(value) {
+  const count = Number(value || 16);
+  return LED_COUNTS.includes(count) ? count : 16;
+}
+
+function ledCountOptions(selectedCount) {
+  return LED_COUNTS.map((count) =>
+    `<option value="${count}" ${count === selectedCount ? "selected" : ""}>${count}</option>`
+  ).join("");
+}
+
 async function assignLanternGroup(mac, groupId, control = null) {
   if (!mac) return;
   if (control) control.disabled = true;
@@ -675,6 +687,22 @@ async function assignLanternGroup(mac, groupId, control = null) {
     const ack = await api(`/api/lanterns/${encodeURIComponent(mac)}/group`, {
       method: "POST",
       body: JSON.stringify({ group_id: groupId }),
+    });
+    toast(ack.message);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    await refresh();
+  }
+}
+
+async function assignLanternLedCount(mac, ledCount, control = null) {
+  if (!mac) return;
+  if (control) control.disabled = true;
+  try {
+    const ack = await api(`/api/lanterns/${encodeURIComponent(mac)}/led-count`, {
+      method: "POST",
+      body: JSON.stringify({ led_count: ledCount }),
     });
     toast(ack.message);
   } catch (error) {
@@ -698,9 +726,11 @@ function renderRows() {
     const dotClass = isBad || isFirmwareBad ? "bad" : lantern.position === "Missing" ? "warn" : "";
     const attentionClass = lantern.attention === "None" ? "" : isBad || isFirmwareBad ? "bad" : "warn";
     const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(lantern.group_id || 0)));
+    const ledCount = ledCountSafe(lantern.led_count);
     return `<tr data-mac="${lantern.mac}" class="${lantern.mac === selectedMac ? "selected" : ""}">
       <td><strong>${escapeHtml(lantern.label)}</strong><br><span class="mono">${escapeHtml(lantern.mac)}</span></td>
       <td><select class="table-group-select" data-group-mac="${escapeHtml(lantern.mac)}" aria-label="Group for ${escapeHtml(lantern.label)}">${groupOptions(groupId)}</select></td>
+      <td><select class="table-led-select" data-led-mac="${escapeHtml(lantern.mac)}" aria-label="LED count for ${escapeHtml(lantern.label)}">${ledCountOptions(ledCount)}</select></td>
       <td><span class="status"><span class="dot ${dotClass}"></span>${statusText(lantern)}</span></td>
       <td class="${isBad ? "bad" : "ok"}">${escapeHtml(lantern.last_seen_label)}</td>
       <td class="${lantern.position === "Missing" ? "warn" : ""}">${escapeHtml(lantern.position)}</td>
@@ -720,6 +750,13 @@ function renderRows() {
       await assignLanternGroup(select.dataset.groupMac, groupId, select);
     });
   });
+  $$("#lantern-rows [data-led-mac]").forEach((select) => {
+    select.addEventListener("click", (event) => event.stopPropagation());
+    select.addEventListener("change", async (event) => {
+      event.stopPropagation();
+      await assignLanternLedCount(select.dataset.ledMac, ledCountSafe(select.value), select);
+    });
+  });
   $$("#lantern-rows [data-locate-mac]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       event.stopPropagation();
@@ -734,16 +771,18 @@ function renderDetail() {
   if (!lantern) return;
   const isOk = lantern.status === "alive" && lantern.position !== "Missing";
   const groupId = Number(lantern.group_id || 0);
+  const ledCount = ledCountSafe(lantern.led_count);
   const groupPattern = patternForGroup(groupId);
   const moveLabel = isPositioned(lantern) ? "Move" : "Place";
   $("#detail-title").textContent = `${lantern.label} is ${isOk ? "healthy" : statusText(lantern)}`;
   $("#detail-title").className = isOk ? "" : "warn";
   $("#detail-summary").textContent = detailSummary(lantern);
   $("#lantern-group").value = String(groupId);
+  $("#lantern-led-count").value = String(ledCount);
   $("#detail-tech").innerHTML = [
     `MAC ${escapeHtml(lantern.mac)} · x=${fmt(lantern.x)} y=${fmt(lantern.y)} · status=${escapeHtml(statusText(lantern))}`,
     `firmware=${firmwareHtml(lantern.firmware)}`,
-    `group=${groupId + 1} · pattern=${escapeHtml(groupPattern.pattern)} bri=${groupPattern.brightness} · seq=${state.conductor.seq}`,
+    `group=${groupId + 1} · leds=${ledCount} · pattern=${escapeHtml(groupPattern.pattern)} bri=${groupPattern.brightness} · seq=${state.conductor.seq}`,
     `power E=${fmt(lantern.power.wh)}Wh avg=${fmt(lantern.power.avg_w)}W · last report=${escapeHtml(lantern.power.last_report_label || "none")}`,
   ].join("<br>");
   $$('[data-action="move"]').forEach((button) => {
@@ -1044,7 +1083,11 @@ function renderOta() {
     setOtaControlDisabled(button, installing);
   });
   setOtaControlDisabled($("#lantern-group"), installing);
+  setOtaControlDisabled($("#lantern-led-count"), installing);
   $$("#lantern-rows [data-group-mac]").forEach((select) => {
+    setOtaControlDisabled(select, installing);
+  });
+  $$("#lantern-rows [data-led-mac]").forEach((select) => {
     setOtaControlDisabled(select, installing);
   });
   if (!installing) {
@@ -2490,6 +2533,12 @@ $("#lantern-group").addEventListener("change", async (event) => {
   if (!lantern) return;
   const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(event.target.value || 0)));
   await assignLanternGroup(lantern.mac, groupId, event.target);
+});
+
+$("#lantern-led-count").addEventListener("change", async (event) => {
+  const lantern = selectedLantern();
+  if (!lantern) return;
+  await assignLanternLedCount(lantern.mac, ledCountSafe(event.target.value), event.target);
 });
 
 $("#pattern-picker").addEventListener("click", (event) => {

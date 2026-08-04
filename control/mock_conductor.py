@@ -15,7 +15,7 @@ def _now() -> float:
 
 FIELD_FIRMWARE = {
     "version": "0.3.0",
-    "proto": 9,
+    "proto": 10,
     "build_id": 0x44D028FD,
     "build_label": "44d028fd",
     "dirty": False,
@@ -75,6 +75,7 @@ class Lantern:
     node_id: int | None = None
     firmware: dict[str, Any] = field(default_factory=lambda: deepcopy(FIELD_FIRMWARE))
     group_id: int = 0
+    led_count: int = 16
 
     def as_dict(self, now: float) -> dict[str, Any]:
         has_position = self.x is not None and self.y is not None
@@ -101,6 +102,7 @@ class Lantern:
             "position": "Set" if has_position else "Missing",
             "group_id": self.group_id,
             "group": f"Group {self.group_id + 1}",
+            "led_count": self.led_count,
             "attention": attention,
             "firmware": deepcopy(self.firmware),
             "power": {
@@ -252,6 +254,16 @@ class MockConductor:
         lantern.group_id = group_id
         self._event(f"group {lantern.mac}={group_id + 1}")
         return {"ok": True, "message": f"moved {lantern.label} to Group {group_id + 1}", "mac": lantern.mac}
+
+    def assign_led_count(self, mac: str, led_count: int) -> dict[str, Any]:
+        lantern = self._find(mac)
+        if not lantern:
+            return {"ok": False, "error": "unknown lantern"}
+        if led_count not in {16, 32, 64}:
+            return {"ok": False, "error": "invalid led count"}
+        lantern.led_count = led_count
+        self._event(f"leds {lantern.mac}={led_count}")
+        return {"ok": True, "message": f"set {lantern.label} to {led_count} LEDs", "mac": lantern.mac}
 
     def forget(self, mac: str) -> dict[str, Any]:
         lantern = self._find(mac)

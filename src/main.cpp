@@ -47,14 +47,15 @@
 #include "table.h"
 #include "table_wire.h"
 
-// 16x SK6812 RGBW ring. RMT channel 0 with SK6812 timing.
-NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0Sk6812Method> strip(LED_COUNT, LED_PIN);
+// One RGBW data chain, sized for the largest supported profile. Renderers clear
+// inactive pixels, so the same image drives 16, 32, or 64 physical emitters.
+NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0Sk6812Method> strip(MAX_LED_COUNT, LED_PIN);
 
 static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // ---- Node config in NVS (role + identity; set once over serial) --------------
 static Preferences  g_prefs;
-static NodeIdentity g_id   = {0, 0.0f, 0.0f, 0};
+static NodeIdentity g_id   = {0, 0.0f, 0.0f, 0, DEFAULT_LED_COUNT};
 static uint8_t      g_role = DEFAULT_ROLE;
 static uint8_t      g_mac[6] = {0};  // this node's WiFi STA MAC — stable identity
 
@@ -194,6 +195,7 @@ static void configLoad() {
   g_id.x = g_prefs.getFloat("x", 0.0f);
   g_id.y = g_prefs.getFloat("y", 0.0f);
   g_id.group_id = groupIdSafe(g_prefs.getUChar("grp", 0));
+  g_id.led_count = ledCountSafe(g_prefs.getUChar("leds", DEFAULT_LED_COUNT));
   g_role = g_prefs.getUChar("role", DEFAULT_ROLE);
   g_powersave = g_prefs.getBool("ps", POWERSAVE_DEFAULT != 0);
   g_dusk_on = g_prefs.getBool("dusk", DUSK_DEFAULT != 0);
@@ -267,6 +269,7 @@ static void identitySave() {
   g_prefs.putFloat("x", g_id.x);
   g_prefs.putFloat("y", g_id.y);
   g_prefs.putUChar("grp", groupIdSafe(g_id.group_id));
+  g_prefs.putUChar("leds", ledCountSafe(g_id.led_count));
   g_prefs.end();
 }
 
@@ -277,7 +280,7 @@ static void roleSave() {
 }
 
 // Protocol v7 stored only MAC + position. Keep the exact old native layout so a
-// v9 conductor still migrates existing v7 placements instead of discarding them.
+// v10 conductor still migrates existing v7 placements instead of discarding them.
 // The conductor's inventory persists as one NVS blob. Current rows carry a
 // permanent ID plus optional placement; legacy position-only rows migrate with
 // id=0 and learn the existing number from the performer's next REGISTER.
@@ -297,6 +300,12 @@ static void tableLoad() {
       for (uint8_t i = 0; i < g_table.count; i++)
         g_table.entries[i].group_id = 0;
     }
+    if (loaded && g_table.count <= TABLE_MAX && version < 4) {
+      // v9's second trailing padding byte was unspecified. Existing hardware is
+      // the original 16-emitter ring unless explicitly changed after migration.
+      for (uint8_t i = 0; i < g_table.count; i++)
+        g_table.entries[i].led_count = DEFAULT_LED_COUNT;
+    }
     current = loaded && tableValid(g_table);
   } else if (stored == sizeof(LegacyLayoutTable)) {
     LegacyLayoutTable legacy = {};
@@ -305,10 +314,10 @@ static void tableLoad() {
   }
   g_prefs.end();
   if (!current && !migrated) tableInit(g_table);
-  if ((migrated || (current && version < 3)) && isConductor()) {
+  if ((migrated || (current && version < 4)) && isConductor()) {
     g_prefs.begin("node", /*readonly*/ false);
     g_prefs.putBytes("table", &g_table, sizeof(g_table));
-    g_prefs.putUChar("table_v", 3);
+    g_prefs.putUChar("table_v", 4);
     g_prefs.end();
   }
 }
@@ -316,7 +325,7 @@ static void tableLoad() {
 static void tableSave() {
   g_prefs.begin("node", /*readonly*/ false);
   g_prefs.putBytes("table", &g_table, sizeof(g_table));
-  g_prefs.putUChar("table_v", 3);
+  g_prefs.putUChar("table_v", 4);
   g_prefs.end();
 }
 
@@ -353,6 +362,7 @@ struct RegistrationRequest {
   uint8_t mac[6];
   uint16_t reported_id;
   uint8_t reported_group;
+  uint8_t reported_led_count;
   bool mac_known;
 };
 static constexpr uint8_t ROWREQ_MAX = 8;
@@ -597,6 +607,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
         memcpy(request.mac, r.mac, 6);
         request.reported_id = r.id;
         request.reported_group = groupIdSafe(r.group_id);
+        request.reported_led_count = ledCountSafe(r.led_count);
         request.mac_known = known;
         g_rowreq_n = g_rowreq_n + 1;
       }
@@ -798,7 +809,8 @@ static void maybeRegister(int64_t t) {
   g_next_register_us = t + REGISTER_INTERVAL_US;
 
   RegisterMsg r = {{BEACON_MAGIC, PROTO_VERSION, MSG_REGISTER}, {0}, g_id.id,
-                   groupIdSafe(g_id.group_id), PROTO_VERSION,
+                   groupIdSafe(g_id.group_id), ledCountSafe(g_id.led_count),
+                   PROTO_VERSION,
                    (uint32_t)FIRMWARE_BUILD_ID,
                    (uint8_t)FIRMWARE_BUILD_DIRTY, {0}};
   firmwareCopyVersion(r.version, FIRMWARE_VERSION);
@@ -963,22 +975,25 @@ static void maybeAdoptTableAssignment() {
   float next_x = assignment.has_position ? assignment.x : 0.0f;
   float next_y = assignment.has_position ? assignment.y : 0.0f;
   uint8_t next_group = groupIdSafe(assignment.group_id);
+  uint8_t next_led_count = ledCountSafe(assignment.led_count);
   if (next_id == g_id.id && next_x == g_id.x && next_y == g_id.y &&
-      next_group == g_id.group_id) return;
+      next_group == g_id.group_id && next_led_count == g_id.led_count) return;
   bool id_changed = next_id != g_id.id;
   g_id.id = next_id;
   g_id.x = next_x;
   g_id.y = next_y;
   g_id.group_id = next_group;
+  g_id.led_count = next_led_count;
   identitySave();
   if (id_changed)
     Serial.printf("[table] adopted permanent ID #%u from conductor\n", g_id.id);
   if (assignment.has_position)
-    Serial.printf("[table] adopted position x=%.2f y=%.2f group=%u from conductor\n",
-                  g_id.x, g_id.y, (unsigned)(g_id.group_id + 1));
+    Serial.printf("[table] adopted position x=%.2f y=%.2f group=%u leds=%u from conductor\n",
+                  g_id.x, g_id.y, (unsigned)(g_id.group_id + 1),
+                  (unsigned)g_id.led_count);
   else
-    Serial.printf("[table] placement cleared; group=%u from conductor\n",
-                  (unsigned)(g_id.group_id + 1));
+    Serial.printf("[table] placement cleared; group=%u leds=%u from conductor\n",
+                  (unsigned)(g_id.group_id + 1), (unsigned)g_id.led_count);
 }
 
 // ---- Daytime deep-sleep entry (Lever 2) ---------------------------------------
@@ -1056,10 +1071,11 @@ static void printDiag() {
 // Flash identical firmware to every board, then provision each over serial:
 //   info                 print role + identity (incl. MAC) + pattern state
 //   roster               (conductor) list nodes that have registered (MAC/id/fw)
-//   table                (conductor) print permanent IDs + positions + groups
+//   table                (conductor) print permanent IDs + positions + hardware
 //   assign <mac> <x> <y> (conductor) set a node's position by MAC; saved+broadcast
 //   forget <mac>         (conductor) clear position; permanent ID remains
 //   group <mac> <1..8>  (conductor) assign any inventoried node to a show group
+//   leds <mac> <16|32|64> (conductor) set a board's active RGBW emitter count
 //   role <conductor|performer>   set this node's role and save to NVS
 //   id <n>               set this node's id and save to NVS
 //   pos <x> <y>          set this node's own (x,y) coordinate and save to NVS
@@ -1095,10 +1111,10 @@ static void printInfo() {
   b = g_beacon;
   portEXIT_CRITICAL(&g_sync_mux);
   const PatternConfig& pattern_config = beaconPattern(b, g_id.group_id);
-  Serial.printf("role=%s  id=%u  mac=%s  x=%.2f  y=%.2f  group=%u\n",
+  Serial.printf("role=%s  id=%u  mac=%s  x=%.2f  y=%.2f  group=%u  leds=%u\n",
                 isConductor() ? "CONDUCTOR" : "PERFORMER", g_id.id,
                 macStr(g_mac, mac), g_id.x, g_id.y,
-                (unsigned)(g_id.group_id + 1));
+                (unsigned)(g_id.group_id + 1), (unsigned)g_id.led_count);
   Serial.printf("  firmware: v%s  proto=%u  build=%08lx%s\n", FIRMWARE_VERSION,
                 PROTO_VERSION,
                 (unsigned long)(uint32_t)FIRMWARE_BUILD_ID,
@@ -1173,12 +1189,15 @@ static void printTable() {
     char mac[18];
     const TableEntry& row = g_table.entries[i];
     if (tableHasPosition(row))
-      Serial.printf("  [%u] %s  id=#%u  x=%.2f  y=%.2f  group=%u\n", i,
+      Serial.printf("  [%u] %s  id=#%u  x=%.2f  y=%.2f  group=%u  leds=%u\n", i,
                     macStr(row.mac, mac), row.id, row.x, row.y,
-                    (unsigned)(groupIdSafe(row.group_id) + 1));
+                    (unsigned)(groupIdSafe(row.group_id) + 1),
+                    (unsigned)ledCountSafe(row.led_count));
     else
-      Serial.printf("  [%u] %s  id=#%u  unpositioned\n", i,
-                    macStr(row.mac, mac), row.id);
+      Serial.printf("  [%u] %s  id=#%u  unpositioned  group=%u  leds=%u\n", i,
+                    macStr(row.mac, mac), row.id,
+                    (unsigned)(groupIdSafe(row.group_id) + 1),
+                    (unsigned)ledCountSafe(row.led_count));
   }
 }
 
@@ -1658,6 +1677,7 @@ static void printLanternJson(const uint8_t mac_bytes[6], const char* label,
                              uint16_t node_id,
                              const char* status, int64_t last_seen_s, float x,
                              float y, bool has_position, uint8_t group_id,
+                             uint8_t led_count,
                              const char* attention,
                              const FirmwareVersion* firmware,
                              const PowerEntry* power, int64_t t) {
@@ -1679,6 +1699,7 @@ static void printLanternJson(const uint8_t mac_bytes[6], const char* label,
                   "\"group_id\":%u,\"group\":\"Group %u\",",
                   groupIdSafe(group_id), groupIdSafe(group_id) + 1);
   }
+  Serial.printf("\"led_count\":%u,", (unsigned)ledCountSafe(led_count));
   Serial.printf("\"attention\":\"%s\",", attention);
   if (firmware) {
     Serial.printf("\"firmware\":{\"version\":\"%s\",\"proto\":%u,\"build_id\":%lu,"
@@ -1840,6 +1861,7 @@ static void printMachineState(uint32_t id) {
     printLanternJson(row.mac, label, node_id,
                      r >= 0 ? "alive" : "missing", age_s, row.x,
                      row.y, tableHasPosition(row), row.group_id,
+                     row.led_count,
                      attention_text, fw_ptr,
                      p >= 0 ? &g_power_table.entries[p] : nullptr, t);
   }
@@ -1867,7 +1889,8 @@ static void printMachineState(uint32_t id) {
     }
     int p = powerTableFind(g_power_table, row.mac);
     printLanternJson(row.mac, label, id_conflict ? 0 : row.id, "alive", age_s,
-                     0.0f, 0.0f, false, 0, attention_text, &fw,
+                     0.0f, 0.0f, false, 0, DEFAULT_LED_COUNT,
+                     attention_text, &fw,
                      p >= 0 ? &g_power_table.entries[p] : nullptr, t);
   }
   Serial.print("],\"events\":[]}}\n");
@@ -1897,6 +1920,18 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       tableSave();
       broadcastTable();
       jsonOk(cmd.id, "group changed");
+    } else {
+      jsonError(cmd.id, "unknown lantern");
+    }
+  } else if (cmd.kind == SJ_LED_COUNT) {
+    if (!isConductor()) {
+      jsonError(cmd.id, "led count is conductor-only");
+    } else if (!cmd.has_led_count || !ledCountValid(cmd.led_count)) {
+      jsonError(cmd.id, "invalid led count");
+    } else if (tableSetLedCount(g_table, cmd.mac, cmd.led_count)) {
+      tableSave();
+      broadcastTable();
+      jsonOk(cmd.id, "led count changed");
     } else {
       jsonError(cmd.id, "unknown lantern");
     }
@@ -2049,6 +2084,24 @@ static void handleCommand(char* line) {
       }
     } else {
       Serial.println("? group <mac> <1..8>");
+    }
+  } else if (!strcmp(cmd, "leds")) {
+    char* am = strtok(nullptr, " \t");
+    char* ac = strtok(nullptr, " \t");
+    uint8_t mac[6];
+    int led_count = ac ? atoi(ac) : 0;
+    if (!isConductor()) {
+      Serial.println("? leds is conductor-only");
+    } else if (am && parseMac(am, mac) && ledCountInputValid(led_count)) {
+      if (tableSetLedCount(g_table, mac, (uint8_t)led_count)) {
+        tableSave();
+        broadcastTable();
+        printTable();
+      } else {
+        Serial.println("? unknown lantern");
+      }
+    } else {
+      Serial.println("? leds <mac> <16|32|64>");
     }
   } else if (!strcmp(cmd, "forget")) {
     char* am = strtok(nullptr, " \t");
@@ -2443,8 +2496,10 @@ void loop() {
         int entry = tableFind(g_table, req[i].mac);
         bool reply = tableRowReplyWanted(
             req[i].mac_known, req[i].reported_id, req[i].reported_group,
+            req[i].reported_led_count,
             entry >= 0, entry >= 0 ? g_table.entries[entry].id : 0,
-            entry >= 0 ? g_table.entries[entry].group_id : 0);
+            entry >= 0 ? g_table.entries[entry].group_id : 0,
+            entry >= 0 ? g_table.entries[entry].led_count : DEFAULT_LED_COUNT);
         if (!reply) continue;
         TableMsg m;
         size_t len = tableRowBuild(g_table, req[i].mac, m);
@@ -2541,25 +2596,32 @@ void loop() {
   // pass as before.
   static PatternConfig last_shown = {};
   static KeepAliveConfig last_keepalive = {};
+  static uint8_t last_led_count = 0;
   static bool shown_once = false;
   static int64_t next_static_refresh = 0;
   bool pattern_changed = !shown_once ||
                         memcmp(&last_shown, &p, sizeof(p)) != 0 ||
                         memcmp(&last_keepalive, &b.keepalive,
-                               sizeof(b.keepalive)) != 0;
+                               sizeof(b.keepalive)) != 0 ||
+                        last_led_count != g_id.led_count;
   bool keepalive_active_window = powerPolicyKeepaliveWindow(b.power) &&
                                  keepAliveEnabled(b.keepalive);
   if (keepalive_active_window || !patterns::patternIsStatic(p.pattern_id) || pattern_changed ||
       t >= next_static_refresh) {
     if (keepalive_pulse) {
       RgbwColor c(0, 0, 0, b.keepalive.brightness);
-      for (uint16_t i = 0; i < strip.PixelCount(); i++) strip.SetPixelColor(i, c);
+      uint16_t active = activeLedCount(g_id.led_count, strip.PixelCount());
+      for (uint16_t i = 0; i < active; i++) strip.SetPixelColor(i, c);
+      for (uint16_t i = active; i < strip.PixelCount(); i++)
+        strip.SetPixelColor(i, RgbwColor(0, 0, 0, 0));
     } else {
-      patterns::render(strip, p, render_us, g_id.x, g_id.y, render_node_id);
+      patterns::render(strip, p, render_us, g_id.x, g_id.y, render_node_id,
+                       ledCountSafe(g_id.led_count));
     }
     strip.Show();
     last_shown = p;
     last_keepalive = b.keepalive;
+    last_led_count = g_id.led_count;
     shown_once = true;
     next_static_refresh = t + DIAG_INTERVAL_US;
   }
@@ -2598,7 +2660,7 @@ void loop() {
   if (nap > 0) {
     // The RMT transfer from strip.Show() runs in the background — sleeping mid-
     // frame would truncate it and glitch the pixels, so wait for it to finish
-    // (16 RGBW pixels ≈ 0.7 ms, a bounded wait). Same for the UART TX FIFO:
+    // (64 RGBW pixels ≈ 2.6 ms, a bounded wait). Same for the UART TX FIFO:
     // light sleep drops chars still shifting out, garbling the diag lines.
     while (!strip.CanShow()) delayMicroseconds(50);
     Serial.flush();

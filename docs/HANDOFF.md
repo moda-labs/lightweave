@@ -8,10 +8,21 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**152 pass**) is green; control tests (**307 pass**) are green; all three device
+(**152 pass**) is green; control tests (**310 pass**) are green; all three device
 envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-03): **eight independent lantern groups are
+Latest locally (2026-08-04): **mixed 16/32/64 LED counts are code-complete;
+bench verification is pending.** Each inventoried board carries an LED-count
+hardware profile independent of its group and placement. The control plane can
+change it from the lantern detail sheet or inline Node List dropdown, including
+before placement. One firmware image allocates a 64-emitter RGBW chain, renders
+only the configured active prefix, clears inactive pixels, and normalizes
+ring-local effects by the active count. Existing inventory and performer NVS
+migrate to 16. The profile stays with the physical board during move, forget,
+and replacement. Protocol v10 adds the profile to REGISTER and `MSG_TABLE`, so
+every board must be updated together. No boards were flashed in this session.
+
+Previous latest (2026-08-03): **eight independent lantern groups are
 code-complete; bench verification is pending.** Each inventoried MAC now carries
 a Group 1–8 membership alongside its permanent board ID and optional position in
 the conductor-authoritative inventory. The existing 4 Hz beacon carries all
@@ -22,7 +33,7 @@ dropdown, including before placement, and targets live or saved patterns with a
 group selector. Clearing a position preserves membership. Global blackout,
 power policy, and calibration
 still span the field, while calibration restores every group's prior look
-afterward. Protocol v9 migrates existing v8 rows to Group 1 and copies the old
+afterward. Protocol v9 migrated existing v8 rows to Group 1 and copied the old
 field-wide look to all slots, but the wire change means every board must still be
 updated together. No boards were flashed in this session.
 
@@ -320,12 +331,14 @@ arrive Mon Jul 6, batteries Jul 10 — see "Pilot batch: ORDERED" below).
 ## ▶ Next session: pick up here (updated 2026-08-03)
 
 Priority order:
-1. **Group-control bench verification:** read `docs/FLASHING.md`, update the
-   conductor and every performer to the same protocol-v9 build, place two
+1. **Protocol-v10 group/profile bench verification:** read `docs/FLASHING.md`, update the
+   conductor and every performer to the same protocol-v10 build, place two
    performers in different groups, and verify simultaneous distinct patterns.
    Then change one membership while its radio is asleep and confirm its next
-   REGISTER triggers the targeted row repair and persists across reboot.
-2. **Fire Flicker bench tuning:** after the field shares the current protocol-v9
+   REGISTER triggers the targeted row repair and persists across reboot. Repeat
+   with LED counts 16, 32, and 64 on matching physical chains; confirm a missed
+   edit repairs on REGISTER and survives reboot.
+2. **Fire Flicker bench tuning:** after the field shares the current protocol-v10
    build, select Fire at brightness 56 / period 1200 ms /
    hue 24 / saturation 95 / texture 85, and evaluate it through the physical
    diffuser. Tune for organic neighboring-pixel motion without a visible chase;
@@ -456,12 +469,13 @@ revised cost roll-up.
   shown in `info`; **bidirectional ESP-NOW** — performers unicast `REGISTER`
   every 10 s and the conductor builds a **MAC-keyed roster** (`roster` command).
   Sync hot path unchanged (still `LOCKED gaps` flat after the rework).
-- **Protocol foundation Half 2** (v7 position path hardware-verified; v8 ID and
-  v9 group paths code-complete): **conductor-authoritative
-  `MAC→permanent ID + optional (x,y,group)` inventory** in NVS, broadcast as
+- **Protocol foundation Half 2** (v7 position path hardware-verified; v8 ID,
+  v9 group, and v10 LED-profile paths code-complete): **conductor-authoritative
+  `MAC→permanent ID + optional (x,y) + group + LED count` inventory** in NVS, broadcast as
   chunked `MSG_TABLE`; a node finds its row, adopts its number, placement, and
-  group, and caches them (survives reboot, no laptop needed). Conductor edits it
-  with `assign <mac> <x> <y>` / `group <mac> <1..8>` / `table` /
+  hardware profile, and caches them (survives reboot, no laptop needed). Conductor edits it
+  with `assign <mac> <x> <y>` / `group <mac> <1..8>` /
+  `leds <mac> <16|32|64>` / `table` /
   `forget <mac>`.
   Verified: a node took a position set only on the conductor, no serial to it.
   Re-adoption hardware check 2026-07-06: performer #2 was erased/reflashed after
@@ -469,7 +483,7 @@ revised cost roll-up.
   from the conductor's single-row table reply within the normal roster window.
   Protocol v8 extends that same reply to restore `#2` automatically.
 - **GPIO2 heartbeat** blinks on the synced beat (zero-wiring sync check).
-- **Serial commands:** `info`, `roster` / `table` / `assign` / `group` / `forget`
+- **Serial commands:** `info`, `roster` / `table` / `assign` / `group` / `leds` / `forget`
   (conductor), `role conductor|performer`, `id <n>`, `pos <x> <y>`,
   `pattern <n>`, `bri <n>`, `param <i> <v>`, `powersave on|off`,
   `dusk on|off` (performer; daytime deep-sleep, default off),
@@ -481,17 +495,17 @@ revised cost roll-up.
   serial input** — hit Enter in a monitor to revive a quiet node (see
   FLASHING.md). Exception: the conductor's `[power]` telemetry log is
   deliberately ungated (it's the overnight audit trail).
-- **Wire protocol is v9** (`PROTO_VERSION 9`; `MSG_TABLE` includes permanent
-  board ID, optional-position flags, and group ID; BEACON includes eight group
+- **Wire protocol is v10** (`PROTO_VERSION 10`; `MSG_TABLE` includes permanent
+  board ID, optional-position flags, group ID, and 16/32/64 LED count; BEACON includes eight group
   `PatternConfig`s, runtime `PowerPolicy` with UTC epoch seconds, and USB
-  power-bank `KeepAliveConfig`; REGISTER includes board/group identity plus
-  release version, protocol, build id, and
-  dirty flag for OTA version consistency; OTA begin/chunk/end messages carry
+  power-bank `KeepAliveConfig`; REGISTER includes board/group/LED-count identity
+  plus release version, protocol, build id, and dirty flag
+  for OTA version consistency; OTA begin/chunk/end messages carry
   the staged firmware image during manual maintenance updates).
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 152) and control tests (307): sync
+- **Host unit tests** (`test/test_logic/`, 152) and control tests (310): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),
@@ -903,7 +917,7 @@ field. Four independent layers guarantee daytime testability:
    and listens for a beacon before it may re-sleep — a flagged beacon pins it
    awake (60 s TTL, continuously refreshed). Summon latency for the whole field:
    ≤ one resample interval. Historical note: this originally grew the wire format
-   to `PROTO_VERSION 2`; the current protocol is **v9**, and every protocol bump
+   to `PROTO_VERSION 2`; the current protocol is **v10**, and every protocol bump
    still means reflashing every board together.
 2. **Any power-cycle boots awake** (cold boot starts in "night", won't dusk-sleep
    for 10 min, 60 s light debounce on top). Per-lantern physical override via the

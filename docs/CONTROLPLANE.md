@@ -77,7 +77,7 @@ Snapshot shape:
     "sync": "locked",
     "firmware": {
       "version": "0.3.0",
-      "proto": 9,
+      "proto": 10,
       "build_id": 3225866068,
       "build_label": "c046bf54",
       "dirty": false
@@ -131,8 +131,9 @@ Snapshot shape:
       "position": "Set",
       "group_id": 1,
       "group": "Group 2",
+      "led_count": 16,
       "attention": "None",
-      "firmware": {"version": "0.3.0", "proto": 9, "build_id": 3225866068, "build_label": "c046bf54", "dirty": false},
+      "firmware": {"version": "0.3.0", "proto": 10, "build_id": 3225866068, "build_label": "c046bf54", "dirty": false},
       "power": {"wh": 0.38, "avg_w": 0.71, "last_report_label": "4s ago"},
       "updated_at": 1720123456.0
     }
@@ -186,6 +187,9 @@ The map renders only positioned lanterns.
 - `POST /api/lanterns/{mac}/group` with `{"group_id":2}` -> assign any
   inventoried lantern to Group 3, whether or not it has coordinates. Group IDs
   are zero-based in the API and labeled 1–8 in the UI.
+- `POST /api/lanterns/{mac}/led-count` with `{"led_count":32}` -> set an
+  inventoried board's physical profile. Accepted values are exactly 16, 32, and
+  64; the setting works before placement and follows the board, not its position.
 - `POST /api/lanterns/{mac}/forget`
 - `POST /api/lanterns/replace` with `{"old_mac":"...","new_mac":"..."}`
 - `GET /api/patterns` -> saved pattern configs.
@@ -327,6 +331,7 @@ tick() -> None
 identify(mac) -> ack
 assign(mac, x, y) -> ack
 assign_group(mac, group_id) -> ack
+assign_led_count(mac, led_count) -> ack
 forget(mac) -> ack
 replace(old_mac, new_mac) -> ack
 update_pattern(pattern, brightness, params, group_id=None) -> ack
@@ -357,10 +362,11 @@ Requests are one compact JSON object per line:
 {"id":1,"cmd":"state"}
 {"id":2,"cmd":"assign","mac":"8C:94:DF:57:7F:14","x":0.25,"y":0.75}
 {"id":3,"cmd":"group","mac":"8C:94:DF:57:7F:14","group_id":2}
-{"id":4,"cmd":"forget","mac":"8C:94:DF:57:7F:14"}
-{"id":5,"cmd":"replace","old_mac":"A0:B7:65:11:44:91","new_mac":"8C:94:DF:57:7F:14"}
-{"id":6,"cmd":"pattern","pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300},"group_id":2}
-{"id":7,"cmd":"blackout"}
+{"id":4,"cmd":"led_count","mac":"8C:94:DF:57:7F:14","led_count":32}
+{"id":5,"cmd":"forget","mac":"8C:94:DF:57:7F:14"}
+{"id":6,"cmd":"replace","old_mac":"A0:B7:65:11:44:91","new_mac":"8C:94:DF:57:7F:14"}
+{"id":7,"cmd":"pattern","pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300},"group_id":2}
+{"id":8,"cmd":"blackout"}
 ```
 
 Responses echo the request id:
@@ -406,6 +412,8 @@ number while showing "Not seen".
 - Assign any lantern to one of eight fixed show groups from its detail sheet or
   directly from the Node List dropdown. Membership is independent of position,
   so spares can be organized before layout and keep their group when forgotten.
+- Set each board to 16, 32, or 64 active LEDs from its detail sheet or the Node
+  List dropdown. This hardware profile is independent of placement and group.
 - Replace-node flow (§5.1): pick dead node + spare → one action does
   `assign` + `forget`.
 - **Identify:** click a dot → that physical lantern blinks so it can be

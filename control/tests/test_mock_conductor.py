@@ -227,12 +227,28 @@ def test_unpositioned_lantern_keeps_group_before_and_after_placement_changes() -
     assert after["group_id"] == 4
 
 
-def test_replace_moves_only_position_and_group_to_unpositioned_spare() -> None:
+def test_led_count_profile_is_board_specific_and_survives_placement_changes() -> None:
+    conductor = MockConductor()
+    mac = "8C:94:DF:57:7F:14"
+
+    assert conductor.assign_led_count(mac, 64)["ok"] is True
+    assert conductor.assign_led_count(mac, 24)["ok"] is False
+    conductor.assign(mac, 0.2, 0.3)
+    conductor.forget(mac)
+    lantern = next(item for item in conductor.lanterns() if item["mac"] == mac)
+
+    assert lantern["position"] == "Missing"
+    assert lantern["led_count"] == 64
+
+
+def test_replace_moves_position_and_group_but_keeps_each_boards_led_profile() -> None:
     conductor = MockConductor()
     old_mac = "A0:B7:65:11:44:91"
     new_mac = "8C:94:DF:57:7F:14"
 
     assert conductor.assign_group(old_mac, 2)["ok"] is True
+    assert conductor.assign_led_count(old_mac, 64)["ok"] is True
+    assert conductor.assign_led_count(new_mac, 32)["ok"] is True
     ack = conductor.replace(old_mac, new_mac)
     lanterns = conductor.lanterns()
     old = next(item for item in lanterns if item["mac"] == old_mac)
@@ -244,9 +260,11 @@ def test_replace_moves_only_position_and_group_to_unpositioned_spare() -> None:
     assert old["status"] == "missing"
     assert old["attention"] == "Not seen"
     assert old["group_id"] == 2
+    assert old["led_count"] == 64
     assert new["position"] == "Set"
     assert new["label"] == "#57"
     assert new["group_id"] == 2
+    assert new["led_count"] == 32
     assert new["x"] == 0.66
     assert new["y"] == 0.69
 

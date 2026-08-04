@@ -1044,6 +1044,8 @@ void test_table_group_assignment_preserves_position_and_rejects_bad_ids() {
   TEST_ASSERT_FALSE(tableSetGroup(t, spare, 5));
   TEST_ASSERT_EQUAL_INT(0, tableEnsure(t, spare));
   TEST_ASSERT_TRUE(tableSetGroup(t, spare, 5));
+  TEST_ASSERT_TRUE(tableSetLedCount(t, spare, 32));
+  TEST_ASSERT_FALSE(tableSetLedCount(t, spare, 24));
   TEST_ASSERT_FALSE(tableHasPosition(t.entries[tableFind(t, spare)]));
   TEST_ASSERT_TRUE(tableSetWithGroup(t, a, 1.5f, 2.5f, 3));
   TEST_ASSERT_TRUE(tableSetGroup(t, a, 6));
@@ -1059,6 +1061,22 @@ void test_table_group_assignment_preserves_position_and_rejects_bad_ids() {
   TEST_ASSERT_TRUE(tableClearPosition(t, a));
   TEST_ASSERT_TRUE(tableLookupGroup(t, a, group_id));
   TEST_ASSERT_EQUAL_UINT8(6, group_id);
+  uint8_t led_count = 0;
+  TEST_ASSERT_TRUE(tableLookupLedCount(t, spare, led_count));
+  TEST_ASSERT_EQUAL_UINT8(32, led_count);
+  TEST_ASSERT_TRUE(tableLookupLedCount(t, a, led_count));
+  TEST_ASSERT_EQUAL_UINT8(DEFAULT_LED_COUNT, led_count);
+  TEST_ASSERT_TRUE(ledCountValid(16));
+  TEST_ASSERT_TRUE(ledCountValid(64));
+  TEST_ASSERT_FALSE(ledCountValid(24));
+  TEST_ASSERT_TRUE(ledCountInputValid(32));
+  TEST_ASSERT_FALSE(ledCountInputValid(-240));
+  TEST_ASSERT_FALSE(ledCountInputValid(272));
+  TEST_ASSERT_EQUAL_UINT8(DEFAULT_LED_COUNT, ledCountSafe(0));
+  TEST_ASSERT_EQUAL_UINT16(16, activeLedCount(16, 64));
+  TEST_ASSERT_EQUAL_UINT16(32, activeLedCount(32, 64));
+  TEST_ASSERT_EQUAL_UINT16(40, activeLedCount(64, 40));
+  TEST_ASSERT_EQUAL_UINT16(16, activeLedCount(24, 64));
 }
 
 void test_table_remove() {
@@ -1736,7 +1754,7 @@ void test_serial_json_assign_parses_mac_and_position() {
 }
 
 void test_serial_json_group_and_targeted_pattern_parse() {
-  SerialJsonCommand group_cmd, pattern_cmd;
+  SerialJsonCommand group_cmd, led_cmd, pattern_cmd;
   const char* error = nullptr;
   TEST_ASSERT_TRUE(serialJsonParse(
       "{\"id\":8,\"cmd\":\"group\",\"mac\":\"8C:94:DF:57:7F:14\",\"group_id\":3}",
@@ -1752,6 +1770,15 @@ void test_serial_json_group_and_targeted_pattern_parse() {
   TEST_ASSERT_FALSE(serialJsonParse(
       "{\"id\":10,\"cmd\":\"group\",\"mac\":\"8C:94:DF:57:7F:14\",\"group_id\":8}",
       group_cmd, error));
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":11,\"cmd\":\"led_count\",\"mac\":\"8C:94:DF:57:7F:14\",\"led_count\":64}",
+      led_cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_LED_COUNT, led_cmd.kind);
+  TEST_ASSERT_TRUE(led_cmd.has_led_count);
+  TEST_ASSERT_EQUAL_UINT8(64, led_cmd.led_count);
+  TEST_ASSERT_FALSE(serialJsonParse(
+      "{\"id\":12,\"cmd\":\"led_count\",\"mac\":\"8C:94:DF:57:7F:14\",\"led_count\":24}",
+      led_cmd, error));
 }
 
 void test_serial_json_pattern_maps_name_brightness_and_params() {
@@ -1981,6 +2008,7 @@ void test_table_chunk_build_single_chunk() {
   tableSet(t, b, 3.0f, 4.0f);
   tableAdoptIdentity(t, a, 11);
   tableAdoptIdentity(t, b, 12);
+  TEST_ASSERT_TRUE(tableSetLedCount(t, b, 32));
 
   TableMsg m;
   size_t len = tableChunkBuild(t, 0, m);
@@ -1993,6 +2021,7 @@ void test_table_chunk_build_single_chunk() {
   TEST_ASSERT_EQUAL_UINT8(2, m.n);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(b, m.rows[1].mac, 6);
   TEST_ASSERT_EQUAL_UINT16(12, m.rows[1].id);
+  TEST_ASSERT_EQUAL_UINT8(32, m.rows[1].led_count);
   TEST_ASSERT_TRUE((m.rows[1].flags & TABLE_FLAG_POSITIONED) != 0);
   TEST_ASSERT_EQUAL_FLOAT(3.0f, m.rows[1].x);
   TEST_ASSERT_EQUAL_FLOAT(4.0f, m.rows[1].y);
@@ -2054,6 +2083,7 @@ void test_table_msg_find_row() {
   tableSet(t, a, 1.0f, 2.0f);
   tableSetWithGroup(t, b, -7.5f, 0.25f, 4);
   tableAdoptIdentity(t, b, 22);
+  TEST_ASSERT_TRUE(tableSetLedCount(t, b, 64));
   TableMsg m;
   tableChunkBuild(t, 0, m);
 
@@ -2062,6 +2092,7 @@ void test_table_msg_find_row() {
   TEST_ASSERT_EQUAL_UINT16(22, assignment.id);
   TEST_ASSERT_TRUE(assignment.has_position);
   TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
+  TEST_ASSERT_EQUAL_UINT8(64, assignment.led_count);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, assignment.x);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, assignment.y);
   TEST_ASSERT_FALSE(tableMsgFindRow(m, absent, assignment));
@@ -2080,22 +2111,25 @@ void test_table_row_reply_wanted() {
   // First join since conductor boot (or a full roster dropped the insert —
   // known-ness is computed BEFORE the upsert, so full can't mask new).
   TEST_ASSERT_TRUE(tableRowReplyWanted(/*mac_known*/ false, /*reported id*/ 7,
-                                       /*reported group*/ 0,
+                                       /*reported group*/ 0, /*reported leds*/ 16,
                                        /*have_authoritative*/ true,
                                        /*authoritative id*/ 7,
-                                       /*authoritative group*/ 0));
+                                       /*authoritative group*/ 0,
+                                       /*authoritative leds*/ 16));
   // Unprovisioned (id 0): fresh flash / erase_flash recovery — its NVS
   // position cache is gone even though the conductor has seen the MAC.
-  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 0, 0, true, 7, 0));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 0, 0, 16, true, 7, 0, 16));
   // A conflicting board gets the authoritative row so it can log the conflict;
   // receiver logic refuses to silently change a non-zero physical-board ID.
-  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 8, 0, true, 7, 0));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 8, 0, 16, true, 7, 0, 16));
   // A placed node that missed a live group edit reports its old cached group in
   // REGISTER; the mismatch earns the same reliable row reply.
-  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 7, 2, true, 7, 3));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 7, 2, 16, true, 7, 3, 16));
+  // The same repair path covers a performer that missed a hardware-profile edit.
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 7, 3, 16, true, 7, 3, 64));
   // Known + provisioned re-register (every 10 s, all night): no reply —
   // steady state costs zero table traffic.
-  TEST_ASSERT_FALSE(tableRowReplyWanted(true, 7, 3, true, 7, 3));
+  TEST_ASSERT_FALSE(tableRowReplyWanted(true, 7, 3, 64, true, 7, 3, 64));
 }
 
 void test_table_row_build() {
@@ -2108,10 +2142,11 @@ void test_table_row_build() {
   tableSet(t, a, 1.0f, 2.0f);
   tableSetWithGroup(t, b, -7.5f, 0.25f, 4);
   tableAdoptIdentity(t, b, 42);
+  TEST_ASSERT_TRUE(tableSetLedCount(t, b, 32));
 
   TableMsg m;
   size_t len = tableRowBuild(t, b, m);
-  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);  // 27 B on the wire
+  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);  // 28 B on the wire
   TEST_ASSERT_EQUAL_UINT32(BEACON_MAGIC, m.hdr.magic);
   TEST_ASSERT_EQUAL_UINT8(PROTO_VERSION, m.hdr.version);
   TEST_ASSERT_EQUAL_UINT8(MSG_TABLE, m.hdr.type);
@@ -2119,6 +2154,7 @@ void test_table_row_build() {
   TEST_ASSERT_EQUAL_UINT8_ARRAY(b, m.rows[0].mac, 6);
   TEST_ASSERT_EQUAL_UINT16(42, m.rows[0].id);
   TEST_ASSERT_EQUAL_UINT8(4, m.rows[0].group_id);
+  TEST_ASSERT_EQUAL_UINT8(32, m.rows[0].led_count);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, m.rows[0].x);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, m.rows[0].y);
   // The receiver-side path accepts it end to end: length gates + own-row scan.
@@ -2128,6 +2164,7 @@ void test_table_row_build() {
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
   TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
+  TEST_ASSERT_EQUAL_UINT8(32, assignment.led_count);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, assignment.x);
   TEST_ASSERT_TRUE(assignment.has_position);
   TEST_ASSERT_TRUE(tableClearPosition(t, b));
@@ -2136,6 +2173,7 @@ void test_table_row_build() {
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
   TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
+  TEST_ASSERT_EQUAL_UINT8(32, assignment.led_count);
   TEST_ASSERT_FALSE(assignment.has_position);
   // No inventory row yet: nothing to say.
   TEST_ASSERT_EQUAL_size_t(0, tableRowBuild(t, absent, m));

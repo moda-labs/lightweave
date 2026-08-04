@@ -14,6 +14,7 @@
 
 #include "macaddr.h"
 #include "groups.h"
+#include "led_profile.h"
 #include "ota_update.h"
 #include "pattern_ids.h"
 
@@ -23,6 +24,7 @@ enum SerialJsonKind {
   SJ_IDENTIFY,
   SJ_ASSIGN,
   SJ_GROUP,
+  SJ_LED_COUNT,
   SJ_FORGET,
   SJ_REPLACE,
   SJ_PATTERN,
@@ -46,6 +48,8 @@ struct SerialJsonCommand {
   float y = 0.0f;
   bool has_group_id = false;
   uint8_t group_id = 0;
+  bool has_led_count = false;
+  uint8_t led_count = DEFAULT_LED_COUNT;
   uint16_t pattern_id = patterns::GLOW;
   uint8_t brightness = 48;
   bool has_brightness = false;
@@ -238,6 +242,16 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     }
     cmd.has_group_id = true;
     cmd.group_id = (uint8_t)group_id;
+  } else if (!strcmp(norm, "ledcount")) {
+    cmd.kind = SJ_LED_COUNT;
+    uint32_t led_count = 0;
+    if (!sjMac(json, "mac", cmd.mac) || !sjUint(json, "led_count", led_count) ||
+        led_count > 255 || !ledCountValid((uint8_t)led_count)) {
+      error = "bad led count";
+      return false;
+    }
+    cmd.has_led_count = true;
+    cmd.led_count = (uint8_t)led_count;
   } else if (!strcmp(norm, "forget")) {
     cmd.kind = SJ_FORGET;
     if (!sjMac(json, "mac", cmd.mac)) {

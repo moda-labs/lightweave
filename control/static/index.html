@@ -59,7 +59,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Lantern</th><th>Group</th><th>Status</th><th>Last seen</th><th>Position</th><th>Attention</th><th>Locate</th></tr></thead>
+            <thead><tr><th>Lantern</th><th>Group</th><th>LEDs</th><th>Status</th><th>Last seen</th><th>Position</th><th>Attention</th><th>Locate</th></tr></thead>
             <tbody id="lantern-rows"></tbody>
           </table>
         </div>
@@ -491,6 +491,12 @@
         <option value="2">Group 3</option><option value="3">Group 4</option>
         <option value="4">Group 5</option><option value="5">Group 6</option>
         <option value="6">Group 7</option><option value="7">Group 8</option>
+      </select>
+      <label class="control-label" for="lantern-led-count">LED count</label>
+      <select id="lantern-led-count" class="group-select">
+        <option value="16">16 LEDs</option>
+        <option value="32">32 LEDs</option>
+        <option value="64">64 LEDs</option>
       </select>
       <div class="replace-panel" id="replace-panel" hidden>
         <div class="replace-head">

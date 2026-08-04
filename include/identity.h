@@ -8,11 +8,14 @@
 
 #include <stdint.h>
 
+#include "led_profile.h"
+
 struct NodeIdentity {
   uint16_t id;  // unique per node; 0 = unprovisioned
   float    x;   // field coordinate (arbitrary units, e.g. meters)
   float    y;
   uint8_t  group_id;  // zero-based show group; cached from conductor table
+  uint8_t  led_count;  // active local emitters: 16, 32, or 64
 };
 
 // True once a node has been given an ID over serial (see provisioning in main).

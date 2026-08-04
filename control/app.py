@@ -98,6 +98,10 @@ class GroupUpdate(BaseModel):
     group_id: int = Field(ge=0, lt=GROUP_COUNT)
 
 
+class LedCountUpdate(BaseModel):
+    led_count: Literal[16, 32, 64]
+
+
 class ReplaceRequest(BaseModel):
     old_mac: str
     new_mac: str
@@ -1750,6 +1754,17 @@ def create_app(
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
         await publish_state("group")
+        return ack
+
+    @app.post("/api/lanterns/{mac}/led-count")
+    async def assign_led_count(mac: str, request: LedCountUpdate) -> dict[str, Any]:
+        try:
+            ack = await conductor_call("assign_led_count", mac, request.led_count)
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        if not ack["ok"]:
+            raise HTTPException(status_code=400, detail=ack["error"])
+        await publish_state("led-count")
         return ack
 
     @app.post("/api/lanterns/replace")

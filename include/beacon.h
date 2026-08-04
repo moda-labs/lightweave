@@ -33,9 +33,10 @@
 // v8: TableRow carries a permanent numeric ID and optional-position flags.
 // v9: TableRow and REGISTER carry group membership; BeaconMsg carries one
 //     independent pattern config for each of eight lantern groups.
+// v10: TableRow and REGISTER carry each board's 16/32/64 LED-count profile.
 // MSG_ROSTER was added without a protocol bump: it is a new optional message
 // type, and older receivers safely ignore unknown types.
-static constexpr uint8_t PROTO_VERSION = 9;
+static constexpr uint8_t PROTO_VERSION = 10;
 
 // A field has eight fixed group slots. Group ids are zero-based on the wire and
 // in NVS (the operator UI labels them Group 1..8). Fixed slots avoid a second
@@ -138,6 +139,7 @@ typedef struct __attribute__((packed)) {
   uint8_t   mac[6];  // sender's WiFi STA MAC — the node's stable identity
   uint16_t  id;      // human label (0 if unprovisioned)
   uint8_t   group_id;  // cached table group; lets conductor repair a missed edit
+  uint8_t   led_count;  // cached 16/32/64 hardware profile
   uint8_t   fw;      // sender's PROTO_VERSION (wire compatibility marker)
   uint32_t  build;   // sender's firmware build id (git-derived)
   uint8_t   dirty;   // sender was built from uncommitted firmware changes
@@ -145,23 +147,26 @@ typedef struct __attribute__((packed)) {
 } RegisterMsg;
 
 // One row of the conductor inventory on the wire. ID belongs to the physical
-// board; position and show group are deployment-specific.
+// board; position and show group are deployment-specific; LED count describes
+// the board's attached emitter chain.
 typedef struct __attribute__((packed)) {
   uint8_t  mac[6];
   uint16_t id;
   uint8_t  flags;
   uint8_t  group_id;
+  uint8_t  led_count;
   float    x;
   float    y;
-} TableRow;  // 18 bytes
+} TableRow;  // 19 bytes
 
 // Rows per MSG_TABLE packet. ESP-NOW caps the payload at 250 B; the header + chunk
-// fields are 9 B, so (250 - 9) / 18 = 13 rows fit (a 243 B packet at full).
-static constexpr uint8_t TABLE_ROWS_PER_MSG = 13;
+// fields are 9 B, so (250 - 9) / 19 = 12 rows fit (a 237 B packet at full).
+static constexpr uint8_t TABLE_ROWS_PER_MSG = 12;
 
 // type = MSG_TABLE. The conductor's authoritative inventory, broadcast in
 // chunks. A node scans for its MAC and adopts + caches its permanent ID and
-// optional position and group. `chunk`/`chunks` describe one inventory round.
+// optional position, group, and LED count. `chunk`/`chunks` describe one
+// inventory round.
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;
   uint8_t   chunk;   // this chunk's index, 0..chunks-1

@@ -1,7 +1,7 @@
 // The node inventory on the wire: chunking, validation, and broadcast cadence.
 //
-// table.h is the pure MAC->ID+optional-position+group store; beacon.h is the
-// packet layout.
+// table.h is the pure MAC->ID+optional-position+group+LED-profile store;
+// beacon.h is the packet layout.
 // This header is everything in between — the logic that used to live inline in
 // main.cpp's broadcastTable()/onRecv() where it was host-unreachable:
 //   - sender side: how many MSG_TABLE chunks a table needs, and filling one
@@ -54,6 +54,7 @@ inline size_t tableChunkBuild(const LayoutTable& t, uint8_t c, TableMsg& m) {
     m.rows[i].id = t.entries[start + i].id;
     m.rows[i].flags = t.entries[start + i].flags;
     m.rows[i].group_id = groupIdSafe(t.entries[start + i].group_id);
+    m.rows[i].led_count = ledCountSafe(t.entries[start + i].led_count);
     m.rows[i].x = t.entries[start + i].x;
     m.rows[i].y = t.entries[start + i].y;
   }
@@ -82,6 +83,7 @@ struct TableAssignment {
   float y;
   bool has_position;
   uint8_t group_id;
+  uint8_t led_count;
 };
 
 enum TableIdentityDecision : uint8_t {
@@ -112,6 +114,7 @@ inline bool tableMsgFindRow(const TableMsg& m, const uint8_t mac[6],
       assignment.y = m.rows[i].y;
       assignment.has_position = (m.rows[i].flags & TABLE_FLAG_POSITIONED) != 0;
       assignment.group_id = groupIdSafe(m.rows[i].group_id);
+      assignment.led_count = ledCountSafe(m.rows[i].led_count);
       return true;
     }
   }
@@ -124,7 +127,7 @@ inline bool tableMsgFindRow(const TableMsg& m, const uint8_t mac[6],
 // erase_flash recovery) must not wait out that cadence through a ~13% radio
 // duty cycle. A REGISTER is the one moment the conductor provably knows the
 // sender's radio is on RIGHT NOW (TX is gated on radio-up), so the fix is a
-// targeted reply: broadcast just that node's row (27 B) immediately. Any
+// targeted reply: broadcast just that node's row (28 B) immediately. Any
 // single broadcast the node missed is retried for free by its next REGISTER
 // (10 s cadence), so delivery needs no scheduler, no burst flag, and no
 // rate-limit machinery.
@@ -133,21 +136,26 @@ inline bool tableMsgFindRow(const TableMsg& m, const uint8_t mac[6],
 // roster (first join since conductor boot, or a REGISTER dropped by a full
 // roster — mac_known is computed BEFORE the upsert, so a full roster can't
 // mask a new node), is unprovisioned, or disagrees with the conductor's
-// permanent ID or group. Provisioned known nodes that agree get no reply, so
+// permanent ID, group, or LED profile. Provisioned known nodes that agree get no reply, so
 // steady state costs zero targeted traffic.
 inline bool tableRowReplyWanted(bool mac_known, uint16_t reported_id,
                                 uint8_t reported_group,
+                                uint8_t reported_led_count,
                                 bool have_authoritative,
                                 uint16_t authoritative_id,
-                                uint8_t authoritative_group) {
+                                uint8_t authoritative_group,
+                                uint8_t authoritative_led_count) {
   return !mac_known || reported_id == 0 ||
          (have_authoritative &&
           (reported_id != authoritative_id ||
-           groupIdSafe(reported_group) != groupIdSafe(authoritative_group)));
+           groupIdSafe(reported_group) != groupIdSafe(authoritative_group) ||
+           ledCountSafe(reported_led_count) !=
+               ledCountSafe(authoritative_led_count)));
 }
 
-// Fill `m` with a single-row MSG_TABLE carrying this MAC's permanent ID and
-// optional position. Returns 0 only when the MAC is not inventoried.
+// Fill `m` with a single-row MSG_TABLE carrying this MAC's permanent ID,
+// optional position, group, and LED count. Returns 0 only when the MAC is not
+// inventoried.
 // Receivers treat it exactly like a full-table chunk: scan for their own MAC.
 inline size_t tableRowBuild(const LayoutTable& t, const uint8_t mac[6],
                             TableMsg& m) {
@@ -163,6 +171,7 @@ inline size_t tableRowBuild(const LayoutTable& t, const uint8_t mac[6],
   m.rows[0].id = t.entries[i].id;
   m.rows[0].flags = t.entries[i].flags;
   m.rows[0].group_id = groupIdSafe(t.entries[i].group_id);
+  m.rows[0].led_count = ledCountSafe(t.entries[i].led_count);
   m.rows[0].x = t.entries[i].x;
   m.rows[0].y = t.entries[i].y;
   return tableMsgWireLen(1);

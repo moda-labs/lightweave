@@ -84,15 +84,17 @@ cached table `group_id`.
   - `FIREFLY` — position-staggered meadow twinkle. **[done]**
   - `OCEAN_WAVE` — true 2-D summed wavefronts with tunable travel angle. **[done]**
   - `FIRE_FLICKER` — first ring-local pattern: deterministic billow plus coherent
-    angular waves give all 16 LEDs distinct brightness and flame temperature.
+    angular waves give every active LED distinct brightness and flame temperature.
     It remains clock/position-derived, so missed beacons do not freeze or desync
     the texture. **[done; hardware tuning pending]**
   - **[planned]** additional 2-D primitives such as a radial ripple from a center.
 
 Every node hard-clamps rendered brightness to `MAX_BRIGHTNESS` (config.h, **192**),
-so no pattern or broadcast config can exceed the per-node power budget regardless of what is
-authored. Set from the worst-case bench measurement (solid white at 255 drew
-0.76 A @ 5 V); see power management below.
+so no pattern or broadcast config can exceed the tested 16-ring brightness
+ceiling regardless of what is authored. It was set from the worst-case bench
+measurement (solid white at 255 drew 0.76 A @ 5 V); the externally powered
+32/64-emitter variants retain the same brightness clamp but are not covered by
+that battery-budget measurement. See power management below.
 
 Pure pattern math lives in `include/pattern_math.h` (host-unit-tested); the
 LED-library binding is in `include/patterns.h`.
@@ -116,6 +118,31 @@ mismatch and sends the targeted row reply during that known-open radio window.
 Protocol v9 migration is fail-preserving: existing layout rows become Group 1,
 and the old field-wide pattern is copied into all eight slots. The upgrade alone
 therefore causes no visible show change.
+
+#### 4.1.1 Mixed LED counts **[done; hardware verification pending]**
+
+Each physical board has a conductor-authoritative emitter profile of **16, 32,
+or 64 RGBW LEDs**, independent of position and group. Existing v9 inventory and
+performer NVS migrate to 16. The one firmware image allocates a 64-pixel
+NeoPixelBus chain, renders only the configured active prefix, and explicitly
+clears the remainder; a 16- or 32-pixel physical chain simply discards the later
+wire bits. Ring-local math normalizes by the active count, so Fire Flicker uses
+all configured emitters without changing beacon content or cadence.
+
+The profile belongs to the board: moving or forgetting it preserves the count,
+and replacing a positioned board does not copy the old count onto the spare.
+Performers cache the value in NVS and report it in REGISTER; a mismatch triggers
+the same targeted inventory-row repair used for IDs and groups. Protocol v10 adds
+one `led_count` byte to REGISTER and `TableRow`. The persisted `TableEntry` blob
+does not grow because the new value consumes v9's remaining padding byte.
+
+The existing global `MAX_BRIGHTNESS=192` safety clamp still applies to every
+profile. No additional per-node current cap is imposed for the externally
+powered 32/64-emitter variants; their supply and wiring remain a hardware concern.
+This profile records count, not physical topology: uniform field patterns work
+on any one-wire arrangement, while Fire Flicker currently treats the active
+sequence as circular. A future strip/grid topology field is only needed when an
+effect must understand ends, rows, orientation, or custom local coordinates.
 
 ### 4.2 Show program (pattern scheduling) **[planned]**
 
@@ -177,7 +204,7 @@ levers (§8.1, Lever 2 below), not a requirement to install INA228 on every node
 
 ## 5. Node inventory and layout — conductor-authoritative **[done]**
 
-The conductor holds `MAC → permanent ID + optional (x,y,group)` and broadcasts it.
+The conductor holds `MAC → permanent ID + optional (x,y) + group + LED count` and broadcasts it.
 Each node finds its own MAC, adopts its assignment, and **caches it in NVS**.
 Board identity survives rearrangement because clearing or moving a position does
 not remove its inventory row or change its number.
@@ -186,19 +213,19 @@ not remove its inventory row or change its number.
   field runs with **no laptop present** — the conductor is the coordination point
   for the table just as it is for the clock and the pattern config.
 - Resilient: a node needs to hear the table only once, then survives on the cache.
-- Cheap: 18 B/node on the wire (`TableRow`) gives 13 rows per `MSG_TABLE` packet.
+- Cheap: 19 B/node on the wire (`TableRow`) gives 12 rows per `MSG_TABLE` packet.
   Steady-state rebroadcast is a slow backstop
   (`TABLE_INTERVAL_US`, 60 s — positions are static and cached in NVS); the
-  moments that actually need the table travel out of band: `assign`/`group`
+  moments that actually need the table travel out of band: `assign`/`group`/`leds`
   broadcast the full table immediately, and a REGISTER from a node that is **new
   to the roster, unprovisioned (id 0), reporting a conflicting ID, or reporting
-  a stale group** gets an immediate **single-row reply** (27 B). The row reply
+  a stale group or LED count** gets an immediate **single-row reply** (28 B). The row reply
   is the delivery guarantee under radio duty-cycling: a
   REGISTER is the one moment the conductor provably knows that node's radio is
   on (TX is gated on radio-up), so the reply lands inside the sender's open
   listen window instead of playing the ~13%-per-broadcast lottery, and a missed
   reply is retried for free by the node's next REGISTER (10 s). Steady state
-  (all nodes known + provisioned + group-matched) costs zero table traffic beyond
+  (all nodes known + provisioned + profile-matched) costs zero table traffic beyond
   the backstop.
 
 Implementation: the table logic is the dependency-free, host-tested
@@ -208,7 +235,8 @@ decision + builder (`tableRowReplyWanted`/`tableRowBuild`) — is the equally
 pure, host-tested `include/table_wire.h`; `main.cpp` owns the NVS
 blob, the radio calls, the reply queue (stash in the recv callback, drain in
 `loop()` — same shape as the power-report queue), and the node-side adoption. The conductor edits it
-over serial — `assign <mac> <x> <y>`, `group <mac> <1..8>`, `table`,
+over serial — `assign <mac> <x> <y>`, `group <mac> <1..8>`,
+`leds <mac> <16|32|64>`, `table`,
 `forget <mac>` — and pushes the change immediately.
 REGISTER reports are reconciled in `loop()` so a factory number is persisted
 without writing NVS inside the radio callback. A node stashes its row in the
@@ -366,13 +394,13 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   `FF:FF:FF:FF:FF:FF`, `WIFI_STA`. The hot path (sync.h) reads `epoch_us`+`seq`.
 - **[done]** Bidirectional ESP-NOW: a performer learns the conductor's MAC from the
   recv-info, adds it as a peer, and unicasts
-  `MSG_REGISTER {mac, id, group_id, fw, build, dirty, version}` every 10 s; the conductor
+  `MSG_REGISTER {mac, id, group_id, led_count, fw, build, dirty, version}` every 10 s; the conductor
   builds a MAC-keyed roster (`roster` serial command). `fw` is wire
   compatibility (`PROTO_VERSION`); `version` + `build` + `dirty` are the OTA
   safety marker that catches same-protocol stale firmware.
 - **[done]** `MSG_TABLE`: the conductor broadcasts inventory and layout in chunks
-  (`TableRow` ×13/packet); nodes adopt their permanent ID, optional position, and
-  group. `chunk`/`chunks` fields let a
+  (`TableRow` ×12/packet); nodes adopt their permanent ID, optional position,
+  group, and 16/32/64 LED profile. `chunk`/`chunks` fields let a
   receiver tell how much it has seen.
 - **[done]** `MSG_POWER`: an INA228-instrumented performer unicasts its
   hardware-accumulated energy/charge to the conductor (§4.3), reusing the
@@ -507,8 +535,9 @@ not required for the main installation behavior.
 | 2 — NVS identity + position-aware sweep | ✅ done, hardware-verified |
 | Refactor — symmetric runtime role + NVS pattern persistence + rainbow drift pattern | ✅ done, hardware-verified |
 | Protocol foundation, Half 1 — typed header, MAC identity, bidirectional ESP-NOW, registration + roster | ✅ done, hardware-verified |
-| Protocol foundation, Half 2 — MAC→ID+optional-position/group inventory broadcast + NVS cache (`assign`/`group`/`table`/`forget`) | ✅ v7 position path hardware-verified; v8 ID and v9 group paths pending bench verification |
+| Protocol foundation, Half 2 — MAC→ID+optional-position/group/LED-profile inventory broadcast + NVS cache (`assign`/`group`/`leds`/`table`/`forget`) | ✅ v7 position path hardware-verified; v8 ID, v9 group, and v10 LED-profile paths pending bench verification |
 | Lantern groups — eight independent pattern slots + MAC group membership | ✅ code-complete + host/control tested; hardware verification pending |
+| Mixed LED counts — per-board 16/32/64 active-emitter profile | ✅ code-complete + host/control tested; hardware verification pending |
 | Control plane - structured machine Pi↔conductor serial (bulk table/show-program) | ✅ UI/API, authenticated remote boundary, and Pi packaging done; physical Pi/tunnel rollout pending |
 | Auto-calibration — register / roster / blink + laptop CV | 📐 planned |
 | 3 — power management (radio duty-cycle, schedule deep-sleep, optional LDR fallback, INA228 energy monitor) | 🛠 in progress — Lever 1 Stage A (performer radio duty-cycle) ✅ done + host-tested + hardware-verified + measured (85→~55 mA @ 12V); Stage B (CPU light-sleep between work, `napsched.h`) ✅ hardware-verified on bench 2026-07-03 (power re-measure owed); schedule-driven deep sleep ✅ code-complete + host-tested + UI/API built, hardware verification owed; photodiode dusk sensing is now optional/fallback; INA228 instrumentation (§4.3) ✅ firmware done + host-tested (`powermon.h`, `MSG_POWER`), awaiting the chip |

@@ -66,6 +66,20 @@ def test_group_assignment_maps_to_json_command() -> None:
     }
 
 
+def test_led_count_assignment_maps_to_json_command() -> None:
+    transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "led count changed"})])
+    conductor = JsonLineSerialConductor(transport)
+
+    conductor.assign_led_count("AA:BB:CC:DD:EE:FF", 64)
+
+    assert json.loads(transport.writes[0]) == {
+        "id": 1,
+        "cmd": "led_count",
+        "mac": "AA:BB:CC:DD:EE:FF",
+        "led_count": 64,
+    }
+
+
 def test_pattern_command_includes_brightness_and_params() -> None:
     transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "pattern changed to Sweep"})])
     conductor = JsonLineSerialConductor(transport)
