@@ -380,6 +380,74 @@ def test_autoflash_current_board_gets_missing_id_without_reflash(
     assert any("BOARD #1  NEW ID - LABEL THIS BOARD" in message for message in messages)
 
 
+def test_autoflash_uses_authoritative_id_and_reports_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mac = "C0:CD:D6:C8:03:E0"
+    manifest = {"commit": "a" * 40}
+    current = autoflash.DeviceInfo(
+        "PERFORMER", 0, mac, 0.0, 0.0, "0.5.1", 8, "a" * 8, False
+    )
+    assigned = autoflash.DeviceInfo(
+        "PERFORMER", 54, mac, 0.0, 0.0, "0.5.1", 8, "a" * 8, False
+    )
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(autoflash, "probe_board", lambda _port: {"mac": mac})
+    monkeypatch.setattr(autoflash, "write_node_id", lambda _port, _id: assigned)
+    resolver_calls = []
+    progress = []
+
+    result = autoflash.process_port(
+        "/dev/ttyUSB0",
+        manifest,
+        tmp_path / "unused.zip",
+        tmp_path / "work",
+        device_registry=tmp_path / "devices.json",
+        factory_authorized=False,
+        id_resolver=lambda resolved_mac, reported: resolver_calls.append(
+            (resolved_mac, reported)
+        ) or (54, True),
+        progress=lambda stage, message: progress.append((stage, message)),
+    )
+
+    assert resolver_calls == [(mac, 0)]
+    assert autoflash.load_device_registry(tmp_path / "devices.json")[mac].node_id == 54
+    assert [stage for stage, _message in progress] == [
+        "probing",
+        "reserving_id",
+        "verifying",
+        "assigning_id",
+        "done",
+    ]
+    assert "permanent ID #54 verified" in result
+
+
+def test_autoflash_refuses_conductor_before_any_flash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mac = "C0:CD:D6:C8:03:E0"
+    conductor = autoflash.DeviceInfo(
+        "CONDUCTOR", 1, mac, 0.0, 0.0, "0.5.1", 8, "a" * 8, False
+    )
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: conductor)
+    monkeypatch.setattr(autoflash, "probe_board", lambda _port: {"mac": mac})
+    monkeypatch.setattr(
+        autoflash,
+        "flash_board",
+        lambda *_args: pytest.fail("conductor must not be flashed"),
+    )
+
+    with pytest.raises(RuntimeError, match="refusing to auto-flash a conductor"):
+        autoflash.process_port(
+            "/dev/ttyUSB0",
+            {"commit": "a" * 40},
+            tmp_path / "unused.zip",
+            tmp_path / "work",
+            device_registry=tmp_path / "devices.json",
+            factory_authorized=False,
+        )
+
+
 def test_autoflash_factory_board_is_numbered_after_flash_and_printed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 
@@ -77,6 +77,17 @@ class DeviceRecord:
     state: str
     node_id: int | None = None
     legacy_identity_pending: bool = False
+
+
+@dataclass(frozen=True)
+class PortCandidate:
+    device: str
+    location: str | None
+    hardware_id: str
+
+
+ProgressCallback = Callable[[str, str], None]
+IdResolver = Callable[[str, int], tuple[int, bool]]
 
 
 def parse_device_info(text: str) -> DeviceInfo | None:
@@ -597,8 +608,25 @@ def process_port(
     *,
     device_registry: Path,
     factory_authorized: bool,
+    progress: ProgressCallback | None = None,
+    id_resolver: IdResolver | None = None,
 ) -> str:
+    def report(stage: str, message: str) -> None:
+        if progress is not None:
+            progress(stage, message)
+
+    def resolve_id(mac: str, reported_id: int) -> tuple[int, bool]:
+        if id_resolver is None:
+            assigned, recorded = ensure_node_id(device_registry, mac, reported_id)
+            return assigned, recorded and reported_id == 0
+        assigned, created = id_resolver(mac, reported_id)
+        cached, _recorded = ensure_node_id(device_registry, mac, assigned)
+        if cached != assigned:
+            raise RuntimeError("local and authoritative permanent IDs disagree")
+        return assigned, created
+
     devices = load_device_registry(device_registry)
+    report("probing", "Reading board identity")
     before = read_info(port)
     probe = probe_board(port)
     if before is None:
@@ -608,6 +636,10 @@ def process_port(
         before = read_info(port, 5.0)
     if before and before.mac != probe["mac"]:
         raise RuntimeError("serial identity and ROM MAC disagree")
+    if before and before.role == "CONDUCTOR":
+        raise RuntimeError("refusing to auto-flash a conductor")
+    if before and before.role != "PERFORMER":
+        raise RuntimeError(f"unsupported board role {before.role}")
     record = devices.get(probe["mac"])
     device_state = record.state if record else None
     if before is not None:
@@ -633,20 +665,20 @@ def process_port(
     assigned_id: int | None = None
     allocated_new = False
     if before is not None:
-        assigned_id, recorded = ensure_node_id(
-            device_registry, probe["mac"], before.node_id
-        )
-        allocated_new = recorded and before.node_id == 0
+        report("reserving_id", "Verifying permanent board ID")
+        assigned_id, allocated_new = resolve_id(probe["mac"], before.node_id)
 
     if should_skip(before, manifest):
         after = before
         action = f"already runs approved build {approved_build(manifest)}"
+        report("verifying", "Approved firmware already installed")
     else:
         log(
             f"{port}: starting flash of {probe['mac']} "
             f"to production build {approved_build(manifest)}"
         )
         destination = work / probe["mac"].replace(":", "")
+        report("preparing", "Validating production firmware bundle")
         plan = extract_bundle(bundle, destination)
         erase = should_erase(
             before,
@@ -657,15 +689,21 @@ def process_port(
             # A pending marker is intentionally ambiguous. A crash or command
             # error requires explicit per-MAC operator authorization.
             write_device_state(device_registry, probe["mac"], "erase_pending")
+            report("erasing", "Erasing factory flash")
             erase_board(port)
             write_device_state(device_registry, probe["mac"], "known")
+        report("flashing", f"Writing production build {approved_build(manifest)}")
         flash_board(port, plan, destination)
+        report("rebooting", "Waiting for board to reboot")
         time.sleep(1.5)
+        report("verifying", "Verifying firmware, MAC, and role")
         after = read_info(port, 5.0)
         if not after or after.build != approved_build(manifest) or after.dirty:
             raise RuntimeError("post-flash firmware identity did not match the production release")
         if after.mac != probe["mac"]:
             raise RuntimeError("post-flash firmware and ROM MAC disagree")
+        if after.role != "PERFORMER":
+            raise RuntimeError(f"post-flash role is {after.role}, expected PERFORMER")
         if before and not preserves_role_position(before, after):
             raise RuntimeError("post-flash NVS role/position changed")
         action = f"flashed build {after.build}; role/position verified"
@@ -673,12 +711,11 @@ def process_port(
     if after is None:
         raise RuntimeError("board identity unavailable after provisioning")
     if assigned_id is None:
-        assigned_id, recorded = ensure_node_id(
-            device_registry, probe["mac"], after.node_id
-        )
-        allocated_new = recorded and after.node_id == 0
+        report("reserving_id", "Reserving permanent board ID")
+        assigned_id, allocated_new = resolve_id(probe["mac"], after.node_id)
     if after.node_id != assigned_id:
         before_id_write = after
+        report("assigning_id", f"Writing permanent board ID #{assigned_id}")
         after = write_node_id(port, assigned_id)
         if (
             not after
@@ -695,17 +732,31 @@ def process_port(
         assigned_id,
         newly_assigned=allocated_new,
     )
+    report("done", f"BOARD #{assigned_id} ready to label")
     return f"{after.mac} {action}; permanent ID #{assigned_id} verified"
 
 
-def candidate_ports() -> set[str]:
+def candidate_port_infos() -> list[PortCandidate]:
     from serial.tools import list_ports
 
-    return {
-        item.device
+    return [
+        PortCandidate(
+            device=item.device,
+            location=item.location,
+            hardware_id=item.hwid,
+        )
         for item in list_ports.comports()
-        if item.vid == WCH_VID and item.pid == WCH_PID and item.device.startswith("/dev/cu.")
-    }
+        if item.vid == WCH_VID
+        and item.pid == WCH_PID
+        and (
+            item.device.startswith("/dev/cu.")
+            or item.device.startswith("/dev/ttyUSB")
+        )
+    ]
+
+
+def candidate_ports() -> set[str]:
+    return {item.device for item in candidate_port_infos()}
 
 
 def watch(args: argparse.Namespace) -> int:
