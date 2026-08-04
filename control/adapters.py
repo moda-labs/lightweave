@@ -40,9 +40,10 @@ class ConductorAdapter(Protocol):
     def tick(self) -> None: ...
     def identify(self, mac: str) -> dict[str, Any]: ...
     def assign(self, mac: str, x: float, y: float) -> dict[str, Any]: ...
+    def assign_group(self, mac: str, group_id: int) -> dict[str, Any]: ...
     def forget(self, mac: str) -> dict[str, Any]: ...
     def replace(self, old_mac: str, new_mac: str) -> dict[str, Any]: ...
-    def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str]) -> dict[str, Any]: ...
+    def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str], group_id: int | None = None) -> dict[str, Any]: ...
     def blackout(self) -> dict[str, Any]: ...
     def update_power_policy(self, policy: dict[str, Any]) -> dict[str, Any]: ...
     def update_keepalive(self, config: dict[str, Any]) -> dict[str, Any]: ...
@@ -97,19 +98,24 @@ class JsonLineSerialConductor:
     def assign(self, mac: str, x: float, y: float) -> dict[str, Any]:
         return self._request("assign", mac=mac, x=x, y=y)
 
+    def assign_group(self, mac: str, group_id: int) -> dict[str, Any]:
+        return self._request("group", mac=mac, group_id=group_id)
+
     def forget(self, mac: str) -> dict[str, Any]:
         return self._request("forget", mac=mac)
 
     def replace(self, old_mac: str, new_mac: str) -> dict[str, Any]:
         return self._request("replace", old_mac=old_mac, new_mac=new_mac)
 
-    def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str]) -> dict[str, Any]:
-        return self._request(
-            "pattern",
-            pattern=pattern,
-            brightness=brightness,
-            params=_pattern_params_for_wire(pattern, params),
-        )
+    def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str], group_id: int | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "pattern": pattern,
+            "brightness": brightness,
+            "params": _pattern_params_for_wire(pattern, params),
+        }
+        if group_id is not None:
+            payload["group_id"] = group_id
+        return self._request("pattern", **payload)
 
     def blackout(self) -> dict[str, Any]:
         return self._request("blackout")

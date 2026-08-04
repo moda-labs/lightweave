@@ -1035,6 +1035,24 @@ void test_table_migrates_legacy_positions_without_inventing_ids() {
   TEST_ASSERT_FALSE(tableMigrateLegacy(legacy, current));
 }
 
+void test_table_group_assignment_preserves_position_and_rejects_bad_ids() {
+  LayoutTable t;
+  tableInit(t);
+  uint8_t a[6];
+  macN(a, 1);
+  TEST_ASSERT_TRUE(tableSetWithGroup(t, a, 1.5f, 2.5f, 3));
+  TEST_ASSERT_TRUE(tableSetGroup(t, a, 6));
+  TEST_ASSERT_FALSE(tableSetGroup(t, a, GROUP_COUNT));
+  tableSet(t, a, 9.0f, 8.0f);  // a position edit must not reset membership
+  float x = 0, y = 0;
+  uint8_t group_id = 0;
+  TEST_ASSERT_TRUE(tableLookup(t, a, x, y));
+  TEST_ASSERT_TRUE(tableLookupGroup(t, a, group_id));
+  TEST_ASSERT_EQUAL_FLOAT(9.0f, x);
+  TEST_ASSERT_EQUAL_FLOAT(8.0f, y);
+  TEST_ASSERT_EQUAL_UINT8(6, group_id);
+}
+
 void test_table_remove() {
   // Node replacement: dropping a MAC leaves the others intact and findable.
   LayoutTable t;
@@ -1680,6 +1698,17 @@ void test_pattern_boot_safe() {
   TEST_ASSERT_EQUAL_UINT16(999, patterns::patternBootSafe(999));
 }
 
+void test_group_beacon_selects_independent_configs_and_fits_espnow() {
+  BeaconMsg b = {};
+  b.patterns[0] = {patterns::GLOW, 48, 0, {40, 100, 0, 0}};
+  b.patterns[5] = {patterns::SWEEP, 72, 0, {8000, 300, 0, 0}};
+  TEST_ASSERT_EQUAL_UINT8(8, GROUP_COUNT);
+  TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, beaconPattern(b, 0).pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::SWEEP, beaconPattern(b, 5).pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, beaconPattern(b, 99).pattern_id);
+  TEST_ASSERT_TRUE(sizeof(BeaconMsg) <= 250);
+}
+
 // ---- Machine serial JSON protocol -------------------------------------------
 
 void test_serial_json_assign_parses_mac_and_position() {
@@ -1696,6 +1725,25 @@ void test_serial_json_assign_parses_mac_and_position() {
   TEST_ASSERT_EQUAL_HEX8(0x8C, cmd.mac[0]);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, cmd.x);
   TEST_ASSERT_EQUAL_FLOAT(0.75f, cmd.y);
+}
+
+void test_serial_json_group_and_targeted_pattern_parse() {
+  SerialJsonCommand group_cmd, pattern_cmd;
+  const char* error = nullptr;
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":8,\"cmd\":\"group\",\"mac\":\"8C:94:DF:57:7F:14\",\"group_id\":3}",
+      group_cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_GROUP, group_cmd.kind);
+  TEST_ASSERT_TRUE(group_cmd.has_group_id);
+  TEST_ASSERT_EQUAL_UINT8(3, group_cmd.group_id);
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":9,\"cmd\":\"pattern\",\"pattern\":\"Sweep\",\"group_id\":6}",
+      pattern_cmd, error));
+  TEST_ASSERT_TRUE(pattern_cmd.has_group_id);
+  TEST_ASSERT_EQUAL_UINT8(6, pattern_cmd.group_id);
+  TEST_ASSERT_FALSE(serialJsonParse(
+      "{\"id\":10,\"cmd\":\"group\",\"mac\":\"8C:94:DF:57:7F:14\",\"group_id\":8}",
+      group_cmd, error));
 }
 
 void test_serial_json_pattern_maps_name_brightness_and_params() {
@@ -1996,15 +2044,16 @@ void test_table_msg_find_row() {
   macN(b, 2);
   macN(absent, 99);
   tableSet(t, a, 1.0f, 2.0f);
-  tableSet(t, b, -7.5f, 0.25f);
+  tableSetWithGroup(t, b, -7.5f, 0.25f, 4);
   tableAdoptIdentity(t, b, 22);
   TableMsg m;
   tableChunkBuild(t, 0, m);
 
-  TableAssignment assignment;
+  TableAssignment assignment = {};
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(22, assignment.id);
   TEST_ASSERT_TRUE(assignment.has_position);
+  TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, assignment.x);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, assignment.y);
   TEST_ASSERT_FALSE(tableMsgFindRow(m, absent, assignment));
@@ -2022,17 +2071,23 @@ void test_table_msg_find_row() {
 void test_table_row_reply_wanted() {
   // First join since conductor boot (or a full roster dropped the insert —
   // known-ness is computed BEFORE the upsert, so full can't mask new).
-  TEST_ASSERT_TRUE(tableRowReplyWanted(/*mac_known*/ false, /*reported*/ 7,
-                                       /*have_authoritative*/ true, 7));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(/*mac_known*/ false, /*reported id*/ 7,
+                                       /*reported group*/ 0,
+                                       /*have_authoritative*/ true,
+                                       /*authoritative id*/ 7,
+                                       /*authoritative group*/ 0));
   // Unprovisioned (id 0): fresh flash / erase_flash recovery — its NVS
   // position cache is gone even though the conductor has seen the MAC.
-  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 0, true, 7));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 0, 0, true, 7, 0));
   // A conflicting board gets the authoritative row so it can log the conflict;
   // receiver logic refuses to silently change a non-zero physical-board ID.
-  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 8, true, 7));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 8, 0, true, 7, 0));
+  // A placed node that missed a live group edit reports its old cached group in
+  // REGISTER; the mismatch earns the same reliable row reply.
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 7, 2, true, 7, 3));
   // Known + provisioned re-register (every 10 s, all night): no reply —
   // steady state costs zero table traffic.
-  TEST_ASSERT_FALSE(tableRowReplyWanted(true, 7, true, 7));
+  TEST_ASSERT_FALSE(tableRowReplyWanted(true, 7, 3, true, 7, 3));
 }
 
 void test_table_row_build() {
@@ -2043,18 +2098,19 @@ void test_table_row_build() {
   macN(b, 2);
   macN(absent, 99);
   tableSet(t, a, 1.0f, 2.0f);
-  tableSet(t, b, -7.5f, 0.25f);
+  tableSetWithGroup(t, b, -7.5f, 0.25f, 4);
   tableAdoptIdentity(t, b, 42);
 
   TableMsg m;
   size_t len = tableRowBuild(t, b, m);
-  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);
+  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);  // 27 B on the wire
   TEST_ASSERT_EQUAL_UINT32(BEACON_MAGIC, m.hdr.magic);
   TEST_ASSERT_EQUAL_UINT8(PROTO_VERSION, m.hdr.version);
   TEST_ASSERT_EQUAL_UINT8(MSG_TABLE, m.hdr.type);
   TEST_ASSERT_EQUAL_UINT8(1, m.n);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(b, m.rows[0].mac, 6);
   TEST_ASSERT_EQUAL_UINT16(42, m.rows[0].id);
+  TEST_ASSERT_EQUAL_UINT8(4, m.rows[0].group_id);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, m.rows[0].x);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, m.rows[0].y);
   // The receiver-side path accepts it end to end: length gates + own-row scan.
@@ -2063,6 +2119,7 @@ void test_table_row_build() {
   TableAssignment assignment;
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
+  TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, assignment.x);
   TEST_ASSERT_TRUE(assignment.has_position);
   TEST_ASSERT_TRUE(tableClearPosition(t, b));
@@ -2070,6 +2127,7 @@ void test_table_row_build() {
   TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
+  TEST_ASSERT_EQUAL_UINT8(0, assignment.group_id);
   TEST_ASSERT_FALSE(assignment.has_position);
   // No inventory row yet: nothing to say.
   TEST_ASSERT_EQUAL_size_t(0, tableRowBuild(t, absent, m));
@@ -2219,6 +2277,7 @@ int main(int, char**) {
   RUN_TEST(test_table_permanent_ids_are_unique_and_survive_position_changes);
   RUN_TEST(test_table_reports_live_identity_conflicts);
   RUN_TEST(test_table_migrates_legacy_positions_without_inventing_ids);
+  RUN_TEST(test_table_group_assignment_preserves_position_and_rejects_bad_ids);
   RUN_TEST(test_table_remove);
   RUN_TEST(test_table_overflow_drops_new);
   RUN_TEST(test_heartbeat_square_wave);
@@ -2267,7 +2326,9 @@ int main(int, char**) {
   RUN_TEST(test_mac_parse_rejects_out_of_range_group);
   RUN_TEST(test_mac_format_roundtrip);
   RUN_TEST(test_pattern_boot_safe);
+  RUN_TEST(test_group_beacon_selects_independent_configs_and_fits_espnow);
   RUN_TEST(test_serial_json_assign_parses_mac_and_position);
+  RUN_TEST(test_serial_json_group_and_targeted_pattern_parse);
   RUN_TEST(test_serial_json_pattern_maps_name_brightness_and_params);
   RUN_TEST(test_serial_json_glow_maps_hue_and_saturation_params);
   RUN_TEST(test_serial_json_white_maps_pattern_name);

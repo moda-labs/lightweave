@@ -10,6 +10,7 @@ def test_snapshot_counts_healthy_placed_over_placed_total() -> None:
     assert snapshot["summary"]["total"] == 9
     assert snapshot["summary"]["attention"] == 2
     assert snapshot["pattern"]["pattern"] == "Glow"
+    assert len(snapshot["patterns"]) == 8
     assert snapshot["summary"]["firmware"]["consistent"] is True
     assert snapshot["summary"]["firmware"]["matching"] == 8
     assert snapshot["summary"]["firmware"]["expected"] == 9
@@ -193,11 +194,28 @@ def test_blackout_preserves_pattern_and_sets_brightness_zero() -> None:
     }
 
 
-def test_replace_moves_only_position_to_unpositioned_spare() -> None:
+def test_groups_keep_independent_patterns_and_membership() -> None:
+    conductor = MockConductor()
+    mac = conductor._lanterns[0].mac
+
+    group_ack = conductor.assign_group(mac, 2)
+    pattern_ack = conductor.update_pattern("Sweep", 72, {"period": 8000}, group_id=2)
+    snapshot = conductor.snapshot()
+
+    lantern = next(item for item in snapshot["lanterns"] if item["mac"] == mac)
+    assert group_ack["ok"] is True
+    assert pattern_ack["ok"] is True
+    assert lantern["group_id"] == 2
+    assert snapshot["patterns"][2]["config"]["pattern"] == "Sweep"
+    assert snapshot["patterns"][0]["config"]["pattern"] == "Glow"
+
+
+def test_replace_moves_only_position_and_group_to_unpositioned_spare() -> None:
     conductor = MockConductor()
     old_mac = "A0:B7:65:11:44:91"
     new_mac = "8C:94:DF:57:7F:14"
 
+    assert conductor.assign_group(old_mac, 2)["ok"] is True
     ack = conductor.replace(old_mac, new_mac)
     lanterns = conductor.lanterns()
     old = next(item for item in lanterns if item["mac"] == old_mac)
@@ -208,8 +226,10 @@ def test_replace_moves_only_position_to_unpositioned_spare() -> None:
     assert old["label"] == "#18"
     assert old["status"] == "missing"
     assert old["attention"] == "Not seen"
+    assert old["group_id"] == 0
     assert new["position"] == "Set"
     assert new["label"] == "#57"
+    assert new["group_id"] == 2
     assert new["x"] == 0.66
     assert new["y"] == 0.69
 

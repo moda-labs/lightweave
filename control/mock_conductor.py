@@ -15,7 +15,7 @@ def _now() -> float:
 
 FIELD_FIRMWARE = {
     "version": "0.3.0",
-    "proto": 7,
+    "proto": 9,
     "build_id": 0x44D028FD,
     "build_label": "44d028fd",
     "dirty": False,
@@ -42,6 +42,7 @@ DEFAULT_KEEPALIVE = {
 }
 
 OTA_WINDOW_S = 15 * 60
+GROUP_COUNT = 8
 
 
 def _firmware_matches(expected: dict[str, Any], actual: dict[str, Any] | None) -> bool:
@@ -73,6 +74,7 @@ class Lantern:
     power_last_report_s: float | None = None
     node_id: int | None = None
     firmware: dict[str, Any] = field(default_factory=lambda: deepcopy(FIELD_FIRMWARE))
+    group_id: int = 0
 
     def as_dict(self, now: float) -> dict[str, Any]:
         has_position = self.x is not None and self.y is not None
@@ -97,6 +99,8 @@ class Lantern:
             "x": self.x,
             "y": self.y,
             "position": "Set" if has_position else "Missing",
+            "group_id": self.group_id if has_position else 0,
+            "group": f"Group {(self.group_id if has_position else 0) + 1}",
             "attention": attention,
             "firmware": deepcopy(self.firmware),
             "power": {
@@ -141,6 +145,7 @@ class MockConductor:
             "params": {"hue": 40, "saturation": 100},
         }
     )
+    group_patterns: list[dict[str, Any]] = field(default_factory=list)
     ota_started_at: float | None = None
     ota_installed_crc32: int | None = None
     _ota_write: bytearray | None = field(default=None, init=False, repr=False)
@@ -164,6 +169,13 @@ class MockConductor:
     )
 
     def __post_init__(self) -> None:
+        if not self.group_patterns:
+            self.group_patterns = [deepcopy(self.pattern) for _ in range(GROUP_COUNT)]
+        else:
+            self.group_patterns = [deepcopy(item) for item in self.group_patterns[:GROUP_COUNT]]
+            while len(self.group_patterns) < GROUP_COUNT:
+                self.group_patterns.append(deepcopy(self.pattern))
+        self.pattern = deepcopy(self.group_patterns[0])
         if not self.events:
             self._event("mock conductor started")
             self._event("beacon seq=184221 pattern=GLOW bri=48 wake=on")
@@ -193,6 +205,10 @@ class MockConductor:
                 "firmware": firmware,
             },
             "pattern": deepcopy(self.pattern),
+            "patterns": [
+                {"group_id": group_id, "config": deepcopy(config)}
+                for group_id, config in enumerate(self.group_patterns)
+            ],
             "power": deepcopy(self.power),
             "keepalive": deepcopy(self.keepalive),
             "ota": ota,
@@ -227,12 +243,25 @@ class MockConductor:
         self._event(f"assign {lantern.mac} x={x:.2f} y={y:.2f}")
         return {"ok": True, "message": f"assigned {lantern.label}", "mac": lantern.mac}
 
+    def assign_group(self, mac: str, group_id: int) -> dict[str, Any]:
+        lantern = self._find(mac)
+        if not lantern:
+            return {"ok": False, "error": "unknown lantern"}
+        if lantern.x is None or lantern.y is None:
+            return {"ok": False, "error": "lantern must be placed before grouping"}
+        if group_id < 0 or group_id >= GROUP_COUNT:
+            return {"ok": False, "error": "invalid group"}
+        lantern.group_id = group_id
+        self._event(f"group {lantern.mac}={group_id + 1}")
+        return {"ok": True, "message": f"moved {lantern.label} to Group {group_id + 1}", "mac": lantern.mac}
+
     def forget(self, mac: str) -> dict[str, Any]:
         lantern = self._find(mac)
         if not lantern:
             return {"ok": False, "error": "unknown lantern"}
         lantern.x = None
         lantern.y = None
+        lantern.group_id = 0
         self._event(f"forget {lantern.mac}")
         return {"ok": True, "message": f"forgot position for {lantern.label}", "mac": lantern.mac}
 
@@ -251,8 +280,10 @@ class MockConductor:
         new_label = new.label
         new.x = old.x
         new.y = old.y
+        new.group_id = old.group_id
         old.x = None
         old.y = None
+        old.group_id = 0
         self._event(
             f"replace old={old.mac} label={old_label} "
             f"new={new.mac} label={new_label}"
@@ -264,13 +295,26 @@ class MockConductor:
             "new_mac": new.mac,
         }
 
-    def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str]) -> dict[str, Any]:
-        self.pattern = {"pattern": pattern, "brightness": brightness, "params": dict(params)}
-        self._event(f"pattern={pattern} bri={brightness}")
-        return {"ok": True, "message": f"pattern changed to {pattern}", "pattern": deepcopy(self.pattern)}
+    def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str], group_id: int | None = None) -> dict[str, Any]:
+        updated = {"pattern": pattern, "brightness": brightness, "params": dict(params)}
+        targets = range(GROUP_COUNT) if group_id is None else [group_id]
+        if group_id is not None and (group_id < 0 or group_id >= GROUP_COUNT):
+            return {"ok": False, "error": "invalid group"}
+        for target in targets:
+            self.group_patterns[target] = deepcopy(updated)
+        self.pattern = deepcopy(self.group_patterns[0])
+        scope = "all groups" if group_id is None else f"Group {group_id + 1}"
+        self._event(f"pattern={pattern} bri={brightness} scope={scope}")
+        return {"ok": True, "message": f"pattern changed to {pattern} for {scope}", "pattern": deepcopy(updated)}
 
     def blackout(self) -> dict[str, Any]:
-        self.pattern = {"pattern": self.pattern["pattern"], "brightness": 0, "params": deepcopy(self.pattern["params"])}
+        for group_id, current in enumerate(self.group_patterns):
+            self.group_patterns[group_id] = {
+                "pattern": current["pattern"],
+                "brightness": 0,
+                "params": deepcopy(current["params"]),
+            }
+        self.pattern = deepcopy(self.group_patterns[0])
         self._event("blackout bri=0")
         return {"ok": True, "message": "blackout broadcast", "pattern": deepcopy(self.pattern)}
 

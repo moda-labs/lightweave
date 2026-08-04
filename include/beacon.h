@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "firmware_version.h"
+#include "groups.h"
 #include "keepalive.h"
 #include "ota_update.h"
 #include "power_policy.h"
@@ -30,9 +31,16 @@
 // v6: PowerPolicy carries UTC epoch seconds for aligned sleep/update rendezvous.
 // v7: BeaconMsg carries USB power-bank keepalive pulse settings.
 // v8: TableRow carries a permanent numeric ID and optional-position flags.
+// v9: TableRow and REGISTER carry group membership; BeaconMsg carries one
+//     independent pattern config for each of eight lantern groups.
 // MSG_ROSTER was added without a protocol bump: it is a new optional message
 // type, and older receivers safely ignore unknown types.
-static constexpr uint8_t PROTO_VERSION = 8;
+static constexpr uint8_t PROTO_VERSION = 9;
+
+// A field has eight fixed group slots. Group ids are zero-based on the wire and
+// in NVS (the operator UI labels them Group 1..8). Fixed slots avoid a second
+// distributed naming/lifecycle protocol; the conductor remains authoritative
+// for membership and the pattern in every slot.
 
 // BeaconMsg.flags bits.
 // FIELD_AWAKE: conductor-commanded override — "the field should be awake now,
@@ -47,7 +55,7 @@ enum MsgType : uint8_t {
   MSG_BEACON   = 0,  // conductor -> all: clock + pattern config (hot path)
   MSG_REGISTER = 1,  // performer -> conductor: announce my MAC + firmware
   MSG_ROSTER   = 2,  // conductor -> all: finalized roster        (Half 2)
-  MSG_TABLE    = 3,  // conductor -> all: MAC->ID+optional position inventory
+  MSG_TABLE    = 3,  // conductor -> all: MAC->ID+position+group inventory
   MSG_ACK      = 4,  // generic acknowledgement                   (Half 2)
   MSG_POWER    = 5,  // performer -> conductor: INA228 energy telemetry
   MSG_OTA_BEGIN = 6, // conductor -> all: begin field firmware OTA
@@ -62,21 +70,35 @@ typedef struct __attribute__((packed)) {
   uint8_t  type;     // MsgType
 } MsgHeader;
 
-// type = MSG_BEACON. The conductor's clock plus the pattern config every node
-// renders. Fields after the header are unchanged from the original beacon, so
-// the sync hot path (sync.h consumes epoch_us + seq) is untouched.
+// One group's pattern configuration. Kept as a separate packed wire type so a
+// performer can select its own group without copying or interpreting the other
+// seven configs. 8 * 12 B still leaves the full beacon well below ESP-NOW's
+// 250-byte payload cap.
+typedef struct __attribute__((packed)) {
+  uint16_t  pattern_id;  // which pattern to render
+  uint8_t   brightness;  // per-group brightness cap (0-255)
+  uint8_t   palette_id;  // palette selector
+  uint16_t  params[4];   // pattern-specific knobs for live tweaking
+} PatternConfig;
+
+// type = MSG_BEACON. The conductor's clock plus every group's pattern config.
+// The sync hot path still consumes only epoch_us + seq and is untouched.
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;
   int64_t   epoch_us;    // conductor's esp_timer clock at send time
-  uint16_t  pattern_id;  // which pattern to render
-  uint8_t   brightness;  // global brightness cap (0-255)
-  uint8_t   palette_id;  // palette selector
+  PatternConfig patterns[GROUP_COUNT];
   uint8_t   flags;       // BEACON_FLAG_* bits (field-awake override, …)
-  uint16_t  params[4];   // pattern-specific knobs for live tweaking
   PowerPolicy power;      // runtime sleep/schedule config, broadcast not reflashed
   KeepAliveConfig keepalive;  // scheduled-off LED pulse to keep USB banks awake
   uint32_t  seq;         // monotonic; for drop detection / logging
 } BeaconMsg;
+
+inline const PatternConfig& beaconPattern(const BeaconMsg& b,
+                                          uint8_t group_id) {
+  return b.patterns[groupIdSafe(group_id)];
+}
+
+static_assert(sizeof(BeaconMsg) <= 250, "BeaconMsg exceeds ESP-NOW payload cap");
 
 // type = MSG_ROSTER. During camera calibration the conductor broadcasts the
 // sorted alive MAC roster in chunks. Each performer finds its own MAC and uses
@@ -115,6 +137,7 @@ typedef struct __attribute__((packed)) {
   MsgHeader hdr;
   uint8_t   mac[6];  // sender's WiFi STA MAC — the node's stable identity
   uint16_t  id;      // human label (0 if unprovisioned)
+  uint8_t   group_id;  // cached table group; lets conductor repair a missed edit
   uint8_t   fw;      // sender's PROTO_VERSION (wire compatibility marker)
   uint32_t  build;   // sender's firmware build id (git-derived)
   uint8_t   dirty;   // sender was built from uncommitted firmware changes
@@ -122,22 +145,23 @@ typedef struct __attribute__((packed)) {
 } RegisterMsg;
 
 // One row of the conductor inventory on the wire. ID belongs to the physical
-// board; position is optional and deployment-specific.
+// board; position and show group are deployment-specific.
 typedef struct __attribute__((packed)) {
   uint8_t  mac[6];
   uint16_t id;
   uint8_t  flags;
+  uint8_t  group_id;
   float    x;
   float    y;
-} TableRow;  // 17 bytes
+} TableRow;  // 18 bytes
 
 // Rows per MSG_TABLE packet. ESP-NOW caps the payload at 250 B; the header + chunk
-// fields are 9 B, so (250 - 9) / 17 = 14 rows fit (a 247 B packet at full).
-static constexpr uint8_t TABLE_ROWS_PER_MSG = 14;
+// fields are 9 B, so (250 - 9) / 18 = 13 rows fit (a 243 B packet at full).
+static constexpr uint8_t TABLE_ROWS_PER_MSG = 13;
 
 // type = MSG_TABLE. The conductor's authoritative inventory, broadcast in
 // chunks. A node scans for its MAC and adopts + caches its permanent ID and
-// optional position. `chunk`/`chunks` describe one inventory round.
+// optional position and group. `chunk`/`chunks` describe one inventory round.
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;
   uint8_t   chunk;   // this chunk's index, 0..chunks-1

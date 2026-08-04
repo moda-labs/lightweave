@@ -59,7 +59,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Lantern</th><th>Status</th><th>Last seen</th><th>Position</th><th>Attention</th><th>Locate</th></tr></thead>
+            <thead><tr><th>Lantern</th><th>Group</th><th>Status</th><th>Last seen</th><th>Position</th><th>Attention</th><th>Locate</th></tr></thead>
             <tbody id="lantern-rows"></tbody>
           </table>
         </div>
@@ -68,7 +68,14 @@
       <section class="view" id="view-show">
         <div class="panel">
           <h2>Patterns</h2>
-          <p>Global controls affect the whole field after the conductor acknowledges the write.</p>
+          <p>Choose a group, then tune and send an independent pattern to its lanterns.</p>
+          <label class="control-label" for="pattern-group">Lantern group</label>
+          <select id="pattern-group" class="group-select">
+            <option value="0">Group 1</option><option value="1">Group 2</option>
+            <option value="2">Group 3</option><option value="3">Group 4</option>
+            <option value="4">Group 5</option><option value="5">Group 6</option>
+            <option value="6">Group 7</option><option value="7">Group 8</option>
+          </select>
           <div class="segmented" id="pattern-picker">
             <button data-pattern="Pulse">Pulse</button>
             <button data-pattern="Palette Drift">Drift</button>
@@ -478,6 +485,13 @@
         <button data-action="details">Details</button>
         <button class="danger" data-action="forget">Forget</button>
       </div>
+      <label class="control-label" for="lantern-group">Pattern group</label>
+      <select id="lantern-group" class="group-select">
+        <option value="0">Group 1</option><option value="1">Group 2</option>
+        <option value="2">Group 3</option><option value="3">Group 4</option>
+        <option value="4">Group 5</option><option value="5">Group 6</option>
+        <option value="6">Group 7</option><option value="7">Group 8</option>
+      </select>
       <div class="replace-panel" id="replace-panel" hidden>
         <div class="replace-head">
           <div>

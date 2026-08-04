@@ -12,6 +12,7 @@ let movingDrag = null;
 let replaceMode = false;
 let replacementMac = null;
 let patternDraft = null;
+let selectedGroup = 0;
 let powerBaseline = null;
 let keepaliveBaseline = null;
 let otaArtifact = null;
@@ -25,6 +26,7 @@ let wifiStatus = null;
 let releaseInfo = null;
 
 const MAP_PADDING = 0.08;
+const GROUP_COUNT = 8;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 3;
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
@@ -179,6 +181,19 @@ function lanterns() {
   return state?.lanterns || [];
 }
 
+function patternForGroup(groupId) {
+  const entry = (state?.patterns || []).find((item) => Number(item.group_id) === Number(groupId));
+  return entry?.config || (Number(groupId) === 0 ? state?.pattern : null) || state?.pattern || {
+    pattern: "Glow",
+    brightness: 48,
+    params: {},
+  };
+}
+
+function activePatternState() {
+  return patternForGroup(selectedGroup);
+}
+
 function lanternDisplayName(mac) {
   const lantern = lanterns().find((item) => item.mac === mac);
   if (lantern?.label && lantern.label !== "Unknown") return lantern.label;
@@ -268,7 +283,9 @@ function render() {
 
   $("#connection-status").textContent = state.conductor.connected ? "connected" : "disconnected";
   $("#field-count").textContent = `${state.summary.alive} / ${state.summary.total}`;
-  $("#show-name").textContent = state.pattern.pattern;
+  const activePattern = activePatternState();
+  $("#show-name").textContent = `Group ${selectedGroup + 1}: ${activePattern.pattern}`;
+  $("#pattern-group").value = String(selectedGroup);
   $("#attention-count").textContent = `${state.summary.attention} lights`;
   $("#sync-status").textContent = `sync ${state.conductor.sync}`;
   $("#table-sync-status").textContent = `sync ${state.conductor.sync}`;
@@ -295,51 +312,54 @@ function render() {
 }
 
 function patternHueFromState() {
-  const params = state.pattern.params || {};
+  const live = activePatternState();
+  const params = live.params || {};
   // Firefly is positional: hue lives in p1 (p0 is the period).
-  if (state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") {
-    return params.p1 !== undefined ? Number(params.p1) : PATTERN_DEFAULTS[state.pattern.pattern].hue;
+  if (live.pattern === "Firefly" || live.pattern === "Fire Flicker") {
+    return params.p1 !== undefined ? Number(params.p1) : PATTERN_DEFAULTS[live.pattern].hue;
   }
   // Ocean Wave is positional: base water hue lives in p3.
-  if (state.pattern.pattern === "Ocean Wave") {
+  if (live.pattern === "Ocean Wave") {
     return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS["Ocean Wave"].hue;
   }
   if (params.hue !== undefined) return Number(params.hue);
-  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") && params.p0 !== undefined) {
+  if ((live.pattern === "Glow" || live.pattern === "Pulse") && params.p0 !== undefined) {
     return Number(params.p0);
   }
   return 40;
 }
 
 function patternSaturationFromState() {
-  const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Firefly" || live.pattern === "Fire Flicker") {
     if (colorValuePresent(params.p2) && params.p3 !== undefined) return Math.min(100, Number(params.p3));
-    return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS[state.pattern.pattern].saturation;
+    return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS[live.pattern].saturation;
   }
-  if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+  if (live.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
     return Math.round(((Number(params.p1) >> 10) & 0x3f) * 100 / 63);
   }
-  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") &&
+  if ((live.pattern === "Glow" || live.pattern === "Pulse") &&
       colorValuePresent(params.p2) && params.p1 !== undefined) {
     return Math.min(100, Number(params.p1));
   }
   if (params.saturation !== undefined) return Number(params.saturation);
-  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") && params.p1 !== undefined) {
+  if ((live.pattern === "Glow" || live.pattern === "Pulse") && params.p1 !== undefined) {
     return Number(params.p1);
   }
   return 100;
 }
 
 function patternValueFromState() {
-  const params = state.pattern.params || {};
-  if ((state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") && colorValuePresent(params.p2)) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if ((live.pattern === "Firefly" || live.pattern === "Fire Flicker") && colorValuePresent(params.p2)) {
     return (Number(params.p2) >> 7) & 0xff;
   }
-  if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+  if (live.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
     return Math.round(((Number(params.p2) >> 9) & 0x3f) * 255 / 63);
   }
-  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") &&
+  if ((live.pattern === "Glow" || live.pattern === "Pulse") &&
       colorValuePresent(params.p2)) {
     return Number(params.p2) & 0xff;
   }
@@ -347,17 +367,19 @@ function patternValueFromState() {
 }
 
 function patternPeriodFromState() {
-  const params = state.pattern.params || {};
+  const live = activePatternState();
+  const params = live.params || {};
   if (params.period !== undefined) return Number(params.period);
-  if ((state.pattern.pattern === "Sweep" || state.pattern.pattern === "Palette Drift" || state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker" || state.pattern.pattern === "Ocean Wave") && params.p0 !== undefined) {
+  if ((live.pattern === "Sweep" || live.pattern === "Palette Drift" || live.pattern === "Firefly" || live.pattern === "Fire Flicker" || live.pattern === "Ocean Wave") && params.p0 !== undefined) {
     return Number(params.p0);
   }
-  return PATTERN_DEFAULTS[state.pattern.pattern]?.period || 4000;
+  return PATTERN_DEFAULTS[live.pattern]?.period || 4000;
 }
 
 function patternScatterFromState() {
-  const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Firefly" && params.p2 !== undefined) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Firefly" && params.p2 !== undefined) {
     if (colorValuePresent(params.p2)) return Number(params.p2) & FIREFLY_SCATTER_MASK;
     return Number(params.p2);
   }
@@ -365,8 +387,9 @@ function patternScatterFromState() {
 }
 
 function patternTextureFromState() {
-  const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Fire Flicker" && params.p2 !== undefined) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Fire Flicker" && params.p2 !== undefined) {
     if (colorValuePresent(params.p2)) return Number(params.p2) & FIREFLY_SCATTER_MASK;
     return Number(params.p2);
   }
@@ -374,37 +397,41 @@ function patternTextureFromState() {
 }
 
 function patternAngleFromState() {
-  const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Ocean Wave" && params.p2 !== undefined) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Ocean Wave" && params.p2 !== undefined) {
     return colorValuePresent(params.p2) ? Number(params.p2) & OCEAN_ANGLE_MASK : Number(params.p2);
   }
   return PATTERN_DEFAULTS["Ocean Wave"].angle;
 }
 
 function patternWavelengthFromState() {
-  const params = state.pattern.params || {};
+  const live = activePatternState();
+  const params = live.params || {};
   if (params.wavelength !== undefined) return Number(params.wavelength);
-  if ((state.pattern.pattern === "Sweep" || state.pattern.pattern === "Ocean Wave") && params.p1 !== undefined) {
-    if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+  if ((live.pattern === "Sweep" || live.pattern === "Ocean Wave") && params.p1 !== undefined) {
+    if (live.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
       return Number(params.p1) & OCEAN_WAVELENGTH_MASK;
     }
     return Number(params.p1);
   }
-  return PATTERN_DEFAULTS[state.pattern.pattern]?.wavelength ?? PATTERN_DEFAULTS.Sweep.wavelength;
+  return PATTERN_DEFAULTS[live.pattern]?.wavelength ?? PATTERN_DEFAULTS.Sweep.wavelength;
 }
 
 function patternSpatialFromState() {
-  const params = state.pattern.params || {};
+  const live = activePatternState();
+  const params = live.params || {};
   if (params.spatial !== undefined) return Number(params.spatial);
-  if (state.pattern.pattern === "Palette Drift" && params.p1 !== undefined) return Number(params.p1);
+  if (live.pattern === "Palette Drift" && params.p1 !== undefined) return Number(params.p1);
   return PATTERN_DEFAULTS["Palette Drift"].spatial;
 }
 
 function patternDraftFromState() {
-  const defaults = PATTERN_DEFAULTS[state.pattern.pattern] || PATTERN_DEFAULTS.Pulse;
+  const live = activePatternState();
+  const defaults = PATTERN_DEFAULTS[live.pattern] || PATTERN_DEFAULTS.Pulse;
   return {
-    pattern: state.pattern.pattern,
-    brightness: Number(state.pattern.brightness),
+    pattern: live.pattern,
+    brightness: Number(live.brightness),
     hue: patternHueFromState(),
     saturation: patternSaturationFromState(),
     value: patternValueFromState(),
@@ -421,7 +448,7 @@ function patternDraftForSelection(pattern) {
   const defaults = PATTERN_DEFAULTS[pattern] || PATTERN_DEFAULTS.Pulse;
   return {
     pattern,
-    brightness: Number(patternDraft?.brightness ?? state?.pattern?.brightness ?? 48),
+    brightness: Number(patternDraft?.brightness ?? activePatternState()?.brightness ?? 48),
     hue: Number(defaults.hue),
     saturation: Number(defaults.saturation),
     value: Number(defaults.value),
@@ -650,6 +677,7 @@ function renderRows() {
     const attentionClass = lantern.attention === "None" ? "" : isBad || isFirmwareBad ? "bad" : "warn";
     return `<tr data-mac="${lantern.mac}" class="${lantern.mac === selectedMac ? "selected" : ""}">
       <td><strong>${escapeHtml(lantern.label)}</strong><br><span class="mono">${escapeHtml(lantern.mac)}</span></td>
+      <td>${escapeHtml(lantern.group || `Group ${Number(lantern.group_id || 0) + 1}`)}</td>
       <td><span class="status"><span class="dot ${dotClass}"></span>${statusText(lantern)}</span></td>
       <td class="${isBad ? "bad" : "ok"}">${escapeHtml(lantern.last_seen_label)}</td>
       <td class="${lantern.position === "Missing" ? "warn" : ""}">${escapeHtml(lantern.position)}</td>
@@ -674,14 +702,18 @@ function renderDetail() {
   const lantern = selectedLantern();
   if (!lantern) return;
   const isOk = lantern.status === "alive" && lantern.position !== "Missing";
+  const groupId = Number(lantern.group_id || 0);
+  const groupPattern = patternForGroup(groupId);
   const moveLabel = isPositioned(lantern) ? "Move" : "Place";
   $("#detail-title").textContent = `${lantern.label} is ${isOk ? "healthy" : statusText(lantern)}`;
   $("#detail-title").className = isOk ? "" : "warn";
   $("#detail-summary").textContent = detailSummary(lantern);
+  $("#lantern-group").value = String(groupId);
+  $("#lantern-group").disabled = !isPositioned(lantern);
   $("#detail-tech").innerHTML = [
     `MAC ${escapeHtml(lantern.mac)} · x=${fmt(lantern.x)} y=${fmt(lantern.y)} · status=${escapeHtml(statusText(lantern))}`,
     `firmware=${firmwareHtml(lantern.firmware)}`,
-    `pattern=${escapeHtml(state.pattern.pattern)} bri=${state.pattern.brightness} · seq=${state.conductor.seq}`,
+    `group=${groupId + 1} · pattern=${escapeHtml(groupPattern.pattern)} bri=${groupPattern.brightness} · seq=${state.conductor.seq}`,
     `power E=${fmt(lantern.power.wh)}Wh avg=${fmt(lantern.power.avg_w)}W · last report=${escapeHtml(lantern.power.last_report_label || "none")}`,
   ].join("<br>");
   $$('[data-action="move"]').forEach((button) => {
@@ -981,6 +1013,7 @@ function renderOta() {
   $$('[data-pattern-action="broadcast-saved"], [data-power-sync]').forEach((button) => {
     setOtaControlDisabled(button, installing);
   });
+  setOtaControlDisabled($("#lantern-group"), installing);
   if (!installing) {
     const fileInput = $("#ota-file");
     $('[data-action="stage-ota-artifact"]').disabled = !fileInput?.files?.length;
@@ -2046,15 +2079,19 @@ async function runAction(action) {
       const params = patternParams(patternDraft);
       const ack = await api("/api/show/pattern", {
         method: "POST",
-        body: JSON.stringify({ pattern, brightness, params }),
+        body: JSON.stringify({ pattern, brightness, params, group_id: selectedGroup }),
       });
+      const nextConfig = {
+        pattern,
+        brightness,
+        params: patternStateParams(patternDraft),
+      };
       state = {
         ...state,
-        pattern: {
-          pattern,
-          brightness,
-          params: patternStateParams(patternDraft),
-        },
+        pattern: selectedGroup === 0 ? nextConfig : state.pattern,
+        patterns: (state.patterns || []).map((entry) => Number(entry.group_id) === selectedGroup
+          ? { ...entry, config: nextConfig }
+          : entry),
       };
       render();
       toast(ack.message);
@@ -2336,7 +2373,7 @@ document.addEventListener("click", (event) => {
   const action = patternTarget.dataset.patternAction;
   if (!id || !action) return;
   if (action === "broadcast-saved") {
-    api(`/api/patterns/${encodeURIComponent(id)}/broadcast`, { method: "POST" })
+    api(`/api/patterns/${encodeURIComponent(id)}/broadcast?group_id=${selectedGroup}`, { method: "POST" })
       .then(async (ack) => {
         toast(ack.message);
         await refresh();
@@ -2401,6 +2438,35 @@ $("#brightness").addEventListener("input", (event) => {
   if (patternDraft) patternDraft.brightness = Number(event.target.value);
   $("#brightness-value").textContent = event.target.value;
   renderPatternControls();
+});
+
+$("#pattern-group").addEventListener("change", (event) => {
+  const next = Math.max(0, Math.min(GROUP_COUNT - 1, Number(event.target.value || 0)));
+  if (next === selectedGroup) return;
+  if (isPatternDirty() && !confirm("Discard the unsent pattern changes?")) {
+    event.target.value = String(selectedGroup);
+    return;
+  }
+  selectedGroup = next;
+  patternDraft = patternDraftFromState();
+  render();
+});
+
+$("#lantern-group").addEventListener("change", async (event) => {
+  const lantern = selectedLantern();
+  if (!lantern || !isPositioned(lantern)) return;
+  const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(event.target.value || 0)));
+  try {
+    const ack = await api(`/api/lanterns/${encodeURIComponent(lantern.mac)}/group`, {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupId }),
+    });
+    toast(ack.message);
+    await refresh();
+  } catch (error) {
+    toast(error.message, true);
+    await refresh();
+  }
 });
 
 $("#pattern-picker").addEventListener("click", (event) => {

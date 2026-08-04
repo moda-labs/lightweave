@@ -9,9 +9,9 @@ while building it. Status tags: **[done]** shipped, **[wip]** in progress,
 
 ## 1. Design philosophy: parametric field, not pushed pixel frames
 
-The conductor broadcasts a compact **pattern config** (which pattern + a few knobs + the
-clock); every node computes its output locally from **`f(x, y, t)`** using its
-stored position. Ring-aware patterns may additionally evaluate
+The conductor broadcasts compact **pattern configs** (which pattern + a few knobs for
+each lantern group, plus the clock); every node selects its assigned group and
+computes its output locally from **`f(x, y, t)`** using its stored position. Ring-aware patterns may additionally evaluate
 **`f(x, y, pixel_index, t)`** for each local emitter. We deliberately do **not**
 push per-node or per-pixel frames.
 
@@ -34,7 +34,7 @@ Every board runs **one identical firmware image**. Role is a runtime value in NV
 conductor per field; it is typically a **ring-less, headless timekeeper** so all
 visible rings are on performers.
 
-- Conductor: broadcasts the clock beacon + pattern config; renders against its own
+- Conductor: broadcasts the clock beacon + group pattern configs; renders against its own
   clock (if it has a ring).
 - Performer: locks an offset to the conductor's clock; renders against synced time;
   free-runs on missed beacons.
@@ -64,13 +64,15 @@ two conductors at once). One image + NVS role removes that entirely.
 
 ## 4. Pattern model **[done for field-space, 2-D, and first ring-local effect]**
 
-Conductor broadcasts the pattern in the beacon: `pattern_id`, `brightness`,
-`palette_id`, `params[4]`, plus the clock (`epoch_us`, `seq`).
+Conductor broadcasts eight independent group pattern configs in the beacon, each
+with `pattern_id`, `brightness`, `palette_id`, and `params[4]`, plus the shared
+clock (`epoch_us`, `seq`). A performer renders only the config selected by its
+cached table `group_id`.
 
 - `params` are pattern-specific knobs for live tuning (e.g. sweep period in ms,
-  wavelength ×100). Persisted in NVS on the conductor so a power-cycle keeps the
-  tuned look. **[done]** (every node persists/restores the pattern; keys
-  `pat`/`bri`/`p0`..`p3` in the `"node"` namespace.)
+  wavelength ×100). The eight configs persist as the `patterns` NVS blob on the
+  conductor so a power-cycle keeps every tuned look. **[done]** Group 1 is also
+  mirrored to the legacy `pat`/`bri`/`p0`..`p3` keys for migration/repair.
 - Patterns are `f(x, y, t)`:
   - `PULSE` — uniform breathing, all nodes in unison. **[done]**
   - `PALETTE_DRIFT` — smooth rainbow hue cycle; `params[0]` = cycle period in ms,
@@ -95,7 +97,26 @@ authored. Set from the worst-case bench measurement (solid white at 255 drew
 Pure pattern math lives in `include/pattern_math.h` (host-unit-tested); the
 LED-library binding is in `include/patterns.h`.
 
-### 4.1 Show program (pattern scheduling) **[planned]**
+### 4.1 Lantern groups **[done; hardware verification pending]**
+
+The field has eight fixed group slots, labeled **Group 1–8** in the control
+plane and encoded as IDs 0–7. Each placed MAC belongs to exactly one group;
+membership is part of the conductor-authoritative layout row and is cached in
+the performer's NVS beside position. Each group has its own persisted
+`PatternConfig`, so changing Group 3 does not disturb any other group.
+
+All eight configs travel in the existing 4 Hz beacon (136 B total, under the
+250 B ESP-NOW limit), rather than multiplying radio packets by the number of
+groups. This preserves constant beacon cadence, radio duty-cycle behavior, and
+free-running through packet loss. A performer reports its cached group in
+REGISTER; if it missed a group-edit table broadcast, the conductor detects the
+mismatch and sends the targeted row reply during that known-open radio window.
+
+Protocol v9 migration is fail-preserving: existing layout rows become Group 1,
+and the old field-wide pattern is copied into all eight slots. The upgrade alone
+therefore causes no visible show change.
+
+### 4.2 Show program (pattern scheduling) **[planned]**
 
 Beyond a single live pattern, the conductor holds a **show program** in NVS — a
 schedule of *what plays when* (e.g. pattern A for a while, then B; calmer/dimmer
@@ -106,7 +127,7 @@ logic. Open considerations: smooth **transitions/crossfades** between patterns
 (would need a blend factor in the pattern), and the schedule's **time base**
 (uptime vs. dusk-relative once the LDR lands in Milestone 3, vs. a set wall-clock).
 
-### 4.2 Power instrumentation — INA228 **[done — firmware/UI; awaiting chip verification]**
+### 4.3 Power instrumentation — INA228 **[done — firmware/UI; awaiting chip verification]**
 
 Firmware landed 2026-07-04, built ahead of the pilot-batch chips (arriving with
 the Monday order) so their arrival is pure hardware verification: I2C probe at
@@ -153,9 +174,9 @@ anchor to 100%. Operators can also click **Sync to 100%** per metered node after
 charging. This is a representative-sample tool for sizing Milestone 3's power
 levers (§8.1, Lever 2 below), not a requirement to install INA228 on every node.
 
-## 5. Node inventory and layout - conductor-authoritative **[done]**
+## 5. Node inventory and layout — conductor-authoritative **[done]**
 
-The conductor holds `MAC → permanent ID + optional (x,y)` and broadcasts it.
+The conductor holds `MAC → permanent ID + optional (x,y,group)` and broadcasts it.
 Each node finds its own MAC, adopts its assignment, and **caches it in NVS**.
 Board identity survives rearrangement because clearing or moving a position does
 not remove its inventory row or change its number.
@@ -164,18 +185,20 @@ not remove its inventory row or change its number.
   field runs with **no laptop present** — the conductor is the coordination point
   for the table just as it is for the clock and the pattern config.
 - Resilient: a node needs to hear the table only once, then survives on the cache.
-- Cheap: 17 B/node on the wire (`TableRow`) gives 14 rows per `MSG_TABLE` packet.
+- Cheap: 18 B/node on the wire (`TableRow`) gives 13 rows per `MSG_TABLE` packet.
   Steady-state rebroadcast is a slow backstop
   (`TABLE_INTERVAL_US`, 60 s — positions are static and cached in NVS); the
-  moments that actually need the table travel out of band: `assign` broadcasts
-  the full table immediately, and a REGISTER from a node that is **new to the
-  roster, unprovisioned (id 0), or reporting a conflicting ID** gets an immediate
-  **single-row reply**. The row reply is the delivery guarantee under radio duty-cycling: a
+  moments that actually need the table travel out of band: `assign`/`group`
+  broadcast the full table immediately, and a REGISTER from a node that is **new
+  to the roster, unprovisioned (id 0), reporting a conflicting ID, or reporting
+  a stale group** gets an immediate **single-row reply** (27 B). The row reply
+  is the delivery guarantee under radio duty-cycling: a
   REGISTER is the one moment the conductor provably knows that node's radio is
   on (TX is gated on radio-up), so the reply lands inside the sender's open
   listen window instead of playing the ~13%-per-broadcast lottery, and a missed
   reply is retried for free by the node's next REGISTER (10 s). Steady state
-  (all nodes known + provisioned) costs zero table traffic beyond the backstop.
+  (all nodes known + provisioned + group-matched) costs zero table traffic beyond
+  the backstop.
 
 Implementation: the table logic is the dependency-free, host-tested
 `include/table.h` (unique-ID adoption, optional placement, legacy migration); the wire side -
@@ -184,17 +207,17 @@ decision + builder (`tableRowReplyWanted`/`tableRowBuild`) — is the equally
 pure, host-tested `include/table_wire.h`; `main.cpp` owns the NVS
 blob, the radio calls, the reply queue (stash in the recv callback, drain in
 `loop()` — same shape as the power-report queue), and the node-side adoption. The conductor edits it
-over serial — `assign <mac> <x> <y>`, `table`, `forget <mac>` — and pushes the
-change immediately.
+over serial — `assign <mac> <x> <y>`, `group <mac> <1..8>`, `table`,
+`forget <mac>` — and pushes the change immediately.
 REGISTER reports are reconciled in `loop()` so a factory number is persisted
-without writing NVS inside the radio callback.
-A node stashes its row in the recv callback and applies +
+without writing NVS inside the radio callback. A node stashes its row in the
+recv callback and applies +
 `identitySave()`s it from `loop()` (no flash write in the callback). Verified on
 hardware: a node adopts a position set only on the conductor, with no serial to
 that node, and keeps it across a reboot. Manual `pos x y` over serial remains as a
 fallback/override for tests and stragglers.
 
-### 5.1 Node replacement **[done via assign + forget]**
+### 5.1 Node replacement **[done]**
 
 A dead lamp's spare has a new MAC and keeps its own printed number, so
 replacement is a **table edit**, not a
@@ -203,13 +226,13 @@ conductor-authoritative. Physically drop the spare into the dead one's spot, the
 transfer the position from the old MAC to the new one:
 
 1. Spare boots as a performer (default), registers, and shows in the `roster`.
-2. Operator runs `assign <newMAC> <x> <y>` then `forget <oldMAC>` on the conductor
-   (a single `replace <oldMAC> <newMAC>` convenience command is a possible later
-   nicety, but the two existing commands already cover it).
-3. Conductor rebroadcasts; the spare caches its own ID plus `(x,y)` and joins the field.
+2. Operator runs `replace <oldMAC> <newMAC>` through the API/UI. The conductor
+   atomically transfers position and group, then clears the old board's placement.
+3. Conductor rebroadcasts; the spare caches its own ID plus `(x,y,group)` and
+   joins the field.
 
-The old board keeps its permanent number in inventory with no position. Numbers
-follow boards, never locations.
+The old board keeps its permanent number in inventory with no position or group.
+Numbers follow boards, never locations.
 
 No drone, no re-fly — a single swap is one command. Getting the new MAC: read it
 from the spare's serial `info`, or label spares with their MAC, or let the
@@ -219,7 +242,7 @@ nodes move at once.
 ### 5.2 Control plane - operator/admin interface **[done; Pi rollout pending]**
 
 The conductor stores the authoritative **routing table** (§5) *and* **show
-program** (§4.1) in NVS and runs the field with **no laptop present**. The laptop
+program** (§4.2) in NVS and runs the field with **no laptop present**. The laptop
 is a **transient admin tool**, plugged into the conductor over USB serial only
 when you want to *change something*:
 
@@ -341,16 +364,16 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   `FF:FF:FF:FF:FF:FF`, `WIFI_STA`. The hot path (sync.h) reads `epoch_us`+`seq`.
 - **[done]** Bidirectional ESP-NOW: a performer learns the conductor's MAC from the
   recv-info, adds it as a peer, and unicasts
-  `MSG_REGISTER {mac, id, fw, build, dirty, version}` every 10 s; the conductor
+  `MSG_REGISTER {mac, id, group_id, fw, build, dirty, version}` every 10 s; the conductor
   builds a MAC-keyed roster (`roster` serial command). `fw` is wire
   compatibility (`PROTO_VERSION`); `version` + `build` + `dirty` are the OTA
   safety marker that catches same-protocol stale firmware.
-- **[done]** `MSG_TABLE`: the conductor broadcasts inventory in chunks
-  (`TableRow` x14/packet); nodes adopt their permanent ID and optional position.
-  `chunk`/`chunks` fields let a
+- **[done]** `MSG_TABLE`: the conductor broadcasts inventory and layout in chunks
+  (`TableRow` ×13/packet); nodes adopt their permanent ID, optional position, and
+  group. `chunk`/`chunks` fields let a
   receiver tell how much it has seen.
 - **[done]** `MSG_POWER`: an INA228-instrumented performer unicasts its
-  hardware-accumulated energy/charge to the conductor (§4.2), reusing the
+  hardware-accumulated energy/charge to the conductor (§4.3), reusing the
   REGISTER unicast path. Added without a PROTO_VERSION bump — no existing
   layout changed, and receivers ignore unknown types via the dispatch default.
 - **[done]** `MSG_OTA_BEGIN`, `MSG_OTA_CHUNK`, `MSG_OTA_END`: conductor
@@ -430,7 +453,7 @@ window and rerun the same staged firmware after nodes check back in.
   ~1–2 s, resume. **[done — role/pos/MAC; table-assigned position is cached to the
   same NVS pos keys, so it survives a reboot without re-hearing the table]**
 - Calibration capture is open-loop (no live RF dependency during the fly-over).
-- NVS caches (role, position, pattern config) survive power cycles / battery swaps.
+- NVS caches (role, position, group, and all group pattern configs) survive power cycles / battery swaps.
 
 ### 8.1 Performer radio duty-cycle **[done — Stage A, hardware-verified]**
 
@@ -482,10 +505,11 @@ not required for the main installation behavior.
 | 2 — NVS identity + position-aware sweep | ✅ done, hardware-verified |
 | Refactor — symmetric runtime role + NVS pattern persistence + rainbow drift pattern | ✅ done, hardware-verified |
 | Protocol foundation, Half 1 — typed header, MAC identity, bidirectional ESP-NOW, registration + roster | ✅ done, hardware-verified |
-| Protocol foundation, Half 2 - MAC→ID+optional-position inventory broadcast + NVS cache (`assign`/`table`/`forget`) | ✅ code-complete; v7 position path hardware-verified, v8 ID rehydration pending |
+| Protocol foundation, Half 2 — MAC→ID+optional-position/group inventory broadcast + NVS cache (`assign`/`group`/`table`/`forget`) | ✅ v7 position path hardware-verified; v8 ID and v9 group paths pending bench verification |
+| Lantern groups — eight independent pattern slots + MAC group membership | ✅ code-complete + host/control tested; hardware verification pending |
 | Control plane - structured machine Pi↔conductor serial (bulk table/show-program) | ✅ UI/API, authenticated remote boundary, and Pi packaging done; physical Pi/tunnel rollout pending |
 | Auto-calibration — register / roster / blink + laptop CV | 📐 planned |
-| 3 — power management (radio duty-cycle, schedule deep-sleep, optional LDR fallback, INA228 energy monitor) | 🛠 in progress — Lever 1 Stage A (performer radio duty-cycle) ✅ done + host-tested + hardware-verified + measured (85→~55 mA @ 12V); Stage B (CPU light-sleep between work, `napsched.h`) ✅ hardware-verified on bench 2026-07-03 (power re-measure owed); schedule-driven deep sleep ✅ code-complete + host-tested + UI/API built, hardware verification owed; photodiode dusk sensing is now optional/fallback; INA228 instrumentation (§4.2) ✅ firmware done + host-tested (`powermon.h`, `MSG_POWER`), awaiting the chip |
+| 3 — power management (radio duty-cycle, schedule deep-sleep, optional LDR fallback, INA228 energy monitor) | 🛠 in progress — Lever 1 Stage A (performer radio duty-cycle) ✅ done + host-tested + hardware-verified + measured (85→~55 mA @ 12V); Stage B (CPU light-sleep between work, `napsched.h`) ✅ hardware-verified on bench 2026-07-03 (power re-measure owed); schedule-driven deep sleep ✅ code-complete + host-tested + UI/API built, hardware verification owed; photodiode dusk sensing is now optional/fallback; INA228 instrumentation (§4.3) ✅ firmware done + host-tested (`powermon.h`, `MSG_POWER`), awaiting the chip |
 | 4 — battery power + ET900 draw measurement (go/no-go) | 📐 planned |
 | 5 — OTA + enclosure | 🛠 OTA transfer/recovery done and 3-board bench-verified; enclosure/RF still planned |
 
@@ -498,6 +522,6 @@ Resolved:
 Open:
 - 2-D pattern parameter encoding (how to pack angle/center into `params[4]`).
 - Pattern transitions/crossfades, and the show-program time base (uptime vs.
-  dusk-relative vs. wall-clock) (§4.1).
+  dusk-relative vs. wall-clock) (§4.2).
 - Admin UI form: local web UI (current lean) vs. CLI-first.
 - Temporal-coded calibration as a later speed upgrade (§6).

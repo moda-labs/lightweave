@@ -8,10 +8,23 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**149 pass**) is green; control tests (**301 pass**) are green; all three
-device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+(**152 pass**) is green; control tests (**305 pass**) are green; all three device
+envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-03): **the v0.5.1 hotfix makes the permanent-ID release
+Latest locally (2026-08-03): **eight independent lantern groups are
+code-complete; bench verification is pending.** Each placed MAC now carries a
+Group 1–8 membership alongside its permanent board ID and optional position in
+the conductor-authoritative inventory. The existing 4 Hz beacon carries all
+eight persisted pattern configs in one packet, so every group can run a
+different pattern without extra packet cadence or losing free-run behavior. The
+UI assigns membership from the lantern detail sheet and targets live or saved
+patterns with a group selector; global blackout, power policy, and calibration
+still span the field, while calibration restores every group's prior look
+afterward. Protocol v9 migrates existing v8 rows to Group 1 and copies the old
+field-wide look to all slots, but the wire change means every board must still be
+updated together. No boards were flashed in this session.
+
+Previous latest (2026-08-03): **the v0.5.1 hotfix makes the permanent-ID release
 deploy reliably on the Pi.** The first v0.5.0 production reconcile exposed that
 fresh commit-specific Python environments retained `0700` mode from their
 temporary build directory, so the unprivileged control service could not execute
@@ -302,35 +315,39 @@ full-repo adversarial self-review with all 5 correctness findings fixed, the
 production BOM, and the **pilot-batch order placed 2026-07-03** (most parts
 arrive Mon Jul 6, batteries Jul 10 — see "Pilot batch: ORDERED" below).
 
-## ▶ Next session: pick up here (updated 2026-07-31)
+## ▶ Next session: pick up here (updated 2026-08-03)
 
 Priority order:
-1. **Fire Flicker bench tuning:** the conductor already has dirty build
-   `a425d7eb`; read `docs/FLASHING.md` and flash that same source build to the
-   performers before broadcasting. Then select Fire at brightness 56 / period 1200 ms /
+1. **Group-control bench verification:** read `docs/FLASHING.md`, update the
+   conductor and every performer to the same protocol-v9 build, place two
+   performers in different groups, and verify simultaneous distinct patterns.
+   Then change one membership while its radio is asleep and confirm its next
+   REGISTER triggers the targeted row repair and persists across reboot.
+2. **Fire Flicker bench tuning:** after the field shares the current protocol-v9
+   build, select Fire at brightness 56 / period 1200 ms /
    hue 24 / saturation 95 / texture 85, and evaluate it through the physical
    diffuser. Tune for organic neighboring-pixel motion without a visible chase;
    check draw on the INA228 reference node before adopting a brighter default.
-2. **Remote-administration rollout (human-owned):** follow
+3. **Remote-administration rollout (human-owned):** follow
    [`deploy/pi/README.md`](../deploy/pi/README.md) and phase 4 of the remote
    administration plan. This needs the Pi, Starlink, Cloudflare account, final
    hostname, and 3-board bench. Do not record the shared password, hash, or
    tunnel token in this repository.
-3. **CV calibration apply workflow:** the phone-video proof is now good enough
+4. **CV calibration apply workflow:** the phone-video proof is now good enough
    on two real clips, including one with large glare/cable false positives.
    Add a guarded "apply proposal" endpoint/UI that writes assignments through
    the existing `/api/lanterns/{mac}/assign` path only after the operator
    reviews the image overlay and any missing/ambiguous rows.
-4. **Synthetic hardening follow-up only when needed:** run Simulate with jitter,
+5. **Synthetic hardening follow-up only when needed:** run Simulate with jitter,
    dim LEDs, glare, missing frames, and perspective values that approximate the
    phone capture. Tests already cover clean recovery, noisy recovery, and
    missing-frame alias prevention; add cases only when real media exposes a new
    failure mode.
-5. **Drone/field media validation:** when a drone clip exists, run it through
+6. **Drone/field media validation:** when a drone clip exists, run it through
    the same Lantern Locations flow and add a fixture if it exposes a new failure
    mode. Temporal code scoring should ignore constant extra lights; only extra
    lights blinking with the same planned code should remain ambiguous.
-6. **Scale-harden OTA when more boards exist:** manual maintenance OTA and
+7. **Scale-harden OTA when more boards exist:** manual maintenance OTA and
    same-protocol mixed-firmware recovery are hardware-verified on the 3-board
    bench. The updater retries serial chunk timeouts/NACKs, rejects unsafe resume
    offsets and wrong-length chunks, freezes the fresh online cohort at begin,
@@ -339,11 +356,11 @@ Priority order:
    explicit per-node chunk ACK/retry until a larger bench/field test shows
    repeated ESP-NOW chunk loss that the current 3x broadcast repetition cannot
    cover.
-7. **Optional negative OTA-safety check:** if useful, intentionally flash one
-   performer with a same-v6 but different build and confirm it appears as
-   `Firmware mismatch`; restore all boards to one build afterward. Protocol-v2
-   or older boards simply vanish from the roster due to the version gate.
-8. **When parts are in hand:** phototransistors are no longer required for the
+8. **Optional negative OTA-safety check:** if useful, intentionally flash one
+   performer with a same-v8 but different build and confirm it appears as
+   `Firmware mismatch`; restore all boards to one build afterward. Any
+   protocol-mismatched board vanishes from the roster due to the version gate.
+9. **When parts are in hand:** phototransistors are no longer required for the
    main sleep strategy. Treat them as optional/fallback only. Wire INA228 on one
    reference node (SDA→21, SCL→22, chip in series between
    battery+ and buck input) → run the INA228 bench checklist below → first
@@ -353,12 +370,12 @@ Priority order:
    re-adopts its position within ~10 s of registering (the new single-row
    `[table]` reply; code-reviewed + host-tested but the radio path itself
    isn't hardware-verified yet).
-9. **User task, anytime (needs hands + DMM):** re-measure the 12 V
+10. **User task, anytime (needs hands + DMM):** re-measure the 12 V
    battery-side draw with naps running, **USB disconnected** (USB backfeeds the
    5 V rail and corrupts the reading) — quantifies the Stage-B win vs the old
    51 mA rest / 55 mA avg numbers. Same scene for apples-to-apples: amber GLOW
    @ bri 48.
-10. **Hardware topic to revisit:** buried battery/control boxes will likely make
+11. **Hardware topic to revisit:** buried battery/control boxes will likely make
    onboard 2.4 GHz antennas unreliable. Read `docs/RF_ENCLOSURE.md` before buying
    more MCUs or committing to enclosure geometry. The pilot FireBeetles already
    ordered are DFR0654-F onboard-antenna boards; buried-box deployment likely
@@ -377,9 +394,7 @@ revised cost roll-up.
 
 ## Where the build is right now
 
-**Done & hardware-verified** (Milestones 1–2 → symmetric-role refactor → rainbow +
-pattern persistence → protocol foundation Half 1 & 2 → battery go/no-go + worst-case
-power measurement):
+**Current implementation** (hardware verification status is called out per item):
 - **One firmware image for every node** (`src/main.cpp`); role is a runtime NVS
   value (default performer), set over serial. Build envs: `devkitc`, `firebeetle`,
   `native`, plus one canonical cross-board `field` image with
@@ -389,7 +404,9 @@ power measurement):
 - **Sync:** conductor broadcasts a clock beacon; performers lock an offset and
   render against synced time; **free-run on missed beacon** (no blackout), re-lock
   on return. Verified: `LOCKED`, stable offset ~±100 µs, `gaps=0`.
-- **Patterns** (`f(x,y,t)`): `PULSE` (uniform breathing), `PALETTE_DRIFT` (smooth
+- **Patterns** (`f(x,y,t)`): eight independent group configs travel together in
+  each beacon; a performer selects its cached group and free-runs that look.
+  Built-ins include `PULSE` (uniform breathing), `PALETTE_DRIFT` (smooth
   rainbow hue cycle; `params[0]`=period ms, `params[1]`=spatial hue offset ×100 so
   the rainbow travels or runs in unison), `SWEEP` (1-D traveling wave), and
   `SOLID` (`pattern 3`: every pixel full RGBW — the worst-case power draw, for
@@ -398,16 +415,17 @@ power measurement):
   hard-clamps brightness to `MAX_BRIGHTNESS` (config.h, **192**) so no pattern can
   exceed the per-node power budget (see the worst-case measurement below).
   `FIRE_FLICKER` extends the local model to `f(x,y,pixel_index,t)` and is the
-  first pattern to render distinct values across the ring; it appends ID 9
-  without changing the beacon layout or protocol version.
-- **NVS identity:** `id` + `(x,y)` persist across reboot; set over serial.
-- **Pattern config persists** too: `pattern_id`/`brightness`/`params` survive a
-  power-cycle (keys `pat`/`bri`/`p0`..`p3` in the `"node"` namespace).
+  first pattern to render distinct values across the ring; it appends ID 9.
+- **NVS identity:** `id` + `(x,y)` + group persist across reboot; position/group
+  are adopted from the conductor table.
+- **Group pattern configs persist** too: all eight
+  `pattern_id`/`brightness`/`params` slots survive a conductor power-cycle in
+  the `patterns` blob; Group 1 remains mirrored to the legacy keys.
 - **Control plane serial bridge + UI** (hardware-verified 2026-07-05): FastAPI
   serves the static operator UI and HTTP/WS API; `JsonLineSerialConductor`
   talks to the conductor over pyserial with request ids and ok/error acks.
-  Mutations currently implemented: identify ack, assign/place, forget,
-  replace, pattern changes, blackout, power policy changes, OTA maintenance
+  Mutations currently implemented: identify ack, assign/place, group assignment,
+  forget, replace, per-group pattern changes, blackout, power policy changes, OTA maintenance
   mode enter/exit, firmware artifact staging, and field-wide OTA install.
   Serial calls are serialized and run
   off the FastAPI event loop, so one serial timeout does not block unrelated
@@ -436,18 +454,20 @@ power measurement):
   shown in `info`; **bidirectional ESP-NOW** — performers unicast `REGISTER`
   every 10 s and the conductor builds a **MAC-keyed roster** (`roster` command).
   Sync hot path unchanged (still `LOCKED gaps` flat after the rework).
-- **Protocol foundation Half 2** (v7 position path hardware-verified; v8 ID path
-  code-complete): **conductor-authoritative `MAC→permanent ID + optional (x,y)`
-  inventory** in NVS, broadcast as chunked `MSG_TABLE`; a node finds its row,
-  adopts its number and placement, and caches both (survives reboot, no laptop needed).
-  Conductor edits it with `assign <mac> <x> <y>` / `table` / `forget <mac>`.
+- **Protocol foundation Half 2** (v7 position path hardware-verified; v8 ID and
+  v9 group paths code-complete): **conductor-authoritative
+  `MAC→permanent ID + optional (x,y,group)` inventory** in NVS, broadcast as
+  chunked `MSG_TABLE`; a node finds its row, adopts its number, placement, and
+  group, and caches them (survives reboot, no laptop needed). Conductor edits it
+  with `assign <mac> <x> <y>` / `group <mac> <1..8>` / `table` /
+  `forget <mac>`.
   Verified: a node took a position set only on the conductor, no serial to it.
   Re-adoption hardware check 2026-07-06: performer #2 was erased/reflashed after
   its table row existed; it registered as `#?` but re-adopted `(0.6115, 0.4646)`
   from the conductor's single-row table reply within the normal roster window.
   Protocol v8 extends that same reply to restore `#2` automatically.
 - **GPIO2 heartbeat** blinks on the synced beat (zero-wiring sync check).
-- **Serial commands:** `info`, `roster` / `table` / `assign` / `forget`
+- **Serial commands:** `info`, `roster` / `table` / `assign` / `group` / `forget`
   (conductor), `role conductor|performer`, `id <n>`, `pos <x> <y>`,
   `pattern <n>`, `bri <n>`, `param <i> <v>`, `powersave on|off`,
   `dusk on|off` (performer; daytime deep-sleep, default off),
@@ -459,16 +479,17 @@ power measurement):
   serial input** — hit Enter in a monitor to revive a quiet node (see
   FLASHING.md). Exception: the conductor's `[power]` telemetry log is
   deliberately ungated (it's the overnight audit trail).
-- **Wire protocol is v8** (`PROTO_VERSION 8`; `MSG_TABLE` now includes permanent
-  board ID plus optional-position flags; BEACON includes runtime
-  `PowerPolicy` with UTC epoch seconds plus USB power-bank `KeepAliveConfig`,
-  and REGISTER includes release version, protocol, build id, and
+- **Wire protocol is v9** (`PROTO_VERSION 9`; `MSG_TABLE` includes permanent
+  board ID, optional-position flags, and group ID; BEACON includes eight group
+  `PatternConfig`s, runtime `PowerPolicy` with UTC epoch seconds, and USB
+  power-bank `KeepAliveConfig`; REGISTER includes board/group identity plus
+  release version, protocol, build id, and
   dirty flag for OTA version consistency; OTA begin/chunk/end messages carry
   the staged firmware image during manual maintenance updates).
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 149) and control tests (299): sync
+- **Host unit tests** (`test/test_logic/`, 152) and control tests (305): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),
@@ -539,7 +560,7 @@ tests now).
 
 **INA228 power telemetry — CODE-COMPLETE 2026-07-04, host-tested,
 both device envs build — NOT hardware-verified (chip arrives with
-Monday's order).** ARCHITECTURE §4.2. Reviewed same day (8-angle /code-review,
+Monday's order).** ARCHITECTURE §4.3. Reviewed same day (8-angle /code-review,
 10 verified candidates → 4 fixes applied: avg-W plausibility bound, time-gate
 before the spinlock in maybePowerReport, PowerSample embedded in PowerMsg,
 conductor self-log on the tested scheduler). What landed:
@@ -738,7 +759,7 @@ this floor further.)
 
 **INA228 precision power monitor: firmware/API/UI DONE (2026-07-06)** (see the
 "INA228 power telemetry" section above, `PROJECT_BRIEF.md` readout-path
-section, and `ARCHITECTURE.md` §4.2) — an I2C breakout with hardware
+section, and `ARCHITECTURE.md` §4.3) — an I2C breakout with hardware
 energy/charge accumulation, wired in series between battery+ and the buck
 input on 1–2 reference nodes. It replaces one-off ET900/DMM snapshots with a
 true continuous Wh integral per night, and instrumented performers report
@@ -880,7 +901,7 @@ field. Four independent layers guarantee daytime testability:
    and listens for a beacon before it may re-sleep — a flagged beacon pins it
    awake (60 s TTL, continuously refreshed). Summon latency for the whole field:
    ≤ one resample interval. Historical note: this originally grew the wire format
-   to `PROTO_VERSION 2`; the current protocol is **v8**, and every protocol bump
+   to `PROTO_VERSION 2`; the current protocol is **v9**, and every protocol bump
    still means reflashing every board together.
 2. **Any power-cycle boots awake** (cold boot starts in "night", won't dusk-sleep
    for 10 min, 60 s light debounce on top). Per-lantern physical override via the
@@ -935,9 +956,10 @@ node's diag** (headless nodes no longer burn ~13 ms/s of UART drain).
 - ✅ **Inventory rebroadcast stretched** 5 s → 60 s steady-state backstop
   (`TABLE_INTERVAL_US`); targeted delivery is a **single-row MSG_TABLE reply**
   to any REGISTER from a node that is new to the roster, unprovisioned, or in
-  conflict with the conductor's permanent ID. It is sent while that node's
-  radio is provably up, retried by its next REGISTER, and costs zero targeted
-  traffic in steady state. `assign` still broadcasts the full inventory immediately.
+  conflict with the conductor's permanent ID or group. It is sent while that
+  node's radio is provably up, retried by its next REGISTER, and costs zero
+  targeted traffic in steady state. `assign` and `group` still broadcast the
+  full inventory immediately.
 - ✅ **Host-unreachable logic extracted + tested** (83 total):
   `parseMac`/`macStr` → `macaddr.h` (parseMac rejects trailing garbage — a
   pasted EUI-64 must not silently truncate to its prefix MAC); `broadcastTable`
@@ -976,7 +998,7 @@ missing the field envs, and the field envs copy-pasting instead of
 ### After Milestone 3
 Milestone 4 — battery enclosure + final go/no-go on the **FireBeetle** (lower draw
 than the DevKit). Then the non-power tracks still open: remote-control physical
-rollout, auto-calibration (§6), and show program (§4.1). The Pi UI/control plane,
+rollout, auto-calibration (§6), and show program (§4.2). The Pi UI/control plane,
 machine serial, and remote packaging are built. Milestone 5 - OTA + enclosure.
 
 ## Project memory (loaded automatically in this dir)

@@ -217,7 +217,7 @@ inline RgbwColor calibrationId(int64_t synced_us, uint8_t brightness,
 // treat a lantern as one sample of f(x,y,t); ring-aware patterns can branch here
 // and evaluate f(x,y,pixel,t) without changing the beacon or sync model.
 template <typename StripT>
-inline void render(StripT& strip, const BeaconMsg& b, int64_t synced_us, float x,
+inline void render(StripT& strip, const PatternConfig& b, int64_t synced_us, float x,
                    float y, uint16_t node_id = 0) {
   if (b.pattern_id == FIRE_FLICKER) {
     uint16_t count = strip.PixelCount();

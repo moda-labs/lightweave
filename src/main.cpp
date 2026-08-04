@@ -54,7 +54,7 @@ static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // ---- Node config in NVS (role + identity; set once over serial) --------------
 static Preferences  g_prefs;
-static NodeIdentity g_id   = {0, 0.0f, 0.0f};
+static NodeIdentity g_id   = {0, 0.0f, 0.0f, 0};
 static uint8_t      g_role = DEFAULT_ROLE;
 static uint8_t      g_mac[6] = {0};  // this node's WiFi STA MAC — stable identity
 
@@ -193,6 +193,7 @@ static void configLoad() {
   g_id.id = g_prefs.getUShort("id", 0);
   g_id.x = g_prefs.getFloat("x", 0.0f);
   g_id.y = g_prefs.getFloat("y", 0.0f);
+  g_id.group_id = groupIdSafe(g_prefs.getUChar("grp", 0));
   g_role = g_prefs.getUChar("role", DEFAULT_ROLE);
   g_powersave = g_prefs.getBool("ps", POWERSAVE_DEFAULT != 0);
   g_dusk_on = g_prefs.getBool("dusk", DUSK_DEFAULT != 0);
@@ -265,6 +266,7 @@ static void identitySave() {
   g_prefs.putUShort("id", g_id.id);
   g_prefs.putFloat("x", g_id.x);
   g_prefs.putFloat("y", g_id.y);
+  g_prefs.putUChar("grp", groupIdSafe(g_id.group_id));
   g_prefs.end();
 }
 
@@ -275,19 +277,27 @@ static void roleSave() {
 }
 
 // Protocol v7 stored only MAC + position. Keep the exact old native layout so a
-// v8 conductor migrates existing placements instead of discarding them.
+// v9 conductor still migrates existing v7 placements instead of discarding them.
 // The conductor's inventory persists as one NVS blob. Current rows carry a
 // permanent ID plus optional placement; legacy position-only rows migrate with
 // id=0 and learn the existing number from the performer's next REGISTER.
 static void tableLoad() {
   g_prefs.begin("node", /*readonly*/ true);
+  uint8_t version = g_prefs.getUChar("table_v", 0);
   size_t stored = g_prefs.getBytesLength("table");
   bool current = false;
   bool migrated = false;
   tableInit(g_table);
   if (stored == sizeof(g_table)) {
-    current = g_prefs.getBytes("table", &g_table, sizeof(g_table)) == sizeof(g_table) &&
-              tableValid(g_table);
+    bool loaded = g_prefs.getBytes("table", &g_table, sizeof(g_table)) ==
+                  sizeof(g_table);
+    if (loaded && g_table.count <= TABLE_MAX && version < 3) {
+      // Protocol v8's TableEntry had identical size/field offsets, with this
+      // byte as unspecified trailing padding. Never interpret it as a group.
+      for (uint8_t i = 0; i < g_table.count; i++)
+        g_table.entries[i].group_id = 0;
+    }
+    current = loaded && tableValid(g_table);
   } else if (stored == sizeof(LegacyLayoutTable)) {
     LegacyLayoutTable legacy = {};
     if (g_prefs.getBytes("table", &legacy, sizeof(legacy)) == sizeof(legacy))
@@ -295,9 +305,10 @@ static void tableLoad() {
   }
   g_prefs.end();
   if (!current && !migrated) tableInit(g_table);
-  if (migrated && isConductor()) {
+  if ((migrated || (current && version < 3)) && isConductor()) {
     g_prefs.begin("node", /*readonly*/ false);
     g_prefs.putBytes("table", &g_table, sizeof(g_table));
+    g_prefs.putUChar("table_v", 3);
     g_prefs.end();
   }
 }
@@ -305,6 +316,7 @@ static void tableLoad() {
 static void tableSave() {
   g_prefs.begin("node", /*readonly*/ false);
   g_prefs.putBytes("table", &g_table, sizeof(g_table));
+  g_prefs.putUChar("table_v", 3);
   g_prefs.end();
 }
 
@@ -312,11 +324,7 @@ static void tableSave() {
 // Written from the ESP-NOW recv callback, read from loop(). Guarded by a spinlock
 // so 64-bit fields can't tear across the two contexts.
 static SyncState g_sync;
-static BeaconMsg g_beacon = {{BEACON_MAGIC, PROTO_VERSION, MSG_BEACON},
-                             /*epoch*/ 0, patterns::SWEEP, /*brightness*/ 48,
-                             /*palette*/ 0, /*flags*/ 0, {0, 0, 0, 0},
-                             {4, 15, 20 * 60, 6 * 60, 12 * 60, 0, 0},
-                             {0, 10000, 100, 64}, 0};
+static BeaconMsg g_beacon = {};
 static uint32_t g_tx_seq = 0;
 static portMUX_TYPE g_sync_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -344,6 +352,7 @@ static portMUX_TYPE g_roster_mux = portMUX_INITIALIZER_UNLOCKED;
 struct RegistrationRequest {
   uint8_t mac[6];
   uint16_t reported_id;
+  uint8_t reported_group;
   bool mac_known;
 };
 static constexpr uint8_t ROWREQ_MAX = 8;
@@ -360,10 +369,10 @@ static int64_t      g_next_cal_roster_us = 0;
 // calibration until the next roster chunk arrives.
 static uint16_t     g_calibration_rank = 0;
 
-// Performer identity/position adopted from a MSG_TABLE row. The recv callback
+// Performer identity/position/group adopted from a MSG_TABLE row. The recv callback
 // cannot write flash, so loop() applies and caches the assignment.
 static bool g_assignment_pending = false;
-static TableAssignment g_assignment_pending_value = {0, 0.0f, 0.0f, false};
+static TableAssignment g_assignment_pending_value = {0, 0.0f, 0.0f, false, 0};
 
 static inline int64_t now_us() { return esp_timer_get_time(); }
 
@@ -372,20 +381,36 @@ static inline int64_t now_us() { return esp_timer_get_time(); }
 // (it's defined before g_beacon). Only the conductor's pattern drives the field,
 // but every node persists/restores it so a conductor survives a power-cycle with
 // its tuning intact, and this seeds the show-program storage later.
+static void sanitizePatternConfig(PatternConfig& p) {
+  p.pattern_id = patterns::patternBootSafe(p.pattern_id);
+  if (p.brightness > MAX_BRIGHTNESS) p.brightness = MAX_BRIGHTNESS;
+}
+
 static void patternConfigLoad() {
   g_prefs.begin("node", /*readonly*/ true);
-  // patternBootSafe (pattern_ids.h, host-tested): a persisted SOLID must not
-  // survive a power-cycle — see its comment.
-  g_beacon.pattern_id =
-      patterns::patternBootSafe(g_prefs.getUShort("pat", patterns::SWEEP));
-  g_beacon.brightness = g_prefs.getUChar("bri", 48);
-  if (g_beacon.brightness > MAX_BRIGHTNESS) g_beacon.brightness = MAX_BRIGHTNESS;
-  g_beacon.params[0] = g_prefs.getUShort("p0", 0);
-  g_beacon.params[1] = g_prefs.getUShort("p1", 0);
-  g_beacon.params[2] = g_prefs.getUShort("p2", 0);
-  g_beacon.params[3] = g_prefs.getUShort("p3", 0);
+  PatternConfig legacy = {
+      g_prefs.getUShort("pat", patterns::SWEEP),
+      g_prefs.getUChar("bri", 48),
+      0,
+      {g_prefs.getUShort("p0", 0), g_prefs.getUShort("p1", 0),
+       g_prefs.getUShort("p2", 0), g_prefs.getUShort("p3", 0)}};
+  sanitizePatternConfig(legacy);
+  size_t got = g_prefs.getBytes("patterns", g_beacon.patterns,
+                                sizeof(g_beacon.patterns));
+  if (got != sizeof(g_beacon.patterns)) {
+    // First v9 boot: copying the old field-wide look to every group guarantees
+    // that assigning groups later is opt-in and the upgrade itself is invisible.
+    for (uint8_t i = 0; i < GROUP_COUNT; i++) g_beacon.patterns[i] = legacy;
+  } else {
+    for (uint8_t i = 0; i < GROUP_COUNT; i++)
+      sanitizePatternConfig(g_beacon.patterns[i]);
+  }
+  g_beacon.hdr = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  g_beacon.epoch_us = 0;
+  g_beacon.flags = 0;
   g_beacon.power = g_power_policy;
   g_beacon.keepalive = g_keepalive;
+  g_beacon.seq = 0;
   g_prefs.end();
 }
 
@@ -395,12 +420,15 @@ static void patternConfigLoad() {
 // mutate + snapshot under the lock, then persist from the copy.
 static void patternConfigSave(const BeaconMsg& b) {
   g_prefs.begin("node", /*readonly*/ false);
-  g_prefs.putUShort("pat", b.pattern_id);
-  g_prefs.putUChar("bri", b.brightness);
-  g_prefs.putUShort("p0", b.params[0]);
-  g_prefs.putUShort("p1", b.params[1]);
-  g_prefs.putUShort("p2", b.params[2]);
-  g_prefs.putUShort("p3", b.params[3]);
+  g_prefs.putBytes("patterns", b.patterns, sizeof(b.patterns));
+  // Keep the legacy keys as a readable Group 1 fallback for downgrade/repair.
+  const PatternConfig& p = b.patterns[0];
+  g_prefs.putUShort("pat", p.pattern_id);
+  g_prefs.putUChar("bri", p.brightness);
+  g_prefs.putUShort("p0", p.params[0]);
+  g_prefs.putUShort("p1", p.params[1]);
+  g_prefs.putUShort("p2", p.params[2]);
+  g_prefs.putUShort("p3", p.params[3]);
   g_prefs.end();
 }
 
@@ -563,11 +591,12 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
                    now_us());
       // Loop owns the persistent inventory and NVS writes. Queue every report
       // so it can learn a factory-assigned ID, detect conflicts, and decide
-      // whether this performer needs the authoritative row sent back.
+      // whether this performer needs the authoritative ID/group row sent back.
       if (g_rowreq_n < ROWREQ_MAX) {
         RegistrationRequest& request = g_rowreq[g_rowreq_n];
         memcpy(request.mac, r.mac, 6);
         request.reported_id = r.id;
+        request.reported_group = groupIdSafe(r.group_id);
         request.mac_known = known;
         g_rowreq_n = g_rowreq_n + 1;
       }
@@ -597,7 +626,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       TableMsg m;
       memcpy(&m, data, len);
       if (!tableMsgLenValid(len, m.n)) return;
-      // Find our own row; stash identity + optional position for loop() to
+      // Find our own row; stash identity + optional position + group for loop() to
       // adopt and persist outside the radio callback.
       TableAssignment assignment;
       if (tableMsgFindRow(m, g_mac, assignment)) {
@@ -769,7 +798,8 @@ static void maybeRegister(int64_t t) {
   g_next_register_us = t + REGISTER_INTERVAL_US;
 
   RegisterMsg r = {{BEACON_MAGIC, PROTO_VERSION, MSG_REGISTER}, {0}, g_id.id,
-                   PROTO_VERSION, (uint32_t)FIRMWARE_BUILD_ID,
+                   groupIdSafe(g_id.group_id), PROTO_VERSION,
+                   (uint32_t)FIRMWARE_BUILD_ID,
                    (uint8_t)FIRMWARE_BUILD_DIRTY, {0}};
   firmwareCopyVersion(r.version, FIRMWARE_VERSION);
   memcpy(r.mac, g_mac, 6);
@@ -932,17 +962,22 @@ static void maybeAdoptTableAssignment() {
                          : g_id.id;
   float next_x = assignment.has_position ? assignment.x : 0.0f;
   float next_y = assignment.has_position ? assignment.y : 0.0f;
-  if (next_id == g_id.id && next_x == g_id.x && next_y == g_id.y) return;
+  uint8_t next_group = assignment.has_position
+                           ? groupIdSafe(assignment.group_id)
+                           : 0;
+  if (next_id == g_id.id && next_x == g_id.x && next_y == g_id.y &&
+      next_group == g_id.group_id) return;
   bool id_changed = next_id != g_id.id;
   g_id.id = next_id;
   g_id.x = next_x;
   g_id.y = next_y;
+  g_id.group_id = next_group;
   identitySave();
   if (id_changed)
     Serial.printf("[table] adopted permanent ID #%u from conductor\n", g_id.id);
   if (assignment.has_position)
-    Serial.printf("[table] adopted position x=%.2f y=%.2f from conductor\n",
-                  g_id.x, g_id.y);
+    Serial.printf("[table] adopted position x=%.2f y=%.2f group=%u from conductor\n",
+                  g_id.x, g_id.y, (unsigned)(g_id.group_id + 1));
   else
     Serial.println("[table] placement cleared by conductor");
 }
@@ -980,9 +1015,10 @@ static void duskEnterDeepSleep(uint64_t sleep_us, const PowerPolicy& sleep_polic
 // drops.
 static void printDiag() {
   if (isConductor()) {
+    const PatternConfig& p = beaconPattern(g_beacon, 0);
     Serial.printf("[conductor] t=%lld us  seq=%lu  pat=%u  bri=%u\n",
-                  (long long)now_us(), (unsigned long)g_tx_seq, g_beacon.pattern_id,
-                  g_beacon.brightness);
+                  (long long)now_us(), (unsigned long)g_tx_seq, p.pattern_id,
+                  p.brightness);
     return;
   }
   SyncState s;
@@ -1021,9 +1057,10 @@ static void printDiag() {
 // Flash identical firmware to every board, then provision each over serial:
 //   info                 print role + identity (incl. MAC) + pattern state
 //   roster               (conductor) list nodes that have registered (MAC/id/fw)
-//   table                (conductor) print permanent IDs + optional positions
+//   table                (conductor) print permanent IDs + positions + groups
 //   assign <mac> <x> <y> (conductor) set a node's position by MAC; saved+broadcast
 //   forget <mac>         (conductor) clear position; permanent ID remains
+//   group <mac> <1..8>  (conductor) assign a placed node to a show group
 //   role <conductor|performer>   set this node's role and save to NVS
 //   id <n>               set this node's id and save to NVS
 //   pos <x> <y>          set this node's own (x,y) coordinate and save to NVS
@@ -1058,16 +1095,19 @@ static void printInfo() {
   portENTER_CRITICAL(&g_sync_mux);  // recv cb overwrites g_beacon on a performer
   b = g_beacon;
   portEXIT_CRITICAL(&g_sync_mux);
-  Serial.printf("role=%s  id=%u  mac=%s  x=%.2f  y=%.2f\n",
+  const PatternConfig& pattern_config = beaconPattern(b, g_id.group_id);
+  Serial.printf("role=%s  id=%u  mac=%s  x=%.2f  y=%.2f  group=%u\n",
                 isConductor() ? "CONDUCTOR" : "PERFORMER", g_id.id,
-                macStr(g_mac, mac), g_id.x, g_id.y);
+                macStr(g_mac, mac), g_id.x, g_id.y,
+                (unsigned)(g_id.group_id + 1));
   Serial.printf("  firmware: v%s  proto=%u  build=%08lx%s\n", FIRMWARE_VERSION,
                 PROTO_VERSION,
                 (unsigned long)(uint32_t)FIRMWARE_BUILD_ID,
                 FIRMWARE_BUILD_DIRTY ? " dirty" : "");
-  Serial.printf("  pattern=%u  bri=%u  params=[%u %u %u %u]\n", b.pattern_id,
-                b.brightness, b.params[0], b.params[1],
-                b.params[2], b.params[3]);
+  Serial.printf("  pattern=%u  bri=%u  params=[%u %u %u %u]\n",
+                pattern_config.pattern_id, pattern_config.brightness,
+                pattern_config.params[0], pattern_config.params[1],
+                pattern_config.params[2], pattern_config.params[3]);
   Serial.printf("  powersave=%s%s  dusk=%s%s\n", g_powersave ? "on" : "off",
                 isConductor() ? " (conductor: radio always on)" : "",
                 g_dusk_on ? "on" : "off",
@@ -1134,8 +1174,9 @@ static void printTable() {
     char mac[18];
     const TableEntry& row = g_table.entries[i];
     if (tableHasPosition(row))
-      Serial.printf("  [%u] %s  id=#%u  x=%.2f  y=%.2f\n", i,
-                    macStr(row.mac, mac), row.id, row.x, row.y);
+      Serial.printf("  [%u] %s  id=#%u  x=%.2f  y=%.2f  group=%u\n", i,
+                    macStr(row.mac, mac), row.id, row.x, row.y,
+                    (unsigned)(groupIdSafe(row.group_id) + 1));
     else
       Serial.printf("  [%u] %s  id=#%u  unpositioned\n", i,
                     macStr(row.mac, mac), row.id);
@@ -1176,18 +1217,31 @@ static void saveBeaconSnapshot() {
   patternConfigSave(snap);
 }
 
-static void printPatternJson(const BeaconMsg& b) {
-  Serial.printf("\"pattern\":{\"pattern\":\"%s\",\"brightness\":%u,"
+static void printPatternValueJson(const PatternConfig& p) {
+  Serial.printf("{\"pattern\":\"%s\",\"brightness\":%u,"
                 "\"params\":{\"p0\":%u,\"p1\":%u,\"p2\":%u,\"p3\":%u",
-                patternName(b.pattern_id), b.brightness, b.params[0], b.params[1],
-                b.params[2], b.params[3]);
-  if (b.pattern_id == patterns::GLOW || b.pattern_id == patterns::PULSE) {
-    Serial.printf(",\"hue\":%u,\"saturation\":%u", b.params[0],
-                  b.params[1] ? b.params[1] : 100);
+                patternName(p.pattern_id), p.brightness, p.params[0], p.params[1],
+                p.params[2], p.params[3]);
+  if (p.pattern_id == patterns::GLOW || p.pattern_id == patterns::PULSE) {
+    Serial.printf(",\"hue\":%u,\"saturation\":%u", p.params[0],
+                  p.params[1] ? p.params[1] : 100);
   } else {
-    Serial.printf(",\"period\":%u", b.params[0]);
+    Serial.printf(",\"period\":%u", p.params[0]);
   }
   Serial.print("}}");
+}
+
+static void printPatternsJson(const BeaconMsg& b) {
+  Serial.print("\"pattern\":");
+  printPatternValueJson(beaconPattern(b, 0));  // backward-compatible Group 1
+  Serial.print(",\"patterns\":[");
+  for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
+    if (group_id) Serial.print(",");
+    Serial.printf("{\"group_id\":%u,\"config\":", group_id);
+    printPatternValueJson(beaconPattern(b, group_id));
+    Serial.print("}");
+  }
+  Serial.print("]");
 }
 
 static void printPowerPolicyJson(const PowerPolicy& p) {
@@ -1604,7 +1658,8 @@ static void handleOtaProgress(const SerialJsonCommand& cmd) {
 static void printLanternJson(const uint8_t mac_bytes[6], const char* label,
                              uint16_t node_id,
                              const char* status, int64_t last_seen_s, float x,
-                             float y, bool has_position, const char* attention,
+                             float y, bool has_position, uint8_t group_id,
+                             const char* attention,
                              const FirmwareVersion* firmware,
                              const PowerEntry* power, int64_t t) {
   char mac[18];
@@ -1617,9 +1672,12 @@ static void printLanternJson(const uint8_t mac_bytes[6], const char* label,
     Serial.print("\"last_seen_s\":999999,\"last_seen_label\":\"not seen\",");
   }
   if (has_position) {
-    Serial.printf("\"x\":%.4f,\"y\":%.4f,\"position\":\"Set\",", x, y);
+    Serial.printf("\"x\":%.4f,\"y\":%.4f,\"position\":\"Set\","
+                  "\"group_id\":%u,\"group\":\"Group %u\",",
+                  x, y, groupIdSafe(group_id), groupIdSafe(group_id) + 1);
   } else {
-    Serial.print("\"x\":null,\"y\":null,\"position\":\"Missing\",");
+    Serial.print("\"x\":null,\"y\":null,\"position\":\"Missing\","
+                 "\"group_id\":0,\"group\":\"Group 1\",");
   }
   Serial.printf("\"attention\":\"%s\",", attention);
   if (firmware) {
@@ -1731,7 +1789,7 @@ static void printMachineState(uint32_t id) {
                 conductor_fw.version,
                 (unsigned long)conductor_fw.build_id,
                 conductor_fw.dirty ? "true" : "false");
-  printPatternJson(b);
+  printPatternsJson(b);
   Serial.print(",");
   printPowerPolicyJson(policy);
   Serial.print(",");
@@ -1781,7 +1839,8 @@ static void printMachineState(uint32_t id) {
     int p = powerTableFind(g_power_table, row.mac);
     printLanternJson(row.mac, label, node_id,
                      r >= 0 ? "alive" : "missing", age_s, row.x,
-                     row.y, tableHasPosition(row), attention_text, fw_ptr,
+                     row.y, tableHasPosition(row), row.group_id,
+                     attention_text, fw_ptr,
                      p >= 0 ? &g_power_table.entries[p] : nullptr, t);
   }
   for (uint8_t i = 0; i < g_state_roster_snapshot.count; i++) {
@@ -1808,8 +1867,7 @@ static void printMachineState(uint32_t id) {
     }
     int p = powerTableFind(g_power_table, row.mac);
     printLanternJson(row.mac, label, id_conflict ? 0 : row.id, "alive", age_s,
-                     0.0f, 0.0f, false,
-                     attention_text, &fw,
+                     0.0f, 0.0f, false, 0, attention_text, &fw,
                      p >= 0 ? &g_power_table.entries[p] : nullptr, t);
   }
   Serial.print("],\"events\":[]}}\n");
@@ -1830,6 +1888,18 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     } else {
       jsonError(cmd.id, "table full");
     }
+  } else if (cmd.kind == SJ_GROUP) {
+    if (!isConductor()) {
+      jsonError(cmd.id, "group is conductor-only");
+    } else if (!cmd.has_group_id || !groupIdValid(cmd.group_id)) {
+      jsonError(cmd.id, "invalid group");
+    } else if (tableSetGroup(g_table, cmd.mac, cmd.group_id)) {
+      tableSave();
+      broadcastTable();
+      jsonOk(cmd.id, "group changed");
+    } else {
+      jsonError(cmd.id, "lantern must be placed before grouping");
+    }
   } else if (cmd.kind == SJ_FORGET) {
     if (!isConductor()) {
       jsonError(cmd.id, "forget is conductor-only");
@@ -1847,11 +1917,13 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     }
     float x = 0.0f, y = 0.0f;
     int replacement = tableFind(g_table, cmd.new_mac);
+    uint8_t group_id = 0;
     if (!tableLookup(g_table, cmd.old_mac, x, y)) {
       jsonError(cmd.id, "old lantern has no position");
     } else if (replacement >= 0 && tableHasPosition(g_table.entries[replacement])) {
       jsonError(cmd.id, "replacement lantern already has a position");
-    } else if (!tableSet(g_table, cmd.new_mac, x, y)) {
+    } else if (!tableLookupGroup(g_table, cmd.old_mac, group_id) ||
+               !tableSetWithGroup(g_table, cmd.new_mac, x, y, group_id)) {
       jsonError(cmd.id, "table full");
     } else {
       tableClearPosition(g_table, cmd.old_mac);
@@ -1861,19 +1933,25 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     }
   } else if (cmd.kind == SJ_PATTERN) {
     portENTER_CRITICAL(&g_sync_mux);
-    g_beacon.pattern_id = cmd.pattern_id;
-    if (cmd.has_brightness) {
-      g_beacon.brightness =
-          cmd.brightness > MAX_BRIGHTNESS ? MAX_BRIGHTNESS : cmd.brightness;
+    uint8_t first = cmd.has_group_id ? cmd.group_id : 0;
+    uint8_t end = cmd.has_group_id ? (uint8_t)(cmd.group_id + 1) : GROUP_COUNT;
+    for (uint8_t group_id = first; group_id < end; group_id++) {
+      PatternConfig& p = g_beacon.patterns[group_id];
+      p.pattern_id = cmd.pattern_id;
+      if (cmd.has_brightness) {
+        p.brightness =
+            cmd.brightness > MAX_BRIGHTNESS ? MAX_BRIGHTNESS : cmd.brightness;
+      }
+      for (uint8_t i = 0; i < 4; i++)
+        if (cmd.has_params[i]) p.params[i] = cmd.params[i];
     }
-    for (uint8_t i = 0; i < 4; i++)
-      if (cmd.has_params[i]) g_beacon.params[i] = cmd.params[i];
     portEXIT_CRITICAL(&g_sync_mux);
     saveBeaconSnapshot();
     jsonOk(cmd.id, "pattern changed");
   } else if (cmd.kind == SJ_BLACKOUT) {
     portENTER_CRITICAL(&g_sync_mux);
-    g_beacon.brightness = 0;
+    for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
+      g_beacon.patterns[group_id].brightness = 0;
     portEXIT_CRITICAL(&g_sync_mux);
     saveBeaconSnapshot();
     jsonOk(cmd.id, "blackout broadcast");
@@ -1953,6 +2031,25 @@ static void handleCommand(char* line) {
     } else {
       Serial.println("? assign <mac> <x> <y>");
     }
+  } else if (!strcmp(cmd, "group")) {
+    char* am = strtok(nullptr, " \t");
+    char* ag = strtok(nullptr, " \t");
+    uint8_t mac[6];
+    int group_number = ag ? atoi(ag) : 0;
+    if (!isConductor()) {
+      Serial.println("? group is conductor-only");
+    } else if (am && parseMac(am, mac) && group_number >= 1 &&
+               group_number <= GROUP_COUNT) {
+      if (tableSetGroup(g_table, mac, (uint8_t)(group_number - 1))) {
+        tableSave();
+        broadcastTable();
+        printTable();
+      } else {
+        Serial.println("? lantern must be placed before grouping");
+      }
+    } else {
+      Serial.println("? group <mac> <1..8>");
+    }
   } else if (!strcmp(cmd, "forget")) {
     char* am = strtok(nullptr, " \t");
     uint8_t mac[6];
@@ -2002,7 +2099,8 @@ static void handleCommand(char* line) {
       // a snapshot taken inside the same critical section.
       uint16_t v = (uint16_t)atoi(a);
       portENTER_CRITICAL(&g_sync_mux);
-      g_beacon.pattern_id = v;
+      for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
+        g_beacon.patterns[group_id].pattern_id = v;
       BeaconMsg snap = g_beacon;
       portEXIT_CRITICAL(&g_sync_mux);
       patternConfigSave(snap);
@@ -2015,7 +2113,8 @@ static void handleCommand(char* line) {
       if (v < 0) v = 0;
       if (v > MAX_BRIGHTNESS) v = MAX_BRIGHTNESS;  // never store above the cap
       portENTER_CRITICAL(&g_sync_mux);
-      g_beacon.brightness = (uint8_t)v;
+      for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
+        g_beacon.patterns[group_id].brightness = (uint8_t)v;
       BeaconMsg snap = g_beacon;
       portEXIT_CRITICAL(&g_sync_mux);
       patternConfigSave(snap);
@@ -2029,7 +2128,8 @@ static void handleCommand(char* line) {
       if (i >= 0 && i < 4) {
         uint16_t v = (uint16_t)atoi(av);
         portENTER_CRITICAL(&g_sync_mux);
-        g_beacon.params[i] = v;
+        for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
+          g_beacon.patterns[group_id].params[i] = v;
         BeaconMsg snap = g_beacon;
         portEXIT_CRITICAL(&g_sync_mux);
         patternConfigSave(snap);
@@ -2284,6 +2384,7 @@ void loop() {
   s = g_sync;
   b = g_beacon;
   portEXIT_CRITICAL(&g_sync_mux);
+  PatternConfig p = beaconPattern(b, g_id.group_id);
   if (isConductor()) b.keepalive = g_keepalive;
   keepAliveSanitize(b.keepalive);
   static uint32_t last_rx = 0;
@@ -2301,7 +2402,11 @@ void loop() {
       broadcastTable();
       g_next_table_us = t + TABLE_INTERVAL_US;
     }
-    if (b.pattern_id == patterns::CALIBRATION && t >= g_next_cal_roster_us) {
+    bool calibration_active = false;
+    for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
+      if (b.patterns[group_id].pattern_id == patterns::CALIBRATION)
+        calibration_active = true;
+    if (calibration_active && t >= g_next_cal_roster_us) {
       broadcastCalibrationRoster();
       g_next_cal_roster_us = t + CAL_ROSTER_INTERVAL_US;
     }
@@ -2337,8 +2442,9 @@ void loop() {
         }
         int entry = tableFind(g_table, req[i].mac);
         bool reply = tableRowReplyWanted(
-            req[i].mac_known, req[i].reported_id, entry >= 0,
-            entry >= 0 ? g_table.entries[entry].id : 0);
+            req[i].mac_known, req[i].reported_id, req[i].reported_group,
+            entry >= 0, entry >= 0 ? g_table.entries[entry].id : 0,
+            entry >= 0 ? g_table.entries[entry].group_id : 0);
         if (!reply) continue;
         TableMsg m;
         size_t len = tableRowBuild(g_table, req[i].mac, m);
@@ -2411,9 +2517,9 @@ void loop() {
 
   // Power safety: hard-clamp the rendered brightness to MAX_BRIGHTNESS on every
   // node, so the per-node draw is bounded no matter what a pattern asks for.
-  if (b.brightness > MAX_BRIGHTNESS) b.brightness = MAX_BRIGHTNESS;
+  if (p.brightness > MAX_BRIGHTNESS) p.brightness = MAX_BRIGHTNESS;
   powerPolicySanitize(b.power);
-  if (!powerPolicyLedsOn(b.power)) b.brightness = 0;
+  if (!powerPolicyLedsOn(b.power)) p.brightness = 0;
 
   // Conductor renders against its own clock; a performer against synced time
   // (which free-runs on the last offset when no beacon arrives).
@@ -2422,7 +2528,7 @@ void loop() {
   portENTER_CRITICAL(&g_sync_mux);
   calibration_rank = g_calibration_rank;
   portEXIT_CRITICAL(&g_sync_mux);
-  uint16_t render_node_id = (b.pattern_id == patterns::CALIBRATION && calibration_rank)
+  uint16_t render_node_id = (p.pattern_id == patterns::CALIBRATION && calibration_rank)
                                 ? calibration_rank
                                 : g_id.id;
   bool keepalive_pulse = powerPolicyKeepaliveWindow(b.power) &&
@@ -2433,26 +2539,27 @@ void loop() {
   // wait. Re-render them only when the pattern changes, plus a ~1 Hz safety
   // refresh (self-heals a noise-glitched pixel). Animated patterns render every
   // pass as before.
-  static BeaconMsg last_shown = {};
+  static PatternConfig last_shown = {};
+  static KeepAliveConfig last_keepalive = {};
   static bool shown_once = false;
   static int64_t next_static_refresh = 0;
-  bool pattern_changed = !shown_once || last_shown.pattern_id != b.pattern_id ||
-                        last_shown.brightness != b.brightness ||
-                        memcmp(last_shown.params, b.params, sizeof(b.params)) != 0 ||
-                        memcmp(&last_shown.keepalive, &b.keepalive,
+  bool pattern_changed = !shown_once ||
+                        memcmp(&last_shown, &p, sizeof(p)) != 0 ||
+                        memcmp(&last_keepalive, &b.keepalive,
                                sizeof(b.keepalive)) != 0;
   bool keepalive_active_window = powerPolicyKeepaliveWindow(b.power) &&
                                  keepAliveEnabled(b.keepalive);
-  if (keepalive_active_window || !patterns::patternIsStatic(b.pattern_id) || pattern_changed ||
+  if (keepalive_active_window || !patterns::patternIsStatic(p.pattern_id) || pattern_changed ||
       t >= next_static_refresh) {
     if (keepalive_pulse) {
       RgbwColor c(0, 0, 0, b.keepalive.brightness);
       for (uint16_t i = 0; i < strip.PixelCount(); i++) strip.SetPixelColor(i, c);
     } else {
-      patterns::render(strip, b, render_us, g_id.x, g_id.y, render_node_id);
+      patterns::render(strip, p, render_us, g_id.x, g_id.y, render_node_id);
     }
     strip.Show();
-    last_shown = b;
+    last_shown = p;
+    last_keepalive = b.keepalive;
     shown_once = true;
     next_static_refresh = t + DIAG_INTERVAL_US;
   }
@@ -2483,7 +2590,7 @@ void loop() {
     in.synced_us = syncedTime(s, in.now_us);
     in.radio_on = g_radio_on;
     in.radio_change_at_us = g_duty.change_at_us;
-    in.pattern_static = patterns::patternIsStatic(b.pattern_id);
+    in.pattern_static = patterns::patternIsStatic(p.pattern_id);
     in.last_serial_us = g_last_serial_us;
     in.heartbeat_half_us = HEARTBEAT_LED ? HEARTBEAT_HALF_US : 0;
     nap = napPlan(NAP_CFG, in);

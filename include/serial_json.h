@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "macaddr.h"
+#include "groups.h"
 #include "ota_update.h"
 #include "pattern_ids.h"
 
@@ -21,6 +22,7 @@ enum SerialJsonKind {
   SJ_STATE,
   SJ_IDENTIFY,
   SJ_ASSIGN,
+  SJ_GROUP,
   SJ_FORGET,
   SJ_REPLACE,
   SJ_PATTERN,
@@ -42,6 +44,8 @@ struct SerialJsonCommand {
   uint8_t new_mac[6] = {0};
   float x = 0.0f;
   float y = 0.0f;
+  bool has_group_id = false;
+  uint8_t group_id = 0;
   uint16_t pattern_id = patterns::GLOW;
   uint8_t brightness = 48;
   bool has_brightness = false;
@@ -224,6 +228,16 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
       error = "bad assign";
       return false;
     }
+  } else if (!strcmp(norm, "group")) {
+    cmd.kind = SJ_GROUP;
+    uint32_t group_id = 0;
+    if (!sjMac(json, "mac", cmd.mac) || !sjUint(json, "group_id", group_id) ||
+        group_id >= GROUP_COUNT) {
+      error = "bad group";
+      return false;
+    }
+    cmd.has_group_id = true;
+    cmd.group_id = (uint8_t)group_id;
   } else if (!strcmp(norm, "forget")) {
     cmd.kind = SJ_FORGET;
     if (!sjMac(json, "mac", cmd.mac)) {
@@ -249,6 +263,15 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     if (sjUint(json, "brightness", brightness)) {
       cmd.has_brightness = true;
       cmd.brightness = (uint8_t)(brightness > 255 ? 255 : brightness);
+    }
+    uint32_t group_id = 0;
+    if (sjUint(json, "group_id", group_id)) {
+      if (group_id >= GROUP_COUNT) {
+        error = "bad pattern group";
+        return false;
+      }
+      cmd.has_group_id = true;
+      cmd.group_id = (uint8_t)group_id;
     }
     uint32_t v = 0;
     if (sjUint(json, "period", v)) {

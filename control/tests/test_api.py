@@ -419,7 +419,7 @@ def test_state_endpoint_returns_mock_state() -> None:
     assert body["summary"]["total"] == 9
     assert body["conductor"]["sync"] == "locked"
     assert body["conductor"]["firmware"]["version"] == "0.3.0"
-    assert body["conductor"]["firmware"]["proto"] == 7
+    assert body["conductor"]["firmware"]["proto"] == 9
     assert body["summary"]["firmware"]["consistent"] is True
     assert body["power"]["light_sleep_check_s"] == 4
     assert body["keepalive"] == {"enabled": False, "interval_ms": 10000, "pulse_ms": 100, "brightness": 64}
@@ -621,7 +621,9 @@ def test_pattern_update_rejected_by_conductor_is_400() -> None:
 
 
 def test_calibration_mode_toggle_restores_previous_pattern() -> None:
-    client = TestClient(create_app(MockConductor()))
+    conductor = MockConductor()
+    conductor.update_pattern("Sweep", 72, {"period": 8000}, group_id=3)
+    client = TestClient(create_app(conductor))
 
     started = client.post("/api/operations/calibration-mode", json={"enabled": True})
     running = client.get("/api/state").json()
@@ -637,6 +639,11 @@ def test_calibration_mode_toggle_restores_previous_pattern() -> None:
     assert restored["pattern"]["pattern"] == "Glow"
     assert restored["pattern"]["brightness"] == 48
     assert restored["pattern"]["params"] == {"hue": 40, "saturation": 100}
+    assert restored["patterns"][3]["config"] == {
+        "pattern": "Sweep",
+        "brightness": 72,
+        "params": {"period": 8000},
+    }
 
 
 def test_keepalive_update_round_trips_to_state() -> None:
@@ -2238,6 +2245,26 @@ def test_assign_endpoint_updates_lantern_position() -> None:
     assert response.status_code == 200
     assert lantern["position"] == "Set"
     assert lantern["attention"] == "None"
+
+
+def test_group_endpoint_and_pattern_update_are_independent() -> None:
+    conductor = MockConductor()
+    client = TestClient(create_app(conductor))
+    mac = conductor._lanterns[0].mac
+
+    grouped = client.post(f"/api/lanterns/{mac}/group", json={"group_id": 3})
+    changed = client.post(
+        "/api/show/pattern",
+        json={"pattern": "Sweep", "brightness": 72, "params": {"period": 8000}, "group_id": 3},
+    )
+    state = client.get("/api/state").json()
+
+    assert grouped.status_code == 200
+    assert changed.status_code == 200
+    lantern = next(item for item in state["lanterns"] if item["mac"] == mac)
+    assert lantern["group_id"] == 3
+    assert state["patterns"][3]["config"]["pattern"] == "Sweep"
+    assert state["patterns"][0]["config"]["pattern"] == "Glow"
 
 
 def test_calibration_apply_proposal_saves_assignments_and_skips_uncertain() -> None:

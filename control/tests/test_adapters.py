@@ -52,6 +52,20 @@ def test_assign_maps_to_json_command() -> None:
     }
 
 
+def test_group_assignment_maps_to_json_command() -> None:
+    transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "group changed"})])
+    conductor = JsonLineSerialConductor(transport)
+
+    conductor.assign_group("AA:BB:CC:DD:EE:FF", 3)
+
+    assert json.loads(transport.writes[0]) == {
+        "id": 1,
+        "cmd": "group",
+        "mac": "AA:BB:CC:DD:EE:FF",
+        "group_id": 3,
+    }
+
+
 def test_pattern_command_includes_brightness_and_params() -> None:
     transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "pattern changed to Sweep"})])
     conductor = JsonLineSerialConductor(transport)
@@ -65,6 +79,15 @@ def test_pattern_command_includes_brightness_and_params() -> None:
         "brightness": 64,
         "params": {"period": 8000},
     }
+
+
+def test_pattern_command_can_target_one_group() -> None:
+    transport = FakeTransport([json.dumps({"id": 1, "ok": True})])
+    conductor = JsonLineSerialConductor(transport)
+
+    conductor.update_pattern("Sweep", 64, {"period": 8000}, group_id=2)
+
+    assert json.loads(transport.writes[0])["group_id"] == 2
 
 
 def test_legacy_glow_params_get_explicit_full_value_and_optional_value_is_packed() -> None:
