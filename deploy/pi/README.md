@@ -162,7 +162,11 @@ CONTROL_REQUIRE_HTTPS=true
 CONTROL_ALLOW_NETWORK_CHANGES=false
 CONTROL_DATA_DIR=/var/lib/lightweave
 CONTROL_SERIAL_RESET_ON_OPEN=0
+CONTROL_SERIAL_TIMEOUT_S=8.0
 ```
+
+The 8-second serial timeout leaves enough wire time for the conductor's full
+inventory snapshot at 115200 baud, including a populated 128-board field.
 
 The GitOps installer is a prerequisite for this control unit because it installs
 the root recovery gate that must run before control. The initial production

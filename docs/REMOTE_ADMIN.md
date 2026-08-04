@@ -128,6 +128,7 @@ The field service environment includes:
 CONTROL_CONDUCTOR=serial
 CONTROL_SERIAL_PORT=/dev/serial/by-path/<conductor-path>
 CONTROL_SERIAL_RESET_ON_OPEN=0
+CONTROL_SERIAL_TIMEOUT_S=8.0
 CONTROL_DATA_DIR=/var/lib/lightweave
 CONTROL_ALLOWED_ORIGINS=https://control.example.com
 CONTROL_REQUIRE_HTTPS=true

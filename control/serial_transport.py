@@ -3,6 +3,9 @@ from __future__ import annotations
 import time
 
 
+SERIAL_READ_POLL_S = 0.005
+
+
 class SerialTransportError(RuntimeError):
     pass
 
@@ -16,6 +19,8 @@ class PySerialTransport:
         self._port = port
         self._baud = baud
         self._reset_on_open = reset_on_open
+        self._read_buffer = bytearray()
+        self._discard_until_newline = False
         self._serial = self._open()
 
     def _open(self):
@@ -31,6 +36,8 @@ class PySerialTransport:
             connection.setRTS(False)
         time.sleep(2.0)
         connection.reset_input_buffer()
+        self._read_buffer.clear()
+        self._discard_until_newline = False
         return connection
 
     def _reconnect(self) -> None:
@@ -56,25 +63,31 @@ class PySerialTransport:
 
     def read_line(self, timeout_s: float) -> str | None:
         deadline = time.monotonic() + timeout_s
-        buf = bytearray()
         try:
             self._serial.timeout = 0
             while time.monotonic() < deadline:
+                newline = self._read_buffer.find(b"\n")
+                if newline >= 0:
+                    line = bytes(self._read_buffer[:newline + 1])
+                    del self._read_buffer[:newline + 1]
+                    if self._discard_until_newline:
+                        self._discard_until_newline = False
+                        continue
+                    return line.decode("utf-8", errors="replace")
+
                 waiting = self._serial.in_waiting
                 if waiting:
-                    chunk = self._serial.read(1)
-                    if not chunk:
-                        continue
-                    buf.extend(chunk)
-                    if chunk in {b"\n", b"\r"}:
-                        return buf.decode("utf-8", errors="replace")
+                    self._read_buffer.extend(self._serial.read(waiting))
                 else:
-                    time.sleep(0.005)
+                    time.sleep(SERIAL_READ_POLL_S)
         except self._serial_errors:
             self._reconnect()
             return None
-        if buf:
-            return buf.decode("utf-8", errors="replace")
+        if self._read_buffer:
+            # Never expose a partial JSON frame as a line. The conductor may
+            # still be transmitting it, so the next read discards through its
+            # newline before returning a response to a later request.
+            self._discard_until_newline = True
         return None
 
     def close(self) -> None:

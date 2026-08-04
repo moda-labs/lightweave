@@ -18,7 +18,12 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .adapters import ConductorAdapter, JsonLineSerialConductor, SerialProtocolError
+from .adapters import (
+    DEFAULT_SERIAL_REQUEST_TIMEOUT_S,
+    ConductorAdapter,
+    JsonLineSerialConductor,
+    SerialProtocolError,
+)
 from .auth import AuthManager, AuthStatus, canonicalize_client_ip
 from .calibration import CalibrationError, CalibrationStore, calibration_code_plan
 from .mock_conductor import MockConductor
@@ -218,7 +223,9 @@ def create_default_conductor() -> ConductorAdapter:
     if not port:
         raise RuntimeError("CONTROL_SERIAL_PORT is required when CONTROL_CONDUCTOR=serial")
     baud = int(os.getenv("CONTROL_SERIAL_BAUD", "115200"))
-    timeout_s = float(os.getenv("CONTROL_SERIAL_TIMEOUT_S", "1.5"))
+    timeout_s = float(
+        os.getenv("CONTROL_SERIAL_TIMEOUT_S", str(DEFAULT_SERIAL_REQUEST_TIMEOUT_S))
+    )
     reset_on_open = os.getenv("CONTROL_SERIAL_RESET_ON_OPEN", "0").strip().lower() in {"1", "true", "yes"}
     return JsonLineSerialConductor(
         PySerialTransport(port, baud=baud, reset_on_open=reset_on_open),
