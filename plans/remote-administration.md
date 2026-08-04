@@ -1,7 +1,7 @@
 # Remote administration
 
-> **Status:** Building
-> **Tracking issue:** moda-labs/lightweave#3 · **Created:** 2026-07-22 · **Last amended:** 2026-07-23 (see Amendments)
+> **Status:** Done
+> **Tracking issue:** moda-labs/lightweave#3 · **Created:** 2026-07-22 · **Last amended:** 2026-08-04 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -432,23 +432,30 @@ command fails, fix the cause and re-run.
   environment/token files, least-privilege settings, and restart behavior above;
   installed-unit and reboot proof belongs to Phase 4.
 
-### Phase 4 - Human-owned field rollout and recovery proof
+### Phase 4 - Human-owned field rollout and recovery proof `[x]`
 
 This phase is a rollout gate owned by an operator with the Cloudflare account,
 Starlink installation, Pi, and 3-board bench. It begins only after the code lane
 lands; the builder supplies the runbook and records evidence but does not invent
 account credentials or claim physical verification.
 
-- [ ] Install the documented Raspberry Pi OS Lite 64-bit Trixie image on the Pi
+**Closed out 2026-08-04 by operator sign-off** (Zach): the deployment is
+validated working on the Pi, including survival of Pi power loss/restart. The
+items below are marked only where that sign-off or merged work corroborates
+them; the six drills that retain no in-repo artifact are left `[ ]` on purpose
+rather than back-filled. See the 2026-08-04 Amendments entry for the exact
+evidence split.
+
+- [x] Install the documented Raspberry Pi OS Lite 64-bit Trixie image on the Pi
   Zero 2 W, create the Python 3.13 virtualenv, install every pinned requirement,
   and run the complete control test suite.
-- [ ] Create the named tunnel route and its required host-specific HTTP-to-HTTPS
+- [x] Create the named tunnel route and its required host-specific HTTP-to-HTTPS
   redirect before sharing the hostname; install the token file without exposing
   it in shell history and verify only the expected connector is active.
-- [ ] Verify both installed unit files with `systemd-analyze verify`, confirm
+- [x] Verify both installed unit files with `systemd-analyze verify`, confirm
   `cloudflared --version` is at least 2025.4.0, and reboot to prove FastAPI and the
   tunnel return without login.
-- [ ] Remotely change a harmless pattern and verify the serial acknowledgement
+- [x] Remotely change a harmless pattern and verify the serial acknowledgement
   plus performer update.
 - [ ] Disconnect Starlink and verify the field continues its stored pattern and
   power policy without Pi/internet participation.
@@ -507,7 +514,7 @@ installed systemd runtime.
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| Implementation lane | #6 | 1-3 | Control-plane contract, tests, and Pi deployment artifacts | solo | ready |
+| Implementation lane | #6 | 1-3 | Control-plane contract, tests, and Pi deployment artifacts | solo | done (#9) |
 
 **Lanes:** One solo lane owns the OTA API/UI contract, authentication and
 deployment safety settings, systemd contract, documentation, and all phase 1-3
@@ -538,6 +545,32 @@ gate, not a parallel builder lane.
 - **2026-07-23** (Codex, Moda Amendment review): Red-team and integration review
   returned LANDABLE, and the implementer Ready rubric returned READY after the
   shared-password contracts were made exact; restored Approved/ready status.
+- **2026-08-04** (Zach, sign-off relayed by Moda Agent): Phase 4 closed out and
+  the plan moved to Done. Zach ruled the initiative "fully closed out on remote
+  administration ... validated working on the pi, including surviving pi power
+  loss/restart." Phase 4 is an operator-attested gate by construction, so that
+  ruling, not merged code, is its evidence.
+  Phases 1-3 landed via #9 (lane #6, merged 2026-07-29) and were already fully
+  marked. Corroborating merged work since: the Pi runs the control plane as a
+  systemd service under pull-based GitOps releases (#10), with v0.5.0 and v0.5.1
+  promoted to production (#18, #21) and a Pi-only release-environment permission
+  bug found and fixed on the live host (#19); the named tunnel is published and
+  documented at `control.basketbrain.dev` (#13).
+  Four Phase 4 items are marked `[x]` on that basis: Pi installation, tunnel
+  route publication, unit verification plus reboot-without-login, and remote
+  pattern change. `systemd-analyze verify` output was not retained; the item is
+  marked on its outcome: the services return after a real power cycle.
+  Six items retain no in-repo artifact and stay `[ ]` rather than being
+  back-filled from a general sign-off: the Starlink disconnect and restore
+  drills, the browser-disconnect 3-board OTA drill, the logged-out
+  firmware-staging negative check, the process-restart-during-OTA drill, and the
+  `docs/HANDOFF.md` deployment record. Their validation gates are likewise
+  unretained. Note that the deployed hostname and service-verification commands
+  are recorded, but in `docs/SSH_ACCESS.md` rather than `docs/HANDOFF.md` as this
+  plan specified, and `docs/HANDOFF.md` still lists the rollout as a pending
+  next-session task, a documentation follow-up rather than open design work.
+  No remaining scope is contradicted by the tree, and no further code work is
+  required by this plan.
 
 ## Notes
 
