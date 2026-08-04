@@ -210,6 +210,23 @@ def test_groups_keep_independent_patterns_and_membership() -> None:
     assert snapshot["patterns"][0]["config"]["pattern"] == "Glow"
 
 
+def test_unpositioned_lantern_keeps_group_before_and_after_placement_changes() -> None:
+    conductor = MockConductor()
+    mac = "8C:94:DF:57:7F:14"
+
+    grouped = conductor.assign_group(mac, 4)
+    before = next(item for item in conductor.lanterns() if item["mac"] == mac)
+    conductor.assign(mac, 0.2, 0.3)
+    conductor.forget(mac)
+    after = next(item for item in conductor.lanterns() if item["mac"] == mac)
+
+    assert grouped["ok"] is True
+    assert before["position"] == "Missing"
+    assert before["group_id"] == 4
+    assert after["position"] == "Missing"
+    assert after["group_id"] == 4
+
+
 def test_replace_moves_only_position_and_group_to_unpositioned_spare() -> None:
     conductor = MockConductor()
     old_mac = "A0:B7:65:11:44:91"
@@ -226,7 +243,7 @@ def test_replace_moves_only_position_and_group_to_unpositioned_spare() -> None:
     assert old["label"] == "#18"
     assert old["status"] == "missing"
     assert old["attention"] == "Not seen"
-    assert old["group_id"] == 0
+    assert old["group_id"] == 2
     assert new["position"] == "Set"
     assert new["label"] == "#57"
     assert new["group_id"] == 2

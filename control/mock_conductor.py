@@ -99,8 +99,8 @@ class Lantern:
             "x": self.x,
             "y": self.y,
             "position": "Set" if has_position else "Missing",
-            "group_id": self.group_id if has_position else 0,
-            "group": f"Group {(self.group_id if has_position else 0) + 1}",
+            "group_id": self.group_id,
+            "group": f"Group {self.group_id + 1}",
             "attention": attention,
             "firmware": deepcopy(self.firmware),
             "power": {
@@ -247,8 +247,6 @@ class MockConductor:
         lantern = self._find(mac)
         if not lantern:
             return {"ok": False, "error": "unknown lantern"}
-        if lantern.x is None or lantern.y is None:
-            return {"ok": False, "error": "lantern must be placed before grouping"}
         if group_id < 0 or group_id >= GROUP_COUNT:
             return {"ok": False, "error": "invalid group"}
         lantern.group_id = group_id
@@ -261,7 +259,6 @@ class MockConductor:
             return {"ok": False, "error": "unknown lantern"}
         lantern.x = None
         lantern.y = None
-        lantern.group_id = 0
         self._event(f"forget {lantern.mac}")
         return {"ok": True, "message": f"forgot position for {lantern.label}", "mac": lantern.mac}
 
@@ -283,7 +280,6 @@ class MockConductor:
         new.group_id = old.group_id
         old.x = None
         old.y = None
-        old.group_id = 0
         self._event(
             f"replace old={old.mac} label={old_label} "
             f"new={new.mac} label={new_label}"

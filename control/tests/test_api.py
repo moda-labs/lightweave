@@ -2267,6 +2267,19 @@ def test_group_endpoint_and_pattern_update_are_independent() -> None:
     assert state["patterns"][0]["config"]["pattern"] == "Glow"
 
 
+def test_group_endpoint_accepts_unpositioned_lantern() -> None:
+    conductor = MockConductor()
+    client = TestClient(create_app(conductor))
+    mac = "8C:94:DF:57:7F:14"
+
+    grouped = client.post(f"/api/lanterns/{mac}/group", json={"group_id": 5})
+    lantern = next(item for item in client.get("/api/lanterns").json() if item["mac"] == mac)
+
+    assert grouped.status_code == 200
+    assert lantern["position"] == "Missing"
+    assert lantern["group_id"] == 5
+
+
 def test_calibration_apply_proposal_saves_assignments_and_skips_uncertain() -> None:
     client = TestClient(create_app(MockConductor()))
 

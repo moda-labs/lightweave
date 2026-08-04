@@ -183,9 +183,9 @@ The map renders only positioned lanterns.
   -> make one physical lantern visibly identify itself; the UI labels this
   action **Locate** in the selected-lantern sheet and Node List rows.
 - `POST /api/lanterns/{mac}/assign` with `{"x":0.25,"y":0.75}`
-- `POST /api/lanterns/{mac}/group` with `{"group_id":2}` -> assign a placed
-  lantern to Group 3. Group IDs are zero-based in the API and labeled 1–8 in the
-  UI.
+- `POST /api/lanterns/{mac}/group` with `{"group_id":2}` -> assign any
+  inventoried lantern to Group 3, whether or not it has coordinates. Group IDs
+  are zero-based in the API and labeled 1–8 in the UI.
 - `POST /api/lanterns/{mac}/forget`
 - `POST /api/lanterns/replace` with `{"old_mac":"...","new_mac":"..."}`
 - `GET /api/patterns` -> saved pattern configs.
@@ -403,8 +403,9 @@ number while showing "Not seen".
 
 - 2-D field map of table `(x,y)` positions with roster liveness overlaid.
 - Drag to reposition; click to add/edit; `forget` to remove.
-- Assign each placed lantern to one of eight fixed show groups from its detail
-  sheet; the Node List exposes current membership at a glance.
+- Assign any lantern to one of eight fixed show groups from its detail sheet or
+  directly from the Node List dropdown. Membership is independent of position,
+  so spares can be organized before layout and keep their group when forgotten.
 - Replace-node flow (§5.1): pick dead node + spare → one action does
   `assign` + `forget`.
 - **Identify:** click a dot → that physical lantern blinks so it can be

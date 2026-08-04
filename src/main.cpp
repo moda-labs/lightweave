@@ -962,9 +962,7 @@ static void maybeAdoptTableAssignment() {
                          : g_id.id;
   float next_x = assignment.has_position ? assignment.x : 0.0f;
   float next_y = assignment.has_position ? assignment.y : 0.0f;
-  uint8_t next_group = assignment.has_position
-                           ? groupIdSafe(assignment.group_id)
-                           : 0;
+  uint8_t next_group = groupIdSafe(assignment.group_id);
   if (next_id == g_id.id && next_x == g_id.x && next_y == g_id.y &&
       next_group == g_id.group_id) return;
   bool id_changed = next_id != g_id.id;
@@ -979,7 +977,8 @@ static void maybeAdoptTableAssignment() {
     Serial.printf("[table] adopted position x=%.2f y=%.2f group=%u from conductor\n",
                   g_id.x, g_id.y, (unsigned)(g_id.group_id + 1));
   else
-    Serial.println("[table] placement cleared by conductor");
+    Serial.printf("[table] placement cleared; group=%u from conductor\n",
+                  (unsigned)(g_id.group_id + 1));
 }
 
 // ---- Daytime deep-sleep entry (Lever 2) ---------------------------------------
@@ -1060,7 +1059,7 @@ static void printDiag() {
 //   table                (conductor) print permanent IDs + positions + groups
 //   assign <mac> <x> <y> (conductor) set a node's position by MAC; saved+broadcast
 //   forget <mac>         (conductor) clear position; permanent ID remains
-//   group <mac> <1..8>  (conductor) assign a placed node to a show group
+//   group <mac> <1..8>  (conductor) assign any inventoried node to a show group
 //   role <conductor|performer>   set this node's role and save to NVS
 //   id <n>               set this node's id and save to NVS
 //   pos <x> <y>          set this node's own (x,y) coordinate and save to NVS
@@ -1676,8 +1675,9 @@ static void printLanternJson(const uint8_t mac_bytes[6], const char* label,
                   "\"group_id\":%u,\"group\":\"Group %u\",",
                   x, y, groupIdSafe(group_id), groupIdSafe(group_id) + 1);
   } else {
-    Serial.print("\"x\":null,\"y\":null,\"position\":\"Missing\","
-                 "\"group_id\":0,\"group\":\"Group 1\",");
+    Serial.printf("\"x\":null,\"y\":null,\"position\":\"Missing\","
+                  "\"group_id\":%u,\"group\":\"Group %u\",",
+                  groupIdSafe(group_id), groupIdSafe(group_id) + 1);
   }
   Serial.printf("\"attention\":\"%s\",", attention);
   if (firmware) {
@@ -1898,7 +1898,7 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       broadcastTable();
       jsonOk(cmd.id, "group changed");
     } else {
-      jsonError(cmd.id, "lantern must be placed before grouping");
+      jsonError(cmd.id, "unknown lantern");
     }
   } else if (cmd.kind == SJ_FORGET) {
     if (!isConductor()) {
@@ -2045,7 +2045,7 @@ static void handleCommand(char* line) {
         broadcastTable();
         printTable();
       } else {
-        Serial.println("? lantern must be placed before grouping");
+        Serial.println("? unknown lantern");
       }
     } else {
       Serial.println("? group <mac> <1..8>");

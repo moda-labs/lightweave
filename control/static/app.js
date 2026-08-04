@@ -662,6 +662,28 @@ function renderUnpositionedTray() {
   });
 }
 
+function groupOptions(selectedGroupId) {
+  return Array.from({ length: GROUP_COUNT }, (_, groupId) =>
+    `<option value="${groupId}" ${groupId === selectedGroupId ? "selected" : ""}>Group ${groupId + 1}</option>`
+  ).join("");
+}
+
+async function assignLanternGroup(mac, groupId, control = null) {
+  if (!mac) return;
+  if (control) control.disabled = true;
+  try {
+    const ack = await api(`/api/lanterns/${encodeURIComponent(mac)}/group`, {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupId }),
+    });
+    toast(ack.message);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    await refresh();
+  }
+}
+
 function renderRows() {
   const rows = lanterns().filter((lantern) => {
     if (filter === "attention") return lantern.attention !== "None";
@@ -675,9 +697,10 @@ function renderRows() {
     const isFirmwareBad = lantern.attention === "Firmware mismatch";
     const dotClass = isBad || isFirmwareBad ? "bad" : lantern.position === "Missing" ? "warn" : "";
     const attentionClass = lantern.attention === "None" ? "" : isBad || isFirmwareBad ? "bad" : "warn";
+    const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(lantern.group_id || 0)));
     return `<tr data-mac="${lantern.mac}" class="${lantern.mac === selectedMac ? "selected" : ""}">
       <td><strong>${escapeHtml(lantern.label)}</strong><br><span class="mono">${escapeHtml(lantern.mac)}</span></td>
-      <td>${escapeHtml(lantern.group || `Group ${Number(lantern.group_id || 0) + 1}`)}</td>
+      <td><select class="table-group-select" data-group-mac="${escapeHtml(lantern.mac)}" aria-label="Group for ${escapeHtml(lantern.label)}">${groupOptions(groupId)}</select></td>
       <td><span class="status"><span class="dot ${dotClass}"></span>${statusText(lantern)}</span></td>
       <td class="${isBad ? "bad" : "ok"}">${escapeHtml(lantern.last_seen_label)}</td>
       <td class="${lantern.position === "Missing" ? "warn" : ""}">${escapeHtml(lantern.position)}</td>
@@ -688,6 +711,14 @@ function renderRows() {
 
   $$("#lantern-rows tr").forEach((row) => {
     row.addEventListener("click", () => selectLantern(row.dataset.mac));
+  });
+  $$("#lantern-rows [data-group-mac]").forEach((select) => {
+    select.addEventListener("click", (event) => event.stopPropagation());
+    select.addEventListener("change", async (event) => {
+      event.stopPropagation();
+      const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(select.value || 0)));
+      await assignLanternGroup(select.dataset.groupMac, groupId, select);
+    });
   });
   $$("#lantern-rows [data-locate-mac]").forEach((button) => {
     button.addEventListener("click", async (event) => {
@@ -709,7 +740,6 @@ function renderDetail() {
   $("#detail-title").className = isOk ? "" : "warn";
   $("#detail-summary").textContent = detailSummary(lantern);
   $("#lantern-group").value = String(groupId);
-  $("#lantern-group").disabled = !isPositioned(lantern);
   $("#detail-tech").innerHTML = [
     `MAC ${escapeHtml(lantern.mac)} · x=${fmt(lantern.x)} y=${fmt(lantern.y)} · status=${escapeHtml(statusText(lantern))}`,
     `firmware=${firmwareHtml(lantern.firmware)}`,
@@ -1014,6 +1044,9 @@ function renderOta() {
     setOtaControlDisabled(button, installing);
   });
   setOtaControlDisabled($("#lantern-group"), installing);
+  $$("#lantern-rows [data-group-mac]").forEach((select) => {
+    setOtaControlDisabled(select, installing);
+  });
   if (!installing) {
     const fileInput = $("#ota-file");
     $('[data-action="stage-ota-artifact"]').disabled = !fileInput?.files?.length;
@@ -2454,19 +2487,9 @@ $("#pattern-group").addEventListener("change", (event) => {
 
 $("#lantern-group").addEventListener("change", async (event) => {
   const lantern = selectedLantern();
-  if (!lantern || !isPositioned(lantern)) return;
+  if (!lantern) return;
   const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(event.target.value || 0)));
-  try {
-    const ack = await api(`/api/lanterns/${encodeURIComponent(lantern.mac)}/group`, {
-      method: "POST",
-      body: JSON.stringify({ group_id: groupId }),
-    });
-    toast(ack.message);
-    await refresh();
-  } catch (error) {
-    toast(error.message, true);
-    await refresh();
-  }
+  await assignLanternGroup(lantern.mac, groupId, event.target);
 });
 
 $("#pattern-picker").addEventListener("click", (event) => {

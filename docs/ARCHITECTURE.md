@@ -100,9 +100,10 @@ LED-library binding is in `include/patterns.h`.
 ### 4.1 Lantern groups **[done; hardware verification pending]**
 
 The field has eight fixed group slots, labeled **Group 1–8** in the control
-plane and encoded as IDs 0–7. Each placed MAC belongs to exactly one group;
-membership is part of the conductor-authoritative layout row and is cached in
-the performer's NVS beside position. Each group has its own persisted
+plane and encoded as IDs 0–7. Each inventoried MAC belongs to exactly one group;
+unpositioned rows can be grouped before layout. Membership is
+independent of coordinates, survives clearing a position, and is cached in the
+performer's NVS beside position. Each group has its own persisted
 `PatternConfig`, so changing Group 3 does not disturb any other group.
 
 All eight configs travel in the existing 4 Hz beacon (136 B total, under the
@@ -231,8 +232,9 @@ transfer the position from the old MAC to the new one:
 3. Conductor rebroadcasts; the spare caches its own ID plus `(x,y,group)` and
    joins the field.
 
-The old board keeps its permanent number in inventory with no position or group.
-Numbers follow boards, never locations.
+The old board keeps its permanent number and group in inventory with no position;
+the replacement receives the same group as part of the transfer. Numbers follow
+boards, never locations.
 
 No drone, no re-fly — a single swap is one command. Getting the new MAC: read it
 from the spare's serial `info`, or label spares with their MAC, or let the

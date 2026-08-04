@@ -8,17 +8,19 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**152 pass**) is green; control tests (**305 pass**) are green; all three device
+(**152 pass**) is green; control tests (**307 pass**) are green; all three device
 envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest locally (2026-08-03): **eight independent lantern groups are
-code-complete; bench verification is pending.** Each placed MAC now carries a
-Group 1–8 membership alongside its permanent board ID and optional position in
+code-complete; bench verification is pending.** Each inventoried MAC now carries
+a Group 1–8 membership alongside its permanent board ID and optional position in
 the conductor-authoritative inventory. The existing 4 Hz beacon carries all
 eight persisted pattern configs in one packet, so every group can run a
 different pattern without extra packet cadence or losing free-run behavior. The
-UI assigns membership from the lantern detail sheet and targets live or saved
-patterns with a group selector; global blackout, power policy, and calibration
+UI assigns membership from the lantern detail sheet or an inline Node List
+dropdown, including before placement, and targets live or saved patterns with a
+group selector. Clearing a position preserves membership. Global blackout,
+power policy, and calibration
 still span the field, while calibration restores every group's prior look
 afterward. Protocol v9 migrates existing v8 rows to Group 1 and copies the old
 field-wide look to all slots, but the wire change means every board must still be
@@ -489,7 +491,7 @@ revised cost roll-up.
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 152) and control tests (305): sync
+- **Host unit tests** (`test/test_logic/`, 152) and control tests (307): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),

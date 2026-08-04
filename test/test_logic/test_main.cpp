@@ -1038,8 +1038,13 @@ void test_table_migrates_legacy_positions_without_inventing_ids() {
 void test_table_group_assignment_preserves_position_and_rejects_bad_ids() {
   LayoutTable t;
   tableInit(t);
-  uint8_t a[6];
+  uint8_t a[6], spare[6];
   macN(a, 1);
+  macN(spare, 2);
+  TEST_ASSERT_FALSE(tableSetGroup(t, spare, 5));
+  TEST_ASSERT_EQUAL_INT(0, tableEnsure(t, spare));
+  TEST_ASSERT_TRUE(tableSetGroup(t, spare, 5));
+  TEST_ASSERT_FALSE(tableHasPosition(t.entries[tableFind(t, spare)]));
   TEST_ASSERT_TRUE(tableSetWithGroup(t, a, 1.5f, 2.5f, 3));
   TEST_ASSERT_TRUE(tableSetGroup(t, a, 6));
   TEST_ASSERT_FALSE(tableSetGroup(t, a, GROUP_COUNT));
@@ -1050,6 +1055,9 @@ void test_table_group_assignment_preserves_position_and_rejects_bad_ids() {
   TEST_ASSERT_TRUE(tableLookupGroup(t, a, group_id));
   TEST_ASSERT_EQUAL_FLOAT(9.0f, x);
   TEST_ASSERT_EQUAL_FLOAT(8.0f, y);
+  TEST_ASSERT_EQUAL_UINT8(6, group_id);
+  TEST_ASSERT_TRUE(tableClearPosition(t, a));
+  TEST_ASSERT_TRUE(tableLookupGroup(t, a, group_id));
   TEST_ASSERT_EQUAL_UINT8(6, group_id);
 }
 
@@ -2127,7 +2135,7 @@ void test_table_row_build() {
   TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
-  TEST_ASSERT_EQUAL_UINT8(0, assignment.group_id);
+  TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
   TEST_ASSERT_FALSE(assignment.has_position);
   // No inventory row yet: nothing to say.
   TEST_ASSERT_EQUAL_size_t(0, tableRowBuild(t, absent, m));

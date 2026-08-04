@@ -192,6 +192,7 @@ tr { cursor: pointer; }
 tr.selected { background: rgba(240, 179, 90, .08); }
 .status { display: inline-flex; align-items: center; gap: 7px; }
 .table-action { min-height: 34px; padding: 0 10px; font-size: 12px; }
+.table-group-select { width: auto; min-width: 94px; min-height: 34px; margin-top: 0; padding-right: 28px; font-size: 12px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--live); box-shadow: 0 0 12px rgba(84, 214, 122, .7); }
 .dot.warn { background: var(--amber); box-shadow: 0 0 12px rgba(240, 179, 90, .7); }
 .dot.bad { background: var(--alert); box-shadow: 0 0 12px rgba(255, 93, 82, .7); }

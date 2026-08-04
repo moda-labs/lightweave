@@ -176,12 +176,12 @@ inline bool tableSetWithGroup(LayoutTable& t, const uint8_t mac[6], float x,
   return true;
 }
 
-// Move an existing placed lantern to another group without touching position.
+// Assign any inventoried lantern to a group without touching position.
 inline bool tableSetGroup(LayoutTable& t, const uint8_t mac[6],
                           uint8_t group_id) {
   if (group_id >= GROUP_COUNT) return false;
   int i = tableFind(t, mac);
-  if (i < 0 || !tableHasPosition(t.entries[i])) return false;
+  if (i < 0) return false;
   t.entries[i].group_id = group_id;
   return true;
 }
@@ -196,14 +196,14 @@ inline bool tableLookup(const LayoutTable& t, const uint8_t mac[6], float& x,
   return true;
 }
 
-// Forget only deployment placement. The permanent MAC/ID inventory survives.
+// Forget only deployment placement. Permanent identity and group membership
+// survive so a spare can be organized before it receives coordinates.
 inline bool tableClearPosition(LayoutTable& t, const uint8_t mac[6]) {
   int i = tableFind(t, mac);
   if (i < 0 || !tableHasPosition(t.entries[i])) return false;
   t.entries[i].flags &= (uint8_t)~TABLE_FLAG_POSITIONED;
   t.entries[i].x = 0.0f;
   t.entries[i].y = 0.0f;
-  t.entries[i].group_id = 0;
   return true;
 }
 
