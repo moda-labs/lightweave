@@ -60,12 +60,15 @@ class JsonLineTransport(Protocol):
 
 OTA_CHUNK_TIMEOUT_S = 30.0
 OTA_FINALIZE_TIMEOUT_S = 120.0
+# A full 128-board state snapshot is roughly 50 KiB. At the field UART's
+# 115200 baud that needs over four seconds on the wire before Python overhead.
+DEFAULT_SERIAL_REQUEST_TIMEOUT_S = 8.0
 
 
 @dataclass
 class JsonLineSerialConductor:
     transport: JsonLineTransport
-    timeout_s: float = 1.0
+    timeout_s: float = DEFAULT_SERIAL_REQUEST_TIMEOUT_S
     _next_id: int = field(default=1, init=False)
     _last_state: dict[str, Any] | None = field(default=None, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
