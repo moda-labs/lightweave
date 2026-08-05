@@ -2,6 +2,22 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.7.0",
+      "date": "2026-08-04",
+      "title": "Multi-board flashing station",
+      "control_changes": [
+        "Added a Flashing page that automatically detects and provisions up to ten USB-connected FireBeetles in parallel.",
+        "Added stable USB hub slots, live progress, retry controls, persistent history, and disconnect/replug protection for batch assembly.",
+        "Added guarded factory sessions that assign permanent numeric performer IDs through the connected conductor and display them for physical labeling.",
+        "Added hardened Raspberry Pi and macOS station services plus a checksum-pinned production serial-flash bundle."
+      ],
+      "firmware_changes": [
+        "Added a conductor serial command that reserves performer IDs and acknowledges them only after the updated MAC-to-ID table is durably saved.",
+        "Added rollback behavior so a failed conductor save cannot expose an ID assignment that will disappear after restart.",
+        "Kept the field radio protocol at v10, so v0.6.0 performers remain radio-compatible while newly provisioned boards receive v0.7.0."
+      ]
+    },
+    {
       "version": "0.6.0",
       "date": "2026-08-04",
       "title": "Independent lantern groups",

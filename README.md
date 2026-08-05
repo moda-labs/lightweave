@@ -34,13 +34,15 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   native unit tests, so sync math, pattern math, roster/table logic, power policy,
   and OTA helpers can be tested without hardware.
 
-Current release: `0.6.0`. The bench system has been verified with one conductor
+Current release: `0.7.0`. The bench system has been verified with one conductor
 and mixed 16/64-LED performers for sync, layout and pre-placement group assignment,
 independent group pattern control, reversible blackout, runtime power policy, and
-the local web control plane. Field-wide OTA is implemented and has
-completed successful bench installs, including same-protocol mixed-firmware
-recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
-the exact latest state.
+the local web control plane. The control plane now includes a same-host flashing
+station for automatically detecting and provisioning up to ten USB-connected
+FireBeetles in parallel, with permanent performer-ID assignment for physical
+labeling. Field-wide OTA is implemented and has completed successful bench
+installs, including same-protocol mixed-firmware recovery back to a consistent
+field. See [docs/HANDOFF.md](docs/HANDOFF.md) for the exact latest state.
 
 Production Pi updates use a pull-based, hash-pinned release channel with health
 checks and automatic code rollback. Each promoted release stages its immutable
@@ -196,7 +198,8 @@ pio device monitor --port /dev/cu.usbserial-XXXX
 ```
 
 For production-line FireBeetle provisioning from the reviewed GitHub release,
-see **Batch FireBeetle auto-flashing** in `docs/FLASHING.md`.
+see [Multi-board flashing station](docs/FLASHING.md#multi-board-flashing-station-control-plane-ui)
+in the flashing runbook.
 
 Useful serial commands:
 

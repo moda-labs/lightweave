@@ -11,8 +11,8 @@ next steps only.
 (**158 pass**) is green; control tests (**369 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest on this branch (2026-08-04): **the multi-board USB flashing station is built on
-`feat/flashing-station`.** The control plane now has a Flashing screen backed by
+Latest on main (2026-08-04): **the multi-board USB flashing station is built.**
+The control plane now has a Flashing screen backed by
 a separate same-host provisioner daemon. It detects FireBeetles on macOS and
 Linux, binds USB topology to numbered powered-hub slots, flashes five boards in
 parallel by default (configurable to ten), streams per-board stages over the
@@ -27,9 +27,9 @@ flash runtime bundled inside the checksum-pinned serial artifact. The browser
 workflow was exercised at desktop and 375 px mobile widths without
 console/network errors. Hardware throughput proof with a real powered hub and
 5-10 simultaneous FireBeetles remains the next gate.
-The Pi workflow also requires promotion of a new release whose serial ZIP uses
-flash-plan schema 2; the current v0.6.0 artifact fails preflight clearly rather
-than starting board jobs without a usable local flash runtime.
+The v0.7.0 tag workflow publishes a serial ZIP using flash-plan schema 2 with
+its usable local flashing runtime. Older v0.6.0 artifacts fail station preflight
+clearly rather than starting board jobs without that runtime.
 The schema-2 build gate now executes the bundled flashing runtime, the station and GitOps deployment share an operation lock, USB path reuse fails closed, production health includes the daemon, and conductor ID reservations roll back unless NVS persistence succeeds.
 
 The one-time inventory/tagging pass is complete: **53 boards are registered**.
