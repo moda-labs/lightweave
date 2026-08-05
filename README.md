@@ -198,7 +198,8 @@ pio device monitor --port /dev/cu.usbserial-XXXX
 ```
 
 For production-line FireBeetle provisioning from the reviewed GitHub release,
-see **Batch FireBeetle auto-flashing** in `docs/FLASHING.md`.
+see [Multi-board flashing station](docs/FLASHING.md#multi-board-flashing-station-control-plane-ui)
+in the flashing runbook.
 
 Useful serial commands:
 
