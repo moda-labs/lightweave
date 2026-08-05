@@ -34,13 +34,6 @@ DEFAULT_POWER_POLICY = {
     "leds_on": True,
 }
 
-DEFAULT_KEEPALIVE = {
-    "enabled": False,
-    "interval_ms": 10000,
-    "pulse_ms": 100,
-    "brightness": 64,
-}
-
 OTA_WINDOW_S = 15 * 60
 GROUP_COUNT = 8
 
@@ -139,7 +132,6 @@ class MockConductor:
     wake: bool = True
     connected: bool = True
     power: dict[str, Any] = field(default_factory=lambda: deepcopy(DEFAULT_POWER_POLICY))
-    keepalive: dict[str, Any] = field(default_factory=lambda: deepcopy(DEFAULT_KEEPALIVE))
     pattern: dict[str, Any] = field(
         default_factory=lambda: {
             "pattern": "Glow",
@@ -214,7 +206,6 @@ class MockConductor:
             ],
             "blackout": {"restore_available": self._blackout_brightness is not None},
             "power": deepcopy(self.power),
-            "keepalive": deepcopy(self.keepalive),
             "ota": ota,
             "recovery": self._recovery_summary(lanterns, ota, firmware),
             "lanterns": lanterns,
@@ -360,21 +351,6 @@ class MockConductor:
             f"power policy light={updated['light_sleep_check_s']}s deep={updated['deep_sleep_check_min']}m"
         )
         return {"ok": True, "message": "power policy changed", "power": deepcopy(self.power)}
-
-    def update_keepalive(self, config: dict[str, Any]) -> dict[str, Any]:
-        updated = deepcopy(self.keepalive)
-        updated.update(config)
-        updated["enabled"] = bool(updated.get("enabled"))
-        updated["interval_ms"] = max(1000, min(60000, int(updated.get("interval_ms") or 10000)))
-        updated["pulse_ms"] = max(10, min(5000, int(updated.get("pulse_ms") or 100)))
-        updated["pulse_ms"] = min(updated["pulse_ms"], updated["interval_ms"])
-        updated["brightness"] = max(0, min(192, int(updated.get("brightness") or 0)))
-        self.keepalive = updated
-        self._event(
-            f"keepalive={'on' if updated['enabled'] else 'off'} "
-            f"interval={updated['interval_ms']}ms pulse={updated['pulse_ms']}ms bri={updated['brightness']}"
-        )
-        return {"ok": True, "message": "keepalive changed", "keepalive": deepcopy(self.keepalive)}
 
     def set_ota_mode(self, enabled: bool) -> dict[str, Any]:
         self.ota_started_at = _now() if enabled else None

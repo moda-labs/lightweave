@@ -200,6 +200,10 @@ tr.selected { background: rgba(240, 179, 90, .08); }
 .panel { padding: 16px; max-width: 760px; }
 .panel h2 { margin: 0 0 8px; font-size: 20px; }
 .panel p { margin: 0 0 16px; color: var(--muted); }
+.group-controls { display: grid; grid-template-columns: minmax(170px, .8fr) minmax(260px, 1.2fr); gap: 12px; align-items: end; margin-bottom: 12px; }
+.group-name-editor { display: flex; gap: 8px; margin-top: 7px; }
+.group-name-editor input { min-width: 0; margin-top: 0; }
+.group-name-editor button { flex: none; }
 .ops-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0 0 14px; }
 .ops-grid > div { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 12px; }
 .ota-readiness { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 8px 0 10px; }
@@ -616,6 +620,8 @@ input[type="number"], input[type="time"], input[type="text"], input[type="passwo
   .ops-grid { grid-template-columns: 1fr; }
   .release-grid, .release-history-detail { grid-template-columns: 1fr; }
   .button-row { display: grid; }
+  .group-controls { grid-template-columns: 1fr; }
+  .group-name-editor button { padding: 0 10px; }
   .recovery-row {
     grid-template-columns: 70px minmax(0, 1fr);
     gap: 6px 10px;

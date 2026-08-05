@@ -35,7 +35,6 @@
 #include "dusk.h"
 #include "firmware_version.h"
 #include "identity.h"
-#include "keepalive.h"
 #include "macaddr.h"
 #include "napsched.h"
 #include "patterns.h"
@@ -113,7 +112,6 @@ static PowerPolicy g_power_policy = {4, 15, 20 * 60, 6 * 60, 12 * 60, 0, 0};
 static uint16_t    g_policy_base_min = 12 * 60;
 static uint32_t    g_policy_base_epoch_s = 0;
 static int64_t     g_policy_clock_set_us = 0;
-static KeepAliveConfig g_keepalive = keepAliveDefault();
 static bool        g_ota_maintenance = false;
 static int64_t     g_ota_maintenance_until_us = 0;
 static constexpr int64_t OTA_WINDOW_US = 15LL * 60LL * 1000000LL;
@@ -201,12 +199,6 @@ static void configLoad() {
   g_powersave = g_prefs.getBool("ps", POWERSAVE_DEFAULT != 0);
   g_dusk_on = g_prefs.getBool("dusk", DUSK_DEFAULT != 0);
   g_wake_flag = g_prefs.getBool("wake", false);
-  g_keepalive = keepAliveDefault();
-  if (g_prefs.getBool("ka_en", false)) g_keepalive.flags |= KEEPALIVE_FLAG_ENABLED;
-  g_keepalive.interval_ms = g_prefs.getUShort("ka_int", g_keepalive.interval_ms);
-  g_keepalive.pulse_ms = g_prefs.getUShort("ka_pulse", g_keepalive.pulse_ms);
-  g_keepalive.brightness = g_prefs.getUChar("ka_bri", g_keepalive.brightness);
-  keepAliveSanitize(g_keepalive);
   g_power_policy = powerPolicyDefault();
   g_power_policy.light_sleep_check_s = g_prefs.getUShort("p_lchk", g_power_policy.light_sleep_check_s);
   g_power_policy.deep_sleep_check_min = g_prefs.getUShort("p_dchk", g_power_policy.deep_sleep_check_min);
@@ -238,15 +230,6 @@ static void duskSave() {
 static void wakeFlagSave() {
   g_prefs.begin("node", /*readonly*/ false);
   g_prefs.putBool("wake", g_wake_flag);
-  g_prefs.end();
-}
-
-static void keepAliveSave() {
-  g_prefs.begin("node", /*readonly*/ false);
-  g_prefs.putBool("ka_en", keepAliveEnabled(g_keepalive));
-  g_prefs.putUShort("ka_int", g_keepalive.interval_ms);
-  g_prefs.putUShort("ka_pulse", g_keepalive.pulse_ms);
-  g_prefs.putUChar("ka_bri", g_keepalive.brightness);
   g_prefs.end();
 }
 
@@ -421,7 +404,7 @@ static void patternConfigLoad() {
   g_beacon.epoch_us = 0;
   g_beacon.flags = 0;
   g_beacon.power = g_power_policy;
-  g_beacon.keepalive = g_keepalive;
+  memset(g_beacon.reserved_v7, 0, sizeof(g_beacon.reserved_v7));
   g_beacon.seq = 0;
   g_prefs.end();
 }
@@ -553,21 +536,6 @@ static void powerPolicyApplyCommand(const SerialJsonCommand& cmd) {
   powerPolicySave();
 }
 
-static void keepAliveApplyCommand(const SerialJsonCommand& cmd) {
-  if (cmd.has_keepalive_enabled) {
-    if (cmd.keepalive_enabled) g_keepalive.flags |= KEEPALIVE_FLAG_ENABLED;
-    else g_keepalive.flags &= ~KEEPALIVE_FLAG_ENABLED;
-  }
-  if (cmd.has_keepalive_interval_ms)
-    g_keepalive.interval_ms = cmd.keepalive_interval_ms;
-  if (cmd.has_keepalive_pulse_ms)
-    g_keepalive.pulse_ms = cmd.keepalive_pulse_ms;
-  if (cmd.has_keepalive_brightness)
-    g_keepalive.brightness = cmd.keepalive_brightness;
-  keepAliveSanitize(g_keepalive);
-  keepAliveSave();
-}
-
 // ---- ESP-NOW receive ---------------------------------------------------------
 // Registered on every node. Validates the common header, then dispatches on the
 // message type. The recv callback signature changed in Arduino-ESP32 3.x —
@@ -590,7 +558,6 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       if (len != (int)sizeof(BeaconMsg)) return;
       BeaconMsg b;
       memcpy(&b, data, sizeof(b));
-      keepAliveSanitize(b.keepalive);
       int64_t local = now_us();
       portENTER_CRITICAL(&g_sync_mux);
       syncOnBeacon(g_sync, b.epoch_us, b.seq, local);
@@ -788,8 +755,7 @@ static void broadcastBeacon() {
   b.epoch_us = now_us();
   b.seq = g_tx_seq++;
   b.power = powerPolicySnapshot(b.epoch_us);
-  b.keepalive = g_keepalive;
-  keepAliveSanitize(b.keepalive);
+  memset(b.reserved_v7, 0, sizeof(b.reserved_v7));
   b.flags = powerPolicyForceAwake(b.power) ? BEACON_FLAG_FIELD_AWAKE : 0;
   esp_now_send(BROADCAST_ADDR, (const uint8_t*)&b, sizeof(b));
 }
@@ -1107,9 +1073,6 @@ static void printDiag() {
 //                        summons dusk-sleeping nodes at their next resample
 //                        (<= 15 min) and holds the field awake for daytime
 //                        tests. Sticky in NVS ("wake").
-//   keepalive <on|off> [interval_ms] [pulse_ms] [brightness]
-//                        conductor broadcasts a brief scheduled-off LED pulse
-//                        to keep USB power banks awake; saved to NVS.
 //   power                (INA228 nodes) print the local energy/charge totals
 //   power reset          (INA228 nodes) zero the accumulators — run at the
 //                        start of a night for a clean "Wh consumed" figure
@@ -1156,11 +1119,6 @@ static void printInfo() {
                 p.current_min / 60, p.current_min % 60,
                 (unsigned long)p.current_epoch_s,
                 powerPolicyLedsOn(p) ? "on" : "off");
-  KeepAliveConfig ka = isConductor() ? g_keepalive : b.keepalive;
-  keepAliveSanitize(ka);
-  Serial.printf("  keepalive=%s  interval=%ums  pulse=%ums  bri=%u\n",
-                keepAliveEnabled(ka) ? "on" : "off", ka.interval_ms,
-                ka.pulse_ms, ka.brightness);
   if (isConductor())
     Serial.printf("  wake-override=%s (FIELD_AWAKE flag in beacons)\n",
                   g_wake_flag ? "ON" : "off");
@@ -1296,15 +1254,6 @@ static void printPowerPolicyJson(const PowerPolicy& p) {
                 powerPolicyForceAwake(p) ? "true" : "false",
                 powerPolicyForceSleep(p) ? "true" : "false",
                 powerPolicyLedsOn(p) ? "true" : "false");
-}
-
-static void printKeepAliveJson(const KeepAliveConfig& k) {
-  KeepAliveConfig clean = k;
-  keepAliveSanitize(clean);
-  Serial.printf("\"keepalive\":{\"enabled\":%s,\"interval_ms\":%u,"
-                "\"pulse_ms\":%u,\"brightness\":%u}",
-                keepAliveEnabled(clean) ? "true" : "false",
-                clean.interval_ms, clean.pulse_ms, clean.brightness);
 }
 
 static void printOtaStatusNodesJson(int64_t t) {
@@ -1834,8 +1783,6 @@ static void printMachineState(uint32_t id) {
                 g_blackout_state.restore_available ? "true" : "false");
   printPowerPolicyJson(policy);
   Serial.print(",");
-  printKeepAliveJson(isConductor() ? g_keepalive : b.keepalive);
-  Serial.print(",");
   printOtaJson(placed_total, placed_alive, firmware_matching, firmware_mixed, t);
   Serial.print(",\"lanterns\":[");
   bool first = true;
@@ -2034,13 +1981,6 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     } else {
       powerPolicyApplyCommand(cmd);
       jsonOk(cmd.id, "power policy changed");
-    }
-  } else if (cmd.kind == SJ_KEEPALIVE) {
-    if (!isConductor()) {
-      jsonError(cmd.id, "keepalive is conductor-only");
-    } else {
-      keepAliveApplyCommand(cmd);
-      jsonOk(cmd.id, "keepalive changed");
     }
   } else if (cmd.kind == SJ_OTA_MODE) {
     if (!isConductor()) {
@@ -2295,29 +2235,6 @@ static void handleCommand(char* line) {
       PowerSample s = readPowerSample(now_us());
       printPowerSample(g_mac, s);
     }
-  } else if (!strcmp(cmd, "keepalive")) {
-    char* a = strtok(nullptr, " \t");
-    if (!isConductor()) {
-      Serial.println("? keepalive is conductor-only");
-    } else if (a && (!strcmp(a, "on") || !strcmp(a, "1") ||
-                     !strcmp(a, "off") || !strcmp(a, "0"))) {
-      if (!strcmp(a, "on") || !strcmp(a, "1")) g_keepalive.flags |= KEEPALIVE_FLAG_ENABLED;
-      else g_keepalive.flags &= ~KEEPALIVE_FLAG_ENABLED;
-      char* interval = strtok(nullptr, " \t");
-      char* pulse = strtok(nullptr, " \t");
-      char* brightness = strtok(nullptr, " \t");
-      if (interval) g_keepalive.interval_ms = (uint16_t)atoi(interval);
-      if (pulse) g_keepalive.pulse_ms = (uint16_t)atoi(pulse);
-      if (brightness) g_keepalive.brightness = (uint8_t)atoi(brightness);
-      keepAliveSanitize(g_keepalive);
-      keepAliveSave();
-      portENTER_CRITICAL(&g_sync_mux);
-      g_beacon.keepalive = g_keepalive;
-      portEXIT_CRITICAL(&g_sync_mux);
-      printInfo();
-    } else {
-      Serial.println("? keepalive on|off [interval_ms] [pulse_ms] [brightness]");
-    }
   } else if (!strcmp(cmd, "powersave") || !strcmp(cmd, "ps")) {
     char* a = strtok(nullptr, " \t");
     if (a && (!strcmp(a, "on") || !strcmp(a, "1"))) {
@@ -2477,8 +2394,6 @@ void loop() {
   b = g_beacon;
   portEXIT_CRITICAL(&g_sync_mux);
   PatternConfig p = beaconPattern(b, g_id.group_id);
-  if (isConductor()) b.keepalive = g_keepalive;
-  keepAliveSanitize(b.keepalive);
   static uint32_t last_rx = 0;
   if (s.beacons_rx != last_rx) { dutyNoteBeacon(g_duty); last_rx = s.beacons_rx; }
 
@@ -2581,7 +2496,7 @@ void loop() {
     // clear the pixels and deep-sleep until the next check interval. A recent
     // serial session still wins, so a board on the bench stays reachable.
     if (!wake_rendezvous &&
-        powerPolicyShouldDeepSleep(policy, keepAliveEnabled(b.keepalive)) &&
+        powerPolicyShouldDeepSleep(policy) &&
         t - g_last_serial_us >= DUSK_SERIAL_GRACE_US) {
       duskEnterDeepSleep(powerPolicyDeepSleepUs(policy), policy);
     }
@@ -2625,41 +2540,24 @@ void loop() {
   uint16_t render_node_id = (p.pattern_id == patterns::CALIBRATION && calibration_rank)
                                 ? calibration_rank
                                 : g_id.id;
-  bool keepalive_pulse = powerPolicyKeepaliveWindow(b.power) &&
-                         keepAlivePulseOn(b.keepalive, render_us);
-
   // Static patterns (GLOW/SOLID) latch: pushing the identical frame at 60 Hz is
   // pure RMT + CPU waste, and it delays every Stage-B nap behind the CanShow()
   // wait. Re-render them only when the pattern changes, plus a ~1 Hz safety
   // refresh (self-heals a noise-glitched pixel). Animated patterns render every
   // pass as before.
   static PatternConfig last_shown = {};
-  static KeepAliveConfig last_keepalive = {};
   static uint8_t last_led_count = 0;
   static bool shown_once = false;
   static int64_t next_static_refresh = 0;
   bool pattern_changed = !shown_once ||
                         memcmp(&last_shown, &p, sizeof(p)) != 0 ||
-                        memcmp(&last_keepalive, &b.keepalive,
-                               sizeof(b.keepalive)) != 0 ||
                         last_led_count != g_id.led_count;
-  bool keepalive_active_window = powerPolicyKeepaliveWindow(b.power) &&
-                                 keepAliveEnabled(b.keepalive);
-  if (keepalive_active_window || !patterns::patternIsStatic(p.pattern_id) || pattern_changed ||
+  if (!patterns::patternIsStatic(p.pattern_id) || pattern_changed ||
       t >= next_static_refresh) {
-    if (keepalive_pulse) {
-      RgbwColor c(0, 0, 0, b.keepalive.brightness);
-      uint16_t active = activeLedCount(g_id.led_count, strip.PixelCount());
-      for (uint16_t i = 0; i < active; i++) strip.SetPixelColor(i, c);
-      for (uint16_t i = active; i < strip.PixelCount(); i++)
-        strip.SetPixelColor(i, RgbwColor(0, 0, 0, 0));
-    } else {
-      patterns::render(strip, p, render_us, g_id.x, g_id.y, render_node_id,
-                       ledCountSafe(g_id.led_count));
-    }
+    patterns::render(strip, p, render_us, g_id.x, g_id.y, render_node_id,
+                     ledCountSafe(g_id.led_count));
     strip.Show();
     last_shown = p;
-    last_keepalive = b.keepalive;
     last_led_count = g_id.led_count;
     shown_once = true;
     next_static_refresh = t + DIAG_INTERVAL_US;
@@ -2685,7 +2583,7 @@ void loop() {
   // biggest constant draw after Stage A. napPlan (host-tested) picks the length;
   // 0 means "stay awake" (radio on, serial grace, or nothing worth sleeping for).
   int64_t nap = 0;
-  if (!isConductor() && g_powersave && !keepalive_active_window) {
+  if (!isConductor() && g_powersave) {
     NapInputs in;
     in.now_us = now_us();
     in.synced_us = syncedTime(s, in.now_us);

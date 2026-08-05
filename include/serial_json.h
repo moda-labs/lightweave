@@ -36,7 +36,6 @@ enum SerialJsonKind {
   SJ_OTA_CHUNK,
   SJ_OTA_END,
   SJ_OTA_PROGRESS,
-  SJ_KEEPALIVE,
 };
 
 struct SerialJsonCommand {
@@ -80,14 +79,6 @@ struct SerialJsonCommand {
   uint32_t ota_crc32 = 0;
   uint32_t ota_offset = 0;
   char ota_data_hex[OTA_SERIAL_CHUNK_MAX * 2 + 1] = {0};
-  bool has_keepalive_enabled = false;
-  bool keepalive_enabled = false;
-  bool has_keepalive_interval_ms = false;
-  bool has_keepalive_pulse_ms = false;
-  bool has_keepalive_brightness = false;
-  uint16_t keepalive_interval_ms = 10000;
-  uint16_t keepalive_pulse_ms = 100;
-  uint8_t keepalive_brightness = 64;
 };
 
 inline bool serialJsonLooksLike(const char* line) {
@@ -392,26 +383,6 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     cmd.kind = SJ_OTA_END;
   } else if (!strcmp(norm, "otaprogress")) {
     cmd.kind = SJ_OTA_PROGRESS;
-  } else if (!strcmp(norm, "keepalive")) {
-    cmd.kind = SJ_KEEPALIVE;
-    uint32_t v = 0;
-    bool b = false;
-    if (sjBool(json, "enabled", b)) {
-      cmd.has_keepalive_enabled = true;
-      cmd.keepalive_enabled = b;
-    }
-    if (sjUint(json, "interval_ms", v)) {
-      cmd.has_keepalive_interval_ms = true;
-      cmd.keepalive_interval_ms = (uint16_t)(v > 65535 ? 65535 : v);
-    }
-    if (sjUint(json, "pulse_ms", v)) {
-      cmd.has_keepalive_pulse_ms = true;
-      cmd.keepalive_pulse_ms = (uint16_t)(v > 65535 ? 65535 : v);
-    }
-    if (sjUint(json, "brightness", v)) {
-      cmd.has_keepalive_brightness = true;
-      cmd.keepalive_brightness = (uint8_t)(v > 255 ? 255 : v);
-    }
   } else {
     error = "unknown cmd";
     return false;

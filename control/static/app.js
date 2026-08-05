@@ -13,8 +13,8 @@ let replaceMode = false;
 let replacementMac = null;
 let patternDraft = null;
 let selectedGroup = 0;
+let groupNameBaseline = null;
 let powerBaseline = null;
-let keepaliveBaseline = null;
 let otaArtifact = null;
 let otaInstall = null;
 let savedPatterns = [];
@@ -195,6 +195,18 @@ function activePatternState() {
   return patternForGroup(selectedGroup);
 }
 
+function groupEntry(groupId) {
+  return (state?.groups || []).find((item) => Number(item.group_id) === Number(groupId));
+}
+
+function groupName(groupId) {
+  return String(groupEntry(groupId)?.name || "");
+}
+
+function groupLabel(groupId) {
+  return String(groupEntry(groupId)?.label || `Group ${Number(groupId) + 1}`);
+}
+
 function lanternDisplayName(mac) {
   const lantern = lanterns().find((item) => item.mac === mac);
   if (lantern?.label && lantern.label !== "Unknown") return lantern.label;
@@ -285,8 +297,8 @@ function render() {
   $("#connection-status").textContent = state.conductor.connected ? "connected" : "disconnected";
   $("#field-count").textContent = `${state.summary.alive} / ${state.summary.total}`;
   const activePattern = activePatternState();
-  $("#show-name").textContent = `Group ${selectedGroup + 1}: ${activePattern.pattern}`;
-  $("#pattern-group").value = String(selectedGroup);
+  renderGroupControls();
+  $("#show-name").textContent = `${groupLabel(selectedGroup)}: ${activePattern.pattern}`;
   $("#attention-count").textContent = `${state.summary.attention} lights`;
   $("#sync-status").textContent = `sync ${state.conductor.sync}`;
   $("#table-sync-status").textContent = `sync ${state.conductor.sync}`;
@@ -306,7 +318,6 @@ function render() {
   renderPowerMonitor();
   renderCalibration();
   renderPowerPolicy();
-  renderKeepalive();
   renderOta();
   renderEvents();
   renderDetailVisibility();
@@ -587,7 +598,7 @@ function renderPatternControls() {
   changeButton.disabled = !isPatternDirty();
   changeButton.ariaDisabled = String(changeButton.disabled);
   const groupOffButton = $('[data-action="turn-off-group"]');
-  groupOffButton.textContent = `Turn off Group ${selectedGroup + 1}`;
+  groupOffButton.textContent = `Turn off ${groupLabel(selectedGroup)}`;
   groupOffButton.disabled = Number(activePatternState()?.brightness || 0) === 0;
   groupOffButton.ariaDisabled = String(groupOffButton.disabled);
   const restoreButton = $('[data-action="restore-blackout"]');
@@ -672,8 +683,29 @@ function renderUnpositionedTray() {
 
 function groupOptions(selectedGroupId) {
   return Array.from({ length: GROUP_COUNT }, (_, groupId) =>
-    `<option value="${groupId}" ${groupId === selectedGroupId ? "selected" : ""}>Group ${groupId + 1}</option>`
+    `<option value="${groupId}" ${groupId === selectedGroupId ? "selected" : ""}>${escapeHtml(groupLabel(groupId))}</option>`
   ).join("");
+}
+
+function updateGroupNameDirtyState() {
+  const input = $("#group-name");
+  const saveButton = $('[data-action="save-group-name"]');
+  if (!input || !saveButton) return;
+  saveButton.disabled = groupNameBaseline === null || input.value.trim() === groupNameBaseline;
+}
+
+function renderGroupControls() {
+  const patternSelect = $("#pattern-group");
+  patternSelect.innerHTML = groupOptions(selectedGroup);
+  patternSelect.value = String(selectedGroup);
+  const input = $("#group-name");
+  const liveName = groupName(selectedGroup);
+  const dirty = groupNameBaseline !== null && input.value.trim() !== groupNameBaseline;
+  if (groupNameBaseline === null || !dirty) {
+    groupNameBaseline = liveName;
+    input.value = liveName;
+  }
+  updateGroupNameDirtyState();
 }
 
 function ledCountSafe(value) {
@@ -784,12 +816,13 @@ function renderDetail() {
   $("#detail-title").textContent = `${lantern.label} is ${isOk ? "healthy" : statusText(lantern)}`;
   $("#detail-title").className = isOk ? "" : "warn";
   $("#detail-summary").textContent = detailSummary(lantern);
+  $("#lantern-group").innerHTML = groupOptions(groupId);
   $("#lantern-group").value = String(groupId);
   $("#lantern-led-count").value = String(ledCount);
   $("#detail-tech").innerHTML = [
     `MAC ${escapeHtml(lantern.mac)} · x=${fmt(lantern.x)} y=${fmt(lantern.y)} · status=${escapeHtml(statusText(lantern))}`,
     `firmware=${firmwareHtml(lantern.firmware)}`,
-    `group=${groupId + 1} · leds=${ledCount} · pattern=${escapeHtml(groupPattern.pattern)} bri=${groupPattern.brightness} · seq=${state.conductor.seq}`,
+    `group=${escapeHtml(groupLabel(groupId))} · leds=${ledCount} · pattern=${escapeHtml(groupPattern.pattern)} bri=${groupPattern.brightness} · seq=${state.conductor.seq}`,
     `power E=${fmt(lantern.power.wh)}Wh avg=${fmt(lantern.power.avg_w)}W · last report=${escapeHtml(lantern.power.last_report_label || "none")}`,
   ].join("<br>");
   $$('[data-action="move"]').forEach((button) => {
@@ -1076,7 +1109,7 @@ function renderOta() {
     "identify", "move", "replace", "forget", "broadcast", "turn-off-group",
     "blackout", "restore-blackout",
     "save-power-policy", "sleep-field", "wake-field", "follow-schedule",
-    "save-power-monitor", "save-keepalive",
+    "save-power-monitor",
     "enter-ota", "exit-ota", "stage-ota-artifact", "install-ota",
     "toggle-calibration-mode", "upload-calibration-frames",
     "save-calibration-proposal",
@@ -1681,54 +1714,6 @@ function renderPowerPolicy() {
   updateSleepScheduleDirtyState();
 }
 
-function keepaliveSnapshotFromState(keepalive = state?.keepalive || {}) {
-  return {
-    enabled: Boolean(keepalive.enabled),
-    interval_ms: Number(keepalive.interval_ms ?? 10000),
-    pulse_ms: Number(keepalive.pulse_ms ?? 100),
-    brightness: Number(keepalive.brightness ?? 64),
-  };
-}
-
-function keepaliveSnapshotFromForm() {
-  return {
-    enabled: $("#keepalive-enabled").checked,
-    interval_ms: Number($("#keepalive-interval").value || 10000),
-    pulse_ms: Number($("#keepalive-pulse").value || 100),
-    brightness: Number($("#keepalive-brightness").value || 64),
-  };
-}
-
-function keepaliveSnapshotKey(snapshot) {
-  return JSON.stringify(snapshot);
-}
-
-function isKeepaliveDirty() {
-  if (!keepaliveBaseline) return false;
-  return keepaliveSnapshotKey(keepaliveSnapshotFromForm()) !== keepaliveSnapshotKey(keepaliveBaseline);
-}
-
-function updateKeepaliveDirtyState() {
-  const saveButton = $('[data-action="save-keepalive"]');
-  if (saveButton) saveButton.disabled = !isKeepaliveDirty();
-}
-
-function renderKeepalive() {
-  const keepalive = state.keepalive || {};
-  const nextBaseline = keepaliveSnapshotFromState(keepalive);
-  if (!keepaliveBaseline || !isKeepaliveDirty()) {
-    keepaliveBaseline = nextBaseline;
-    $("#keepalive-enabled").checked = nextBaseline.enabled;
-    $("#keepalive-interval").value = nextBaseline.interval_ms;
-    $("#keepalive-pulse").value = nextBaseline.pulse_ms;
-    $("#keepalive-brightness").value = nextBaseline.brightness;
-  }
-  $("#keepalive-state").textContent = nextBaseline.enabled
-    ? `${nextBaseline.pulse_ms}ms / ${nextBaseline.interval_ms}ms`
-    : "off";
-  updateKeepaliveDirtyState();
-}
-
 function powerWindowActive(power) {
   const minute = Number(power.current_min ?? currentMinuteInTimezone()) % 1440;
   const start = Number(power.led_on_start_min ?? 20 * 60) % 1440;
@@ -2201,6 +2186,19 @@ async function runAction(action) {
       toast(`saved ${ack.pattern.name}`);
       return;
     }
+    if (action === "save-group-name") {
+      const ack = await api(`/api/groups/${selectedGroup}`, {
+        method: "PUT",
+        body: JSON.stringify({ name: $("#group-name").value }),
+      });
+      state.groups = (state.groups || []).map((item) => Number(item.group_id) === selectedGroup ? ack.group : item);
+      groupNameBaseline = ack.group.name;
+      $("#group-name").value = ack.group.name;
+      render();
+      toast(ack.message);
+      await refresh();
+      return;
+    }
     if (action === "blackout") {
       if (!confirm("Black out all groups? You can restore their previous brightness afterward.")) return;
       const ack = await api("/api/show/blackout", { method: "POST" });
@@ -2218,7 +2216,7 @@ async function runAction(action) {
     }
     if (action === "turn-off-group") {
       const live = activePatternState();
-      if (!confirm(`Turn off Group ${selectedGroup + 1}?`)) return;
+      if (!confirm(`Turn off ${groupLabel(selectedGroup)}?`)) return;
       const ack = await api("/api/show/pattern", {
         method: "POST",
         body: JSON.stringify({
@@ -2269,19 +2267,6 @@ async function runAction(action) {
           full_voltage: Number($("#battery-full-voltage").value || 14.4),
         }),
       });
-      toast(ack.message);
-      await refresh();
-      return;
-    }
-    if (action === "save-keepalive") {
-      if (!isKeepaliveDirty()) return;
-      const config = keepaliveSnapshotFromForm();
-      const ack = await api("/api/operations/keepalive", {
-        method: "POST",
-        body: JSON.stringify(config),
-      });
-      keepaliveBaseline = config;
-      updateKeepaliveDirtyState();
       toast(ack.message);
       await refresh();
       return;
@@ -2552,11 +2537,13 @@ $("#brightness").addEventListener("input", (event) => {
 $("#pattern-group").addEventListener("change", (event) => {
   const next = Math.max(0, Math.min(GROUP_COUNT - 1, Number(event.target.value || 0)));
   if (next === selectedGroup) return;
-  if (isPatternDirty() && !confirm("Discard the unsent pattern changes?")) {
+  const groupNameDirty = groupNameBaseline !== null && $("#group-name").value.trim() !== groupNameBaseline;
+  if ((isPatternDirty() || groupNameDirty) && !confirm("Discard the unsaved changes?")) {
     event.target.value = String(selectedGroup);
     return;
   }
   selectedGroup = next;
+  groupNameBaseline = null;
   patternDraft = patternDraftFromState();
   render();
 });
@@ -2670,10 +2657,12 @@ $("#pattern-angle").addEventListener("input", (event) => {
   input.addEventListener("change", updateSleepScheduleDirtyState);
 });
 
-["#keepalive-enabled", "#keepalive-interval", "#keepalive-pulse", "#keepalive-brightness"].forEach((selector) => {
-  const input = $(selector);
-  input.addEventListener("input", updateKeepaliveDirtyState);
-  input.addEventListener("change", updateKeepaliveDirtyState);
+$("#group-name").addEventListener("input", updateGroupNameDirtyState);
+$("#group-name").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !$('[data-action="save-group-name"]').disabled) {
+    event.preventDefault();
+    runAction("save-group-name").catch((error) => toast(error.message, true));
+  }
 });
 
 $("#map").addEventListener("wheel", (event) => {

@@ -69,13 +69,22 @@
         <div class="panel">
           <h2>Patterns</h2>
           <p>Choose a group, then tune and send an independent pattern to its lanterns.</p>
-          <label class="control-label" for="pattern-group">Lantern group</label>
-          <select id="pattern-group" class="group-select">
-            <option value="0">Group 1</option><option value="1">Group 2</option>
-            <option value="2">Group 3</option><option value="3">Group 4</option>
-            <option value="4">Group 5</option><option value="5">Group 6</option>
-            <option value="6">Group 7</option><option value="7">Group 8</option>
-          </select>
+          <div class="group-controls">
+            <label class="control-label" for="pattern-group">Lantern group
+              <select id="pattern-group" class="group-select">
+                <option value="0">Group 1</option><option value="1">Group 2</option>
+                <option value="2">Group 3</option><option value="3">Group 4</option>
+                <option value="4">Group 5</option><option value="5">Group 6</option>
+                <option value="6">Group 7</option><option value="7">Group 8</option>
+              </select>
+            </label>
+            <label class="control-label" for="group-name">Group name
+              <span class="group-name-editor">
+                <input id="group-name" type="text" maxlength="48" placeholder="Box lanterns" autocomplete="off">
+                <button type="button" class="primary" data-action="save-group-name" disabled>Save name</button>
+              </span>
+            </label>
+          </div>
           <div class="segmented" id="pattern-picker">
             <button data-pattern="Pulse">Pulse</button>
             <button data-pattern="Palette Drift">Drift</button>
@@ -442,30 +451,6 @@
             </div>
             <div class="button-row">
               <button class="primary" data-action="save-power-policy" disabled>Save settings</button>
-            </div>
-          </div>
-          <div class="ops-section">
-            <div class="section-head">
-              <h3>USB power-bank keepalive</h3>
-              <div class="chip" id="keepalive-state">--</div>
-            </div>
-            <label class="check-row">
-              <input id="keepalive-enabled" type="checkbox">
-              <span>Pulse LEDs during scheduled-off periods</span>
-            </label>
-            <div class="ops-form-grid">
-              <label class="control-label" for="keepalive-interval">Pulse interval (ms)
-                <input id="keepalive-interval" type="number" min="1000" max="60000" step="100">
-              </label>
-              <label class="control-label" for="keepalive-pulse">Pulse duration (ms)
-                <input id="keepalive-pulse" type="number" min="10" max="5000" step="10">
-              </label>
-              <label class="control-label" for="keepalive-brightness">Pulse brightness
-                <input id="keepalive-brightness" type="number" min="0" max="192" step="1">
-              </label>
-            </div>
-            <div class="button-row">
-              <button class="primary" data-action="save-keepalive" disabled>Save keepalive</button>
             </div>
           </div>
           <div class="log" id="event-log"></div>

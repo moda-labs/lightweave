@@ -78,14 +78,8 @@ inline bool powerPolicyLedsOn(const PowerPolicy& p) {
                                 p.led_on_end_min);
 }
 
-inline bool powerPolicyShouldDeepSleep(const PowerPolicy& p,
-                                       bool keepalive_enabled) {
-  if (powerPolicyLedsOn(p)) return false;
-  return powerPolicyForceSleep(p) || !keepalive_enabled;
-}
-
-inline bool powerPolicyKeepaliveWindow(const PowerPolicy& p) {
-  return !powerPolicyForceSleep(p) && !powerPolicyLedsOn(p);
+inline bool powerPolicyShouldDeepSleep(const PowerPolicy& p) {
+  return !powerPolicyLedsOn(p);
 }
 
 inline void powerPolicyAdvanceBySeconds(PowerPolicy& p, uint32_t elapsed_s) {

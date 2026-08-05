@@ -26,6 +26,7 @@ from .adapters import (
 )
 from .auth import AuthManager, AuthStatus, canonicalize_client_ip
 from .calibration import CalibrationError, CalibrationStore, calibration_code_plan
+from .group_store import GROUP_NAME_MAX_LENGTH, GroupStore, GroupStoreError
 from .mock_conductor import MockConductor
 from .ota_store import OtaArtifactError, OtaArtifactStore
 from .pattern_store import PatternStore, PatternStoreError
@@ -98,6 +99,10 @@ class GroupUpdate(BaseModel):
     group_id: int = Field(ge=0, lt=GROUP_COUNT)
 
 
+class GroupNameUpdate(BaseModel):
+    name: str = Field(max_length=GROUP_NAME_MAX_LENGTH)
+
+
 class LedCountUpdate(BaseModel):
     led_count: Literal[16, 32, 64]
 
@@ -126,13 +131,6 @@ class FieldPowerUpdate(BaseModel):
 class PowerMonitorUpdate(BaseModel):
     battery_capacity_wh: float = Field(gt=0, le=10_000)
     full_voltage: float = Field(gt=0, le=100)
-
-
-class KeepAliveUpdate(BaseModel):
-    enabled: bool
-    interval_ms: int = Field(ge=1000, le=60000)
-    pulse_ms: int = Field(ge=10, le=5000)
-    brightness: int = Field(ge=0, le=192)
 
 
 class OtaModeUpdate(BaseModel):
@@ -250,6 +248,7 @@ def create_app(
     calibration_store: CalibrationStore | None = None,
     auth_manager: AuthManager | None = None,
     settings: RemoteSettings | None = None,
+    group_store: GroupStore | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_remote_settings(os.environ)
     resolved_auth = auth_manager
@@ -339,6 +338,7 @@ def create_app(
     app.state.latest_snapshot_at = 0.0
     stage_deployment_firmware(app.state.ota_store, app.state.deployment_record)
     app.state.pattern_store = pattern_store or PatternStore(data_dir / "patterns" if data_dir else ".control_patterns")
+    app.state.group_store = group_store or GroupStore(data_dir / "groups" if data_dir else ".control_groups")
     app.state.calibration_store = calibration_store or CalibrationStore(
         data_dir / "calibration" if data_dir else ".control_calibration"
     )
@@ -645,6 +645,12 @@ def create_app(
         }
 
     def enrich_state(state: dict[str, Any]) -> dict[str, Any]:
+        groups = app.state.group_store.list()
+        state["groups"] = groups
+        labels = {item["group_id"]: item["label"] for item in groups}
+        for lantern in state.get("lanterns") or []:
+            group_id = int(lantern.get("group_id") or 0)
+            lantern["group"] = labels.get(group_id, f"Group {group_id + 1}")
         state["power_monitor"] = power_monitor_summary(state)
         state["recovery"] = recovery_summary(state)
         return state
@@ -696,6 +702,9 @@ def create_app(
 
     async def pattern_store_call(method: str, *args: Any) -> Any:
         return await asyncio.to_thread(getattr(app.state.pattern_store, method), *args)
+
+    async def group_store_call(method: str, *args: Any) -> Any:
+        return await asyncio.to_thread(getattr(app.state.group_store, method), *args)
 
     async def calibration_store_call(method: str, *args: Any) -> Any:
         return await asyncio.to_thread(getattr(app.state.calibration_store, method), *args)
@@ -1202,6 +1211,24 @@ def create_app(
             return {"patterns": await pattern_store_call("list")}
         except PatternStoreError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
+
+    @app.get("/api/groups")
+    async def list_groups() -> dict[str, Any]:
+        try:
+            return {"groups": await group_store_call("list")}
+        except GroupStoreError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    @app.put("/api/groups/{group_id}")
+    async def update_group_name(group_id: int, request: GroupNameUpdate) -> dict[str, Any]:
+        if group_id < 0 or group_id >= GROUP_COUNT:
+            raise HTTPException(status_code=404, detail="unknown group")
+        try:
+            group = await group_store_call("update", group_id, request.name)
+        except GroupStoreError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        await publish_state("group-name")
+        return {"ok": True, "message": f"renamed {group['label']}", "group": group}
 
     @app.post("/api/patterns")
     async def create_pattern(request: PatternLibraryEntry) -> dict[str, Any]:
@@ -1853,19 +1880,6 @@ def create_app(
             raise HTTPException(status_code=400, detail=ack["error"])
         ack["mode"] = request.mode
         await publish_state("field-power")
-        return ack
-
-    @app.post("/api/operations/keepalive")
-    async def update_keepalive(request: KeepAliveUpdate) -> dict[str, Any]:
-        if request.pulse_ms > request.interval_ms:
-            raise HTTPException(status_code=400, detail="pulse duration must be <= interval")
-        try:
-            ack = await conductor_call("update_keepalive", request.model_dump())
-        except SerialProtocolError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
-        if not ack["ok"]:
-            raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("keepalive")
         return ack
 
     @app.post("/api/operations/power-monitor")

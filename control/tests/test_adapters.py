@@ -130,28 +130,6 @@ def test_legacy_glow_params_get_explicit_full_value_and_optional_value_is_packed
     assert second == {"hue": 0, "saturation": 0, "p2": 0x8080}
 
 
-def test_keepalive_command_maps_to_json() -> None:
-    transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "keepalive changed"})])
-    conductor = JsonLineSerialConductor(transport)
-
-    ack = conductor.update_keepalive({
-        "enabled": True,
-        "interval_ms": 8000,
-        "pulse_ms": 250,
-        "brightness": 96,
-    })
-
-    assert ack == {"ok": True, "message": "keepalive changed"}
-    assert json.loads(transport.writes[0]) == {
-        "id": 1,
-        "cmd": "keepalive",
-        "enabled": True,
-        "interval_ms": 8000,
-        "pulse_ms": 250,
-        "brightness": 96,
-    }
-
-
 def test_ota_mode_maps_to_json_command() -> None:
     transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "ota maintenance mode started"})])
     conductor = JsonLineSerialConductor(transport)

@@ -101,8 +101,11 @@ LED-library binding is in `include/patterns.h`.
 
 ### 4.1 Lantern groups **[done; hardware verification pending]**
 
-The field has eight fixed group slots, labeled **Group 1–8** in the control
-plane and encoded as IDs 0–7. Each inventoried MAC belongs to exactly one group;
+The field has eight fixed group slots, encoded as IDs 0–7. The control plane
+stores an optional human-readable alias for each slot, so operators see labels
+such as **Group 1 · Box lanterns** or **Group 3 · Bikes** everywhere groups are
+selected. Aliases are control-plane metadata: changing one does not alter the
+radio protocol, membership, or a performer's NVS. Each inventoried MAC belongs to exactly one group;
 unpositioned rows can be grouped before layout. Membership is
 independent of coordinates, survives clearing a position, and is cached in the
 performer's NVS beside position. Each group has its own persisted

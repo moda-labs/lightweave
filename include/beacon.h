@@ -16,7 +16,6 @@
 
 #include "firmware_version.h"
 #include "groups.h"
-#include "keepalive.h"
 #include "ota_update.h"
 #include "power_policy.h"
 #include "powermon.h"  // PowerSample — MSG_POWER's payload IS the logic struct
@@ -29,7 +28,8 @@
 // v4: RegisterMsg also reports the human firmware version string.
 // v5: BeaconMsg carries runtime power policy (sleep intervals + LED schedule).
 // v6: PowerPolicy carries UTC epoch seconds for aligned sleep/update rendezvous.
-// v7: BeaconMsg carries USB power-bank keepalive pulse settings.
+// v7: BeaconMsg added six bytes that once carried an experimental USB battery
+//     keepalive. They remain reserved so v10's wire layout stays compatible.
 // v8: TableRow carries a permanent numeric ID and optional-position flags.
 // v9: TableRow and REGISTER carry group membership; BeaconMsg carries one
 //     independent pattern config for each of eight lantern groups.
@@ -90,7 +90,7 @@ typedef struct __attribute__((packed)) {
   PatternConfig patterns[GROUP_COUNT];
   uint8_t   flags;       // BEACON_FLAG_* bits (field-awake override, …)
   PowerPolicy power;      // runtime sleep/schedule config, broadcast not reflashed
-  KeepAliveConfig keepalive;  // scheduled-off LED pulse to keep USB banks awake
+  uint8_t   reserved_v7[6];  // retained to preserve the v10 wire layout
   uint32_t  seq;         // monotonic; for drop detection / logging
 } BeaconMsg;
 
@@ -99,6 +99,7 @@ inline const PatternConfig& beaconPattern(const BeaconMsg& b,
   return b.patterns[groupIdSafe(group_id)];
 }
 
+static_assert(sizeof(BeaconMsg) == 136, "BeaconMsg v10 wire layout changed");
 static_assert(sizeof(BeaconMsg) <= 250, "BeaconMsg exceeds ESP-NOW payload cap");
 
 // type = MSG_ROSTER. During camera calibration the conductor broadcasts the

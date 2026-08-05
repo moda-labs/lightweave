@@ -8,10 +8,21 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**155 pass**) is green; control tests (**314 pass**) are green; all three device
-envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+and the control tests are green; all three device envs (`devkitc` /
+`firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-04): **protocol-v10 groups and mixed LED counts are
+Latest locally (2026-08-04): **groups have persistent operator-facing names, and
+the failed USB battery keepalive experiment is removed.** The Patterns screen
+can name any fixed group slot (for example, `Box lanterns`, `Lotus lanterns`, or
+`Bikes`); the resulting `Group N · Name` label appears in pattern controls, node
+details, plus the node detail and node-list assignment dropdowns. Names live only in the control
+plane's data directory, so IDs 0–7, performer membership, NVS, and protocol v10
+stay unchanged. Clearing a name restores the numbered label. The obsolete
+keepalive UI/API/serial/NVS/render behavior is gone. Its six beacon bytes remain
+reserved and zeroed to keep the v10 wire layout compatible with the currently
+flashed bench nodes.
+
+Previous latest (2026-08-04): **protocol-v10 groups and mixed LED counts are
 bench-verified, and global blackout is reversible.** The live three-board bench
 runs one conductor plus performer #23 in Group 1 on a 16-pixel ring and performer
 #24 in Group 2 on a 64-pixel strip. Group 1 ran White while Group 2 simultaneously
@@ -509,16 +520,16 @@ revised cost roll-up.
   `dusk on|off` (performer; daytime deep-sleep, default off),
   `wake on|off` (conductor; FIELD_AWAKE beacon flag, summons dusk-sleeping
   nodes; same force-awake bit as the Operations override),
-  `keepalive on|off [interval_ms] [pulse_ms] [brightness]` (conductor;
-  USB power-bank LED pulse test broadcast in beacons), `power` / `power reset` (INA228 nodes; print / zero the energy
+  `power` / `power reset` (INA228 nodes; print / zero the energy
   accumulators). Note diag output is gated: it prints only within **5 min of
   serial input** — hit Enter in a monitor to revive a quiet node (see
   FLASHING.md). Exception: the conductor's `[power]` telemetry log is
   deliberately ungated (it's the overnight audit trail).
 - **Wire protocol is v10** (`PROTO_VERSION 10`; `MSG_TABLE` includes permanent
   board ID, optional-position flags, group ID, and 16/32/64 LED count; BEACON includes eight group
-  `PatternConfig`s, runtime `PowerPolicy` with UTC epoch seconds, and USB
-  power-bank `KeepAliveConfig`; REGISTER includes board/group/LED-count identity
+  `PatternConfig`s and runtime `PowerPolicy` with UTC epoch seconds. Six bytes
+  from the retired v7 keepalive experiment remain reserved to preserve the v10
+  layout; REGISTER includes board/group/LED-count identity
   plus release version, protocol, build id, and dirty flag
   for OTA version consistency; OTA begin/chunk/end messages carry
   the staged firmware image during manual maintenance updates).
@@ -913,8 +924,7 @@ configured check cadence to hear whether the schedule/override changed. This
 makes the photodiodes redundant for the main installation path.
 
 Operations now has one-click **Sleep field**, **Wake field**, and **Follow
-schedule** controls. Forced sleep wins over the USB power-bank keepalive and
-preserves the saved LED window; forced wake summons sleeping performers on their
+schedule** controls. Forced sleep preserves the saved LED window; forced wake summons sleeping performers on their
 next configured check; Follow schedule clears both overrides. Serial equivalents
 on the conductor are `sleep on|off` and `wake on|off`.
 

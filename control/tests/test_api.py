@@ -13,6 +13,7 @@ import pytest
 import control.app as app_module
 from control.adapters import SerialProtocolError
 from control.app import create_app
+from control.group_store import GroupStore
 from control.mock_conductor import Lantern, MockConductor
 from control.ota_store import OtaArtifactStore
 from control.pattern_store import PatternStore
@@ -422,7 +423,7 @@ def test_state_endpoint_returns_mock_state() -> None:
     assert body["conductor"]["firmware"]["proto"] == 10
     assert body["summary"]["firmware"]["consistent"] is True
     assert body["power"]["light_sleep_check_s"] == 4
-    assert body["keepalive"] == {"enabled": False, "interval_ms": 10000, "pulse_ms": 100, "brightness": 64}
+    assert body["groups"][0] == {"group_id": 0, "name": "", "label": "Group 1"}
     assert body["power_monitor"]["battery_capacity_wh"] == 384.0
     assert body["power_monitor"]["full_voltage"] == 14.4
     assert body["power_monitor"]["sample_count"] == 2
@@ -662,33 +663,44 @@ def test_calibration_mode_toggle_restores_previous_pattern() -> None:
     }
 
 
-def test_keepalive_update_round_trips_to_state() -> None:
-    client = TestClient(create_app(MockConductor()))
+def test_group_name_round_trips_to_state_and_persists(tmp_path: Path) -> None:
+    store = GroupStore(tmp_path)
+    client = TestClient(create_app(MockConductor(), group_store=store))
 
-    response = client.post(
-        "/api/operations/keepalive",
-        json={"enabled": True, "interval_ms": 8000, "pulse_ms": 250, "brightness": 96},
-    )
+    response = client.put("/api/groups/0", json={"name": "  Box   lanterns  "})
     state = client.get("/api/state").json()
 
     assert response.status_code == 200
-    assert state["keepalive"] == {
-        "enabled": True,
-        "interval_ms": 8000,
-        "pulse_ms": 250,
-        "brightness": 96,
+    assert response.json()["group"] == {
+        "group_id": 0,
+        "name": "Box lanterns",
+        "label": "Group 1 · Box lanterns",
     }
+    assert state["groups"][0] == response.json()["group"]
+    assert state["lanterns"][0]["group"] == "Group 1 · Box lanterns"
+    assert GroupStore(tmp_path).list()[0] == response.json()["group"]
 
 
-def test_keepalive_rejects_pulse_longer_than_interval() -> None:
-    client = TestClient(create_app(MockConductor()))
+def test_blank_group_name_restores_numbered_label(tmp_path: Path) -> None:
+    store = GroupStore(tmp_path)
+    store.update(2, "Bikes")
+    client = TestClient(create_app(MockConductor(), group_store=store))
 
-    response = client.post(
-        "/api/operations/keepalive",
-        json={"enabled": True, "interval_ms": 1000, "pulse_ms": 1500, "brightness": 96},
-    )
+    response = client.put("/api/groups/2", json={"name": "   "})
 
-    assert response.status_code == 400
+    assert response.status_code == 200
+    assert response.json()["group"] == {"group_id": 2, "name": "", "label": "Group 3"}
+    assert GroupStore(tmp_path).list()[2]["name"] == ""
+
+
+def test_group_name_api_rejects_unknown_group_and_long_name(tmp_path: Path) -> None:
+    client = TestClient(create_app(MockConductor(), group_store=GroupStore(tmp_path)))
+
+    unknown = client.put("/api/groups/8", json={"name": "Bikes"})
+    too_long = client.put("/api/groups/0", json={"name": "x" * 49})
+
+    assert unknown.status_code == 404
+    assert too_long.status_code == 422
 
 
 def test_calibration_mode_rejected_by_conductor_is_400() -> None:
@@ -1847,7 +1859,6 @@ def test_ota_reservation_rejects_serial_work_duplicate_start_and_staging(
     original_monitor = dict(app.state.power_monitor_config)
     original_pattern = dict(conductor.pattern)
     original_power = dict(conductor.power)
-    original_keepalive = dict(conductor.keepalive)
     original_position = (
         conductor._lanterns[0].x,
         conductor._lanterns[0].y,
@@ -1907,15 +1918,6 @@ def test_ota_reservation_rejects_serial_work_duplicate_start_and_staging(
         ),
         client.post("/api/operations/field-power", json={"mode": "sleep"}),
         client.post(
-            "/api/operations/keepalive",
-            json={
-                "enabled": True,
-                "interval_ms": 10000,
-                "pulse_ms": 100,
-                "brightness": 32,
-            },
-        ),
-        client.post(
             "/api/calibration/apply-proposal",
             json={
                 "assignments": [
@@ -1941,7 +1943,6 @@ def test_ota_reservation_rejects_serial_work_duplicate_start_and_staging(
     assert app.state.power_monitor_config == original_monitor
     assert conductor.pattern == original_pattern
     assert conductor.power == original_power
-    assert conductor.keepalive == original_keepalive
     assert (conductor._lanterns[0].x, conductor._lanterns[0].y) == original_position
     assert status.status_code == 200
     assert status.json()["install"]["running"] is True

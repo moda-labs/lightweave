@@ -13,7 +13,6 @@
 #include "sync.h"
 #include "bootplan.h"
 #include "dusk.h"
-#include "keepalive.h"
 #include "macaddr.h"
 #include "napsched.h"
 #include "ota_update.h"
@@ -731,19 +730,17 @@ void test_power_policy_force_sleep_overrides_disabled_schedule() {
   TEST_ASSERT_TRUE(powerPolicyLedsOn(p));
 }
 
-void test_power_policy_force_sleep_overrides_keepalive() {
+void test_power_policy_scheduled_off_deep_sleeps() {
   PowerPolicy p = powerPolicyDefault();
   p.flags = POWER_FLAG_SCHEDULE_ENABLED;
   p.current_min = 12 * 60;
   p.led_on_start_min = 20 * 60;
   p.led_on_end_min = 6 * 60;
 
-  TEST_ASSERT_FALSE(powerPolicyShouldDeepSleep(p, true));
-  TEST_ASSERT_TRUE(powerPolicyKeepaliveWindow(p));
+  TEST_ASSERT_TRUE(powerPolicyShouldDeepSleep(p));
 
-  p.flags |= POWER_FLAG_FORCE_SLEEP;
-  TEST_ASSERT_TRUE(powerPolicyShouldDeepSleep(p, true));
-  TEST_ASSERT_FALSE(powerPolicyKeepaliveWindow(p));
+  p.flags = POWER_FLAG_FORCE_AWAKE;
+  TEST_ASSERT_FALSE(powerPolicyShouldDeepSleep(p));
 }
 
 void test_power_policy_sanitize_clamps_runtime_intervals() {
@@ -793,26 +790,6 @@ void test_power_policy_advance_by_seconds_preserves_off_window() {
   TEST_ASSERT_EQUAL_UINT16(12 * 60 + 1, p.current_min);
   TEST_ASSERT_EQUAL_UINT32(3660, p.current_epoch_s);
   TEST_ASSERT_FALSE(powerPolicyLedsOn(p));
-}
-
-void test_keepalive_sanitizes_and_pulses() {
-  KeepAliveConfig c = {KEEPALIVE_FLAG_ENABLED, 0, 0, 255};
-  keepAliveSanitize(c);
-  TEST_ASSERT_EQUAL_UINT16(KEEPALIVE_INTERVAL_MIN_MS, c.interval_ms);
-  TEST_ASSERT_EQUAL_UINT16(KEEPALIVE_PULSE_MIN_MS, c.pulse_ms);
-  TEST_ASSERT_EQUAL_UINT8(KEEPALIVE_BRIGHTNESS_MAX, c.brightness);
-
-  c = {KEEPALIVE_FLAG_ENABLED, 10000, 100, 64};
-  TEST_ASSERT_TRUE(keepAlivePulseOn(c, 0));
-  TEST_ASSERT_TRUE(keepAlivePulseOn(c, 99'000));
-  TEST_ASSERT_FALSE(keepAlivePulseOn(c, 100'000));
-  TEST_ASSERT_TRUE(keepAlivePulseOn(c, 10'000'000));
-}
-
-void test_keepalive_disabled_never_pulses() {
-  KeepAliveConfig c = {0, 10000, 100, 64};
-  TEST_ASSERT_FALSE(keepAlivePulseOn(c, 0));
-  TEST_ASSERT_FALSE(keepAlivePulseOn(c, 10'000'000));
 }
 
 void test_ota_crc32_matches_standard_vector() {
@@ -1979,25 +1956,14 @@ void test_serial_json_ota_begin_chunk_and_end_parse() {
   TEST_ASSERT_EQUAL_INT(SJ_OTA_PROGRESS, cmd.kind);
 }
 
-void test_serial_json_keepalive_parses_settings() {
+void test_serial_json_rejects_retired_keepalive_command() {
   SerialJsonCommand cmd;
   const char* error = nullptr;
 
-  TEST_ASSERT_TRUE(serialJsonParse(
-      "{\"id\":17,\"cmd\":\"keepalive\",\"enabled\":true,"
-      "\"interval_ms\":10000,\"pulse_ms\":250,\"brightness\":96}",
+  TEST_ASSERT_FALSE(serialJsonParse(
+      "{\"id\":17,\"cmd\":\"keepalive\",\"enabled\":true}",
       cmd, error));
-
-  TEST_ASSERT_NULL(error);
-  TEST_ASSERT_EQUAL_INT(SJ_KEEPALIVE, cmd.kind);
-  TEST_ASSERT_TRUE(cmd.has_keepalive_enabled);
-  TEST_ASSERT_TRUE(cmd.keepalive_enabled);
-  TEST_ASSERT_TRUE(cmd.has_keepalive_interval_ms);
-  TEST_ASSERT_EQUAL_UINT16(10000, cmd.keepalive_interval_ms);
-  TEST_ASSERT_TRUE(cmd.has_keepalive_pulse_ms);
-  TEST_ASSERT_EQUAL_UINT16(250, cmd.keepalive_pulse_ms);
-  TEST_ASSERT_TRUE(cmd.has_keepalive_brightness);
-  TEST_ASSERT_EQUAL_UINT8(96, cmd.keepalive_brightness);
+  TEST_ASSERT_EQUAL_STRING("unknown cmd", error);
 }
 
 void test_serial_json_rejects_bad_command() {
@@ -2348,12 +2314,10 @@ int main(int, char**) {
   RUN_TEST(test_power_policy_window_handles_daytime_and_overnight_ranges);
   RUN_TEST(test_power_policy_force_awake_overrides_schedule);
   RUN_TEST(test_power_policy_force_sleep_overrides_disabled_schedule);
-  RUN_TEST(test_power_policy_force_sleep_overrides_keepalive);
+  RUN_TEST(test_power_policy_scheduled_off_deep_sleeps);
   RUN_TEST(test_power_policy_sanitize_clamps_runtime_intervals);
   RUN_TEST(test_power_policy_sleep_check_aligns_to_utc_interval);
   RUN_TEST(test_power_policy_advance_by_seconds_preserves_off_window);
-  RUN_TEST(test_keepalive_sanitizes_and_pulses);
-  RUN_TEST(test_keepalive_disabled_never_pulses);
   RUN_TEST(test_ota_crc32_matches_standard_vector);
   RUN_TEST(test_ota_hex_decode_rejects_bad_or_oversized_input);
   RUN_TEST(test_ota_chunk_decision_accepts_repeated_written_chunks);
@@ -2431,7 +2395,7 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_power_policy_parses_runtime_sleep_controls);
   RUN_TEST(test_serial_json_ota_mode_parses_enabled_flag);
   RUN_TEST(test_serial_json_ota_begin_chunk_and_end_parse);
-  RUN_TEST(test_serial_json_keepalive_parses_settings);
+  RUN_TEST(test_serial_json_rejects_retired_keepalive_command);
   RUN_TEST(test_serial_json_rejects_bad_command);
   RUN_TEST(test_table_wire_len_fits_espnow);
   RUN_TEST(test_table_chunk_count);
