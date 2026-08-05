@@ -25,6 +25,22 @@ control plane, read **[`skills/CREATING_PATTERNS.md`](skills/CREATING_PATTERNS.m
 It documents the API-only loop for draft review, PNG/JSON previews, saved pattern
 CRUD, automated scoring, and the guarded live broadcast step.
 
+## Release workflow
+
+When asked to **cut**, **publish**, or **create** a release, read
+**[`docs/RELEASING.md`](docs/RELEASING.md)** and complete the entire production
+release workflow as one user action. Do not stop after publishing the GitHub
+release. A release is complete only after its exact immutable manifest is
+promoted through `deploy/channels/production.json`, that promotion is merged,
+and the production pointer is verified. The original release request authorizes
+both reviewed PRs and their merges once their required checks pass; ask again
+only when a failure or policy gate needs user judgment.
+
+The Pi automatically polls the promoted production pointer and deploys the
+control plane while staging the matching firmware. **Field firmware OTA remains
+a separate, manual, authenticated safety action** and is never implied by a
+request to cut a release.
+
 ## All code should be unit tested
 
 Write tests for new logic — don't ship untested code. The project's pattern: keep

@@ -140,11 +140,13 @@ the privileged update boundary. A
 successful deployment stages the release firmware without starting OTA, and a
 timer firing during OTA safely defers. Operations shows web-control and field-firmware versions, sync state, and
 separate changelogs from `RELEASES.json`. Tag CI publishes the canonical field
-binary plus manifest through a resumable, byte-verified draft; promotion remains
-a separate PR. Offline placed performers keep the firmware card explicitly
+binary plus manifest through a resumable, byte-verified draft; the same release
+action then promotes that exact manifest through a second reviewed PR. Offline
+placed performers keep the firmware card explicitly
 deferred until all layout rows verify. The complete procedure is
-[`RELEASING.md`](RELEASING.md). Physical installation of the timer and the first
-production promotion remain operator-owned proof steps.
+[`RELEASING.md`](RELEASING.md). Physical installation and health of the Pi timer
+remain operator-owned proof steps; release agents own production-channel
+promotion and pointer verification.
 
 Previous latest (2026-08-01): **manual OTA now treats the online field as a
 frozen required cohort instead of requiring every layout row to be present.**
