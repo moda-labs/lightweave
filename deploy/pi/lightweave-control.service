@@ -1,6 +1,6 @@
 [Unit]
 Description=Lightweave field control plane
-Documentation=https://github.com/underminedsk/lightweave/tree/main/deploy/pi
+Documentation=https://github.com/moda-labs/lightweave/tree/main/deploy/pi
 Wants=network-online.target lightweave-provisioner.service
 Requires=lightweave-gitops-recovery.service
 After=network-online.target lightweave-gitops-recovery.service

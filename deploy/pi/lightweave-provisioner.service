@@ -1,6 +1,6 @@
 [Unit]
 Description=Lightweave multi-board USB provisioner
-Documentation=https://github.com/underminedsk/lightweave/tree/main/deploy/pi
+Documentation=https://github.com/moda-labs/lightweave/tree/main/deploy/pi
 Wants=network-online.target
 After=network-online.target lightweave-control.service
 PartOf=lightweave-control.service

@@ -1,6 +1,6 @@
 [Unit]
 Description=Restore an interrupted Lightweave deployment before control starts
-Documentation=https://github.com/underminedsk/lightweave/tree/main/deploy/pi
+Documentation=https://github.com/moda-labs/lightweave/tree/main/deploy/pi
 After=local-fs.target
 Before=lightweave-control.service lightweave-provisioner.service lightweave-gitops.service
 

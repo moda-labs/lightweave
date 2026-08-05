@@ -26,8 +26,15 @@ from urllib.parse import urlsplit
 
 LABEL = "com.lightweave.firebeetle-autoflash"
 DEFAULT_CHANNEL = (
-    "https://raw.githubusercontent.com/underminedsk/lightweave/"
+    "https://raw.githubusercontent.com/moda-labs/lightweave/"
     "main/deploy/channels/production.json"
+)
+# The project moved from underminedsk/ to moda-labs/ after v0.7.0. Release
+# manifests are immutable, so releases published before the move still name the
+# old remote. Both stay allowed until every promoted release names moda-labs.
+ALLOWED_REPOSITORIES = (
+    "https://github.com/moda-labs/lightweave.git",
+    "https://github.com/underminedsk/lightweave.git",
 )
 WCH_VID = 0x1A86
 WCH_PID = 0x7522
@@ -177,6 +184,17 @@ def _validate_channel(channel: dict[str, Any]) -> None:
         raise ValueError("production channel manifest SHA-256 is invalid")
 
 
+def _release_asset_url(repository: str, release: str, filename: str) -> str:
+    return f"{repository.removesuffix('.git')}/releases/download/{release}/{filename}"
+
+
+def _canonical_manifest_urls(release: str) -> tuple[str, ...]:
+    return tuple(
+        _release_asset_url(repository, release, "lightweave-release.json")
+        for repository in ALLOWED_REPOSITORIES
+    )
+
+
 def _validate_manifest(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     version = manifest.get("version")
     release = manifest.get("release")
@@ -184,7 +202,8 @@ def _validate_manifest(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         raise ValueError("release manifest version is invalid")
     if release != f"v{version}":
         raise ValueError("release manifest tag is invalid")
-    if manifest.get("repository") != "https://github.com/underminedsk/lightweave.git":
+    repository = manifest.get("repository")
+    if repository not in ALLOWED_REPOSITORIES:
         raise ValueError("release manifest repository is not allowed")
     if manifest.get("ref") != f"refs/tags/{release}":
         raise ValueError("release manifest does not name an immutable tag")
@@ -195,11 +214,9 @@ def _validate_manifest(manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     expected_filename = f"lightweave-serial-flash-{release}.zip"
     if serial.get("filename") != expected_filename:
         raise ValueError("release serial flash filename is invalid")
-    expected_url = (
-        "https://github.com/underminedsk/lightweave/releases/download/"
-        f"{release}/{expected_filename}"
-    )
-    if serial.get("url") != expected_url:
+    # Tie the asset URL to the manifest's own repository, so a manifest cannot
+    # name one remote and serve its bundle from the other.
+    if serial.get("url") != _release_asset_url(repository, release, expected_filename):
         raise ValueError("release serial flash URL is not canonical")
     size = serial.get("size")
     if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= 8 * 1024 * 1024:
@@ -398,11 +415,9 @@ def refresh_artifact(channel_url: str, cache: Path) -> tuple[dict[str, Any], Pat
     if cached:
         cached_manifest = cache / cached[0]["release"] / "lightweave-release.json"
         if hashlib.sha256(cached_manifest.read_bytes()).hexdigest() == channel["manifest_sha256"]:
-            expected_manifest_url = (
-                "https://github.com/underminedsk/lightweave/releases/download/"
-                f"{cached[0]['release']}/lightweave-release.json"
-            )
-            if channel["manifest_url"] != expected_manifest_url:
+            if channel["manifest_url"] not in _canonical_manifest_urls(
+                cached[0]["release"]
+            ):
                 raise ValueError("production channel manifest URL is not canonical")
             return cached
     manifest_url = str(channel["manifest_url"])
@@ -411,11 +426,7 @@ def refresh_artifact(channel_url: str, cache: Path) -> tuple[dict[str, Any], Pat
         raise ValueError("release manifest SHA-256 mismatch")
     manifest = _json(manifest_bytes, "release manifest")
     release, serial = _validate_manifest(manifest)
-    expected_manifest_url = (
-        "https://github.com/underminedsk/lightweave/releases/download/"
-        f"{release}/lightweave-release.json"
-    )
-    if manifest_url != expected_manifest_url:
+    if manifest_url not in _canonical_manifest_urls(release):
         raise ValueError("production channel manifest URL is not canonical")
     bundle = _download(str(serial["url"]), 8 * 1024 * 1024)
     if len(bundle) != serial.get("size"):

@@ -138,7 +138,7 @@ change from the immutable release URL:
 ```bash
 git switch -c promote-v0.4.0 origin/main
 python scripts/promote_release.py \
-  https://github.com/underminedsk/lightweave/releases/download/v0.4.0/lightweave-release.json
+  https://github.com/moda-labs/lightweave/releases/download/v0.4.0/lightweave-release.json
 git diff -- deploy/channels/production.json
 git add deploy/channels/production.json
 git commit -m "deploy: promote v0.4.0 to production"

@@ -25,9 +25,9 @@ sys.modules[SPEC.name] = gitops
 SPEC.loader.exec_module(gitops)
 
 RELEASE = "v0.3.0"
+LEGACY_REPOSITORY = "https://github.com/underminedsk/lightweave.git"
 RELEASE_BASE = (
-    "https://github.com/underminedsk/lightweave/releases/download/"
-    f"{RELEASE}"
+    f"{gitops.DEFAULT_REPOSITORY.removesuffix('.git')}/releases/download/{RELEASE}"
 )
 MANIFEST_URL = f"{RELEASE_BASE}/lightweave-release.json"
 FIRMWARE_URL = f"{RELEASE_BASE}/lightweave-field-{RELEASE}.bin"
@@ -212,15 +212,12 @@ def test_manifest_release_must_match_canonical_url(tmp_path: Path) -> None:
     document["ref"] = "refs/tags/v0.3.1"
     document["notes"]["version"] = "0.3.1"
     document["firmware"]["filename"] = "lightweave-field-v0.3.1.bin"
-    document["firmware"]["url"] = (
-        "https://github.com/underminedsk/lightweave/releases/download/"
-        "v0.3.1/lightweave-field-v0.3.1.bin"
+    other_base = (
+        f"{gitops.DEFAULT_REPOSITORY.removesuffix('.git')}/releases/download/v0.3.1"
     )
+    document["firmware"]["url"] = f"{other_base}/lightweave-field-v0.3.1.bin"
     document["serial_flash"]["filename"] = "lightweave-serial-flash-v0.3.1.zip"
-    document["serial_flash"]["url"] = (
-        "https://github.com/underminedsk/lightweave/releases/download/"
-        "v0.3.1/lightweave-serial-flash-v0.3.1.zip"
-    )
+    document["serial_flash"]["url"] = f"{other_base}/lightweave-serial-flash-v0.3.1.zip"
     manifest_bytes = json.dumps(document).encode()
     channel_bytes = channel(manifest_bytes)
     configuration = config(tmp_path)
@@ -248,6 +245,93 @@ def test_unapproved_repository_is_rejected(tmp_path: Path) -> None:
         return channel_bytes if url.endswith("production.json") else manifest_bytes
 
     reconciler = gitops.GitOpsReconciler(config(tmp_path), http_get=get)
+    with pytest.raises(gitops.ReconcileError, match="repository is not allowed"):
+        reconciler.desired_manifest()
+
+
+def manifest_for_repository(repository: str) -> dict:
+    document = release_manifest()
+    base = f"{repository.removesuffix('.git')}/releases/download/{RELEASE}"
+    document["repository"] = repository
+    document["firmware"]["url"] = f"{base}/{document['firmware']['filename']}"
+    document["serial_flash"]["url"] = f"{base}/{document['serial_flash']['filename']}"
+    return document
+
+
+def test_default_channel_url_is_served_from_the_current_remote() -> None:
+    # GitHub redirects the old owner's paths after a transfer, but only until
+    # that name is claimed again -- at which point a channel URL left pointing
+    # at the old owner would silently serve an unrelated repo's content.
+    owner_repo = gitops.DEFAULT_REPOSITORY.removeprefix(
+        "https://github.com/"
+    ).removesuffix(".git")
+    assert gitops.DEFAULT_CHANNEL_URL.startswith(
+        f"https://raw.githubusercontent.com/{owner_repo}/"
+    )
+
+
+def test_allowed_repositories_cover_both_remotes_and_accept_an_env_override() -> None:
+    assert gitops.DEFAULT_REPOSITORY in gitops.DEFAULT_REPOSITORIES
+    assert LEGACY_REPOSITORY in gitops.DEFAULT_REPOSITORIES
+    assert (
+        gitops.ReconcileConfig.from_environ({}).allowed_repositories
+        == gitops.DEFAULT_REPOSITORIES
+    )
+    override = gitops.ReconcileConfig.from_environ(
+        {
+            "LIGHTWEAVE_GITOPS_ALLOWED_REPOSITORY": (
+                f" {LEGACY_REPOSITORY} , https://github.com/example/other.git "
+            )
+        }
+    )
+    assert override.allowed_repositories == (
+        LEGACY_REPOSITORY,
+        "https://github.com/example/other.git",
+    )
+    with pytest.raises(gitops.ReconcileError, match="allowed repository list is empty"):
+        gitops.ReconcileConfig.from_environ({"LIGHTWEAVE_GITOPS_ALLOWED_REPOSITORY": " , "})
+
+
+def test_release_published_before_the_org_move_is_still_accepted(tmp_path: Path) -> None:
+    document = manifest_for_repository(LEGACY_REPOSITORY)
+    manifest_bytes = json.dumps(document).encode()
+    legacy_manifest_url = (
+        f"{LEGACY_REPOSITORY.removesuffix('.git')}/releases/download/"
+        f"{RELEASE}/lightweave-release.json"
+    )
+    channel_bytes = json.dumps(
+        {
+            "schema_version": 1,
+            "enabled": True,
+            "manifest_url": legacy_manifest_url,
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        }
+    ).encode()
+    configuration = config(tmp_path)
+
+    def get(url: str, _maximum: int) -> bytes:
+        return channel_bytes if url == configuration.channel_url else manifest_bytes
+
+    reconciler = gitops.GitOpsReconciler(configuration, http_get=get)
+    manifest = reconciler.desired_manifest()
+    assert manifest.release == RELEASE
+    assert manifest.repository == LEGACY_REPOSITORY
+
+
+def test_manifest_may_not_name_a_different_remote_than_its_own_url(
+    tmp_path: Path,
+) -> None:
+    # Channel URL is served from the current remote; the manifest claims the
+    # legacy one. Both are allowed individually, but mixing them is not.
+    document = manifest_for_repository(LEGACY_REPOSITORY)
+    manifest_bytes = json.dumps(document).encode()
+    channel_bytes = channel(manifest_bytes)
+    configuration = config(tmp_path)
+
+    def get(url: str, _maximum: int) -> bytes:
+        return channel_bytes if url == configuration.channel_url else manifest_bytes
+
+    reconciler = gitops.GitOpsReconciler(configuration, http_get=get)
     with pytest.raises(gitops.ReconcileError, match="repository is not allowed"):
         reconciler.desired_manifest()
 

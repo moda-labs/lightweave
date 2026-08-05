@@ -14,7 +14,28 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from control.releases import parse_release_channel, parse_release_manifest
+from control.releases import (
+    canonical_release_asset_url,
+    parse_release_channel,
+    parse_release_manifest,
+)
+
+
+# The project moved from underminedsk/ to moda-labs/ after v0.7.0. Release
+# manifests are immutable, so releases published before the move still name the
+# old remote. Both stay allowed until every promoted release names moda-labs.
+ALLOWED_REPOSITORIES = (
+    "https://github.com/moda-labs/lightweave.git",
+    "https://github.com/underminedsk/lightweave.git",
+)
+
+
+def canonical_manifest_url(manifest) -> str:
+    if manifest.repository not in ALLOWED_REPOSITORIES:
+        raise ValueError("release manifest repository is not allowed")
+    return canonical_release_asset_url(
+        manifest.repository, manifest.release, "lightweave-release.json"
+    )
 
 
 def read_manifest(source: str) -> tuple[bytes, str]:
@@ -34,18 +55,12 @@ def read_manifest(source: str) -> tuple[bytes, str]:
         raise ValueError("manifest exceeds 128 KiB")
     document = json.loads(data)
     manifest = parse_release_manifest(document)
-    return data, (
-        f"https://github.com/underminedsk/lightweave/releases/download/"
-        f"{manifest.release}/lightweave-release.json"
-    )
+    return data, canonical_manifest_url(manifest)
 
 
 def promoted_channel(manifest_bytes: bytes, manifest_url: str) -> dict:
     manifest = parse_release_manifest(json.loads(manifest_bytes))
-    if manifest_url != (
-        f"https://github.com/underminedsk/lightweave/releases/download/"
-        f"{manifest.release}/lightweave-release.json"
-    ):
+    if manifest_url != canonical_manifest_url(manifest):
         raise ValueError("manifest URL must be the immutable Lightweave GitHub release asset")
     channel = {
         "schema_version": 1,
