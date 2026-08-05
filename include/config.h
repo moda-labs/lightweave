@@ -7,6 +7,8 @@
 
 #include <stdint.h>
 
+#include "led_profile.h"
+
 // ---- Role --------------------------------------------------------------------
 // Every node runs identical firmware; role is a runtime value stored in NVS and
 // set once over serial (`role conductor|performer`). Default is performer so a
@@ -16,12 +18,14 @@ static constexpr uint8_t ROLE_CONDUCTOR = 1;
 static constexpr uint8_t DEFAULT_ROLE   = ROLE_PERFORMER;
 
 // ---- LEDs --------------------------------------------------------------------
-// 16x SK6812 RGBW ring data line (through a 470R series resistor).
+// Up to 64 SK6812 RGBW emitters on one data line (through a 470R series
+// resistor). Each lantern's active count is 16, 32, or 64 from its cached
+// conductor inventory profile; the driver allocates the maximum so one firmware
+// image works on every variant.
 // GPIO13 ("D13") sits next to VIN/GND on the DOIT DevKit V1 top header, so on a
 // single breadboard the power, ground, and data pins are all reachable from one
 // free row. (Any non-strapping output GPIO works; the brief's original GPIO18 is
 // on the bottom header, which is awkward to reach when the board covers a row.)
-static constexpr uint16_t LED_COUNT = 16;
 static constexpr uint8_t  LED_PIN   = 13;
 
 // Power guardrail. Every node clamps the rendered brightness to this, so no
@@ -54,7 +58,7 @@ static constexpr uint8_t PIN_VBAT     = 35;  // battery sense divider, ADC1
 // without scanning. All nodes MUST use the same channel.
 static constexpr uint8_t WIFI_CHANNEL = 1;
 
-// CPU at 160MHz is plenty for 16 pixels and saves ~15-30mA (brief: power discipline).
+// CPU at 160MHz is plenty for 64 pixels and saves ~15-30mA (brief: power discipline).
 static constexpr uint32_t CPU_FREQ_MHZ = 160;
 
 // ---- Sync protocol -----------------------------------------------------------

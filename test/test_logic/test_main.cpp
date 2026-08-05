@@ -9,10 +9,10 @@
 #include <unity.h>
 
 #include "beacon.h"
+#include "blackout.h"
 #include "sync.h"
 #include "bootplan.h"
 #include "dusk.h"
-#include "keepalive.h"
 #include "macaddr.h"
 #include "napsched.h"
 #include "ota_update.h"
@@ -730,19 +730,17 @@ void test_power_policy_force_sleep_overrides_disabled_schedule() {
   TEST_ASSERT_TRUE(powerPolicyLedsOn(p));
 }
 
-void test_power_policy_force_sleep_overrides_keepalive() {
+void test_power_policy_scheduled_off_deep_sleeps() {
   PowerPolicy p = powerPolicyDefault();
   p.flags = POWER_FLAG_SCHEDULE_ENABLED;
   p.current_min = 12 * 60;
   p.led_on_start_min = 20 * 60;
   p.led_on_end_min = 6 * 60;
 
-  TEST_ASSERT_FALSE(powerPolicyShouldDeepSleep(p, true));
-  TEST_ASSERT_TRUE(powerPolicyKeepaliveWindow(p));
+  TEST_ASSERT_TRUE(powerPolicyShouldDeepSleep(p));
 
-  p.flags |= POWER_FLAG_FORCE_SLEEP;
-  TEST_ASSERT_TRUE(powerPolicyShouldDeepSleep(p, true));
-  TEST_ASSERT_FALSE(powerPolicyKeepaliveWindow(p));
+  p.flags = POWER_FLAG_FORCE_AWAKE;
+  TEST_ASSERT_FALSE(powerPolicyShouldDeepSleep(p));
 }
 
 void test_power_policy_sanitize_clamps_runtime_intervals() {
@@ -792,26 +790,6 @@ void test_power_policy_advance_by_seconds_preserves_off_window() {
   TEST_ASSERT_EQUAL_UINT16(12 * 60 + 1, p.current_min);
   TEST_ASSERT_EQUAL_UINT32(3660, p.current_epoch_s);
   TEST_ASSERT_FALSE(powerPolicyLedsOn(p));
-}
-
-void test_keepalive_sanitizes_and_pulses() {
-  KeepAliveConfig c = {KEEPALIVE_FLAG_ENABLED, 0, 0, 255};
-  keepAliveSanitize(c);
-  TEST_ASSERT_EQUAL_UINT16(KEEPALIVE_INTERVAL_MIN_MS, c.interval_ms);
-  TEST_ASSERT_EQUAL_UINT16(KEEPALIVE_PULSE_MIN_MS, c.pulse_ms);
-  TEST_ASSERT_EQUAL_UINT8(KEEPALIVE_BRIGHTNESS_MAX, c.brightness);
-
-  c = {KEEPALIVE_FLAG_ENABLED, 10000, 100, 64};
-  TEST_ASSERT_TRUE(keepAlivePulseOn(c, 0));
-  TEST_ASSERT_TRUE(keepAlivePulseOn(c, 99'000));
-  TEST_ASSERT_FALSE(keepAlivePulseOn(c, 100'000));
-  TEST_ASSERT_TRUE(keepAlivePulseOn(c, 10'000'000));
-}
-
-void test_keepalive_disabled_never_pulses() {
-  KeepAliveConfig c = {0, 10000, 100, 64};
-  TEST_ASSERT_FALSE(keepAlivePulseOn(c, 0));
-  TEST_ASSERT_FALSE(keepAlivePulseOn(c, 10'000'000));
 }
 
 void test_ota_crc32_matches_standard_vector() {
@@ -1033,6 +1011,50 @@ void test_table_migrates_legacy_positions_without_inventing_ids() {
 
   legacy.count = LEGACY_TABLE_MAX + 1;
   TEST_ASSERT_FALSE(tableMigrateLegacy(legacy, current));
+}
+
+void test_table_group_assignment_preserves_position_and_rejects_bad_ids() {
+  LayoutTable t;
+  tableInit(t);
+  uint8_t a[6], spare[6];
+  macN(a, 1);
+  macN(spare, 2);
+  TEST_ASSERT_TRUE(tableSetGroup(t, spare, 5));
+  TEST_ASSERT_EQUAL_INT(0, tableFind(t, spare));
+  TEST_ASSERT_TRUE(tableSetGroup(t, spare, 5));
+  TEST_ASSERT_TRUE(tableSetLedCount(t, spare, 32));
+  TEST_ASSERT_FALSE(tableSetLedCount(t, spare, 24));
+  TEST_ASSERT_FALSE(tableHasPosition(t.entries[tableFind(t, spare)]));
+  TEST_ASSERT_TRUE(tableSetWithGroup(t, a, 1.5f, 2.5f, 3));
+  TEST_ASSERT_TRUE(tableSetGroup(t, a, 6));
+  TEST_ASSERT_FALSE(tableSetGroup(t, a, GROUP_COUNT));
+  tableSet(t, a, 9.0f, 8.0f);  // a position edit must not reset membership
+  float x = 0, y = 0;
+  uint8_t group_id = 0;
+  TEST_ASSERT_TRUE(tableLookup(t, a, x, y));
+  TEST_ASSERT_TRUE(tableLookupGroup(t, a, group_id));
+  TEST_ASSERT_EQUAL_FLOAT(9.0f, x);
+  TEST_ASSERT_EQUAL_FLOAT(8.0f, y);
+  TEST_ASSERT_EQUAL_UINT8(6, group_id);
+  TEST_ASSERT_TRUE(tableClearPosition(t, a));
+  TEST_ASSERT_TRUE(tableLookupGroup(t, a, group_id));
+  TEST_ASSERT_EQUAL_UINT8(6, group_id);
+  uint8_t led_count = 0;
+  TEST_ASSERT_TRUE(tableLookupLedCount(t, spare, led_count));
+  TEST_ASSERT_EQUAL_UINT8(32, led_count);
+  TEST_ASSERT_TRUE(tableLookupLedCount(t, a, led_count));
+  TEST_ASSERT_EQUAL_UINT8(DEFAULT_LED_COUNT, led_count);
+  TEST_ASSERT_TRUE(ledCountValid(16));
+  TEST_ASSERT_TRUE(ledCountValid(64));
+  TEST_ASSERT_FALSE(ledCountValid(24));
+  TEST_ASSERT_TRUE(ledCountInputValid(32));
+  TEST_ASSERT_FALSE(ledCountInputValid(-240));
+  TEST_ASSERT_FALSE(ledCountInputValid(272));
+  TEST_ASSERT_EQUAL_UINT8(DEFAULT_LED_COUNT, ledCountSafe(0));
+  TEST_ASSERT_EQUAL_UINT16(16, activeLedCount(16, 64));
+  TEST_ASSERT_EQUAL_UINT16(32, activeLedCount(32, 64));
+  TEST_ASSERT_EQUAL_UINT16(40, activeLedCount(64, 40));
+  TEST_ASSERT_EQUAL_UINT16(16, activeLedCount(24, 64));
 }
 
 void test_table_remove() {
@@ -1680,6 +1702,51 @@ void test_pattern_boot_safe() {
   TEST_ASSERT_EQUAL_UINT16(999, patterns::patternBootSafe(999));
 }
 
+void test_group_beacon_selects_independent_configs_and_fits_espnow() {
+  BeaconMsg b = {};
+  b.patterns[0] = {patterns::GLOW, 48, 0, {40, 100, 0, 0}};
+  b.patterns[5] = {patterns::SWEEP, 72, 0, {8000, 300, 0, 0}};
+  TEST_ASSERT_EQUAL_UINT8(8, GROUP_COUNT);
+  TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, beaconPattern(b, 0).pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::SWEEP, beaconPattern(b, 5).pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, beaconPattern(b, 99).pattern_id);
+  TEST_ASSERT_TRUE(sizeof(BeaconMsg) <= 250);
+}
+
+void test_blackout_restores_distinct_brightness_and_preserves_patterns() {
+  PatternConfig configs[GROUP_COUNT] = {};
+  configs[0] = {patterns::WHITE, 24, 0, {0, 0, 0, 0}};
+  configs[1] = {patterns::FIRE_FLICKER, 56, 0, {1200, 24, 65493, 95}};
+  BlackoutState state;
+  blackoutStateInit(state);
+
+  TEST_ASSERT_TRUE(blackoutApply(state, configs));
+  TEST_ASSERT_TRUE(state.restore_available);
+  TEST_ASSERT_EQUAL_UINT8(0, configs[0].brightness);
+  TEST_ASSERT_EQUAL_UINT8(0, configs[1].brightness);
+
+  // Repeated blackout keeps the first recovery point instead of saving zeroes.
+  TEST_ASSERT_FALSE(blackoutApply(state, configs));
+  TEST_ASSERT_TRUE(blackoutRestore(state, configs));
+  TEST_ASSERT_FALSE(state.restore_available);
+  TEST_ASSERT_EQUAL_UINT8(24, configs[0].brightness);
+  TEST_ASSERT_EQUAL_UINT8(56, configs[1].brightness);
+  TEST_ASSERT_EQUAL_UINT16(patterns::WHITE, configs[0].pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::FIRE_FLICKER, configs[1].pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(1200, configs[1].params[0]);
+}
+
+void test_blackout_rejects_missing_or_corrupt_restore_state() {
+  PatternConfig configs[GROUP_COUNT] = {};
+  BlackoutState state;
+  blackoutStateInit(state);
+
+  TEST_ASSERT_FALSE(blackoutRestore(state, configs));
+  state.restore_available = 1;
+  state.brightness[0] = MAX_BRIGHTNESS + 1;
+  TEST_ASSERT_FALSE(blackoutRestore(state, configs));
+}
+
 // ---- Machine serial JSON protocol -------------------------------------------
 
 void test_serial_json_assign_parses_mac_and_position() {
@@ -1696,6 +1763,44 @@ void test_serial_json_assign_parses_mac_and_position() {
   TEST_ASSERT_EQUAL_HEX8(0x8C, cmd.mac[0]);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, cmd.x);
   TEST_ASSERT_EQUAL_FLOAT(0.75f, cmd.y);
+}
+
+void test_serial_json_group_and_targeted_pattern_parse() {
+  SerialJsonCommand group_cmd, led_cmd, pattern_cmd;
+  const char* error = nullptr;
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":8,\"cmd\":\"group\",\"mac\":\"8C:94:DF:57:7F:14\",\"group_id\":3}",
+      group_cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_GROUP, group_cmd.kind);
+  TEST_ASSERT_TRUE(group_cmd.has_group_id);
+  TEST_ASSERT_EQUAL_UINT8(3, group_cmd.group_id);
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":9,\"cmd\":\"pattern\",\"pattern\":\"Sweep\",\"group_id\":6}",
+      pattern_cmd, error));
+  TEST_ASSERT_TRUE(pattern_cmd.has_group_id);
+  TEST_ASSERT_EQUAL_UINT8(6, pattern_cmd.group_id);
+  TEST_ASSERT_FALSE(serialJsonParse(
+      "{\"id\":10,\"cmd\":\"group\",\"mac\":\"8C:94:DF:57:7F:14\",\"group_id\":8}",
+      group_cmd, error));
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":11,\"cmd\":\"led_count\",\"mac\":\"8C:94:DF:57:7F:14\",\"led_count\":64}",
+      led_cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_LED_COUNT, led_cmd.kind);
+  TEST_ASSERT_TRUE(led_cmd.has_led_count);
+  TEST_ASSERT_EQUAL_UINT8(64, led_cmd.led_count);
+  TEST_ASSERT_FALSE(serialJsonParse(
+      "{\"id\":12,\"cmd\":\"led_count\",\"mac\":\"8C:94:DF:57:7F:14\",\"led_count\":24}",
+      led_cmd, error));
+}
+
+void test_serial_json_blackout_restore_parses() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":13,\"cmd\":\"restore_blackout\"}", cmd, error));
+  TEST_ASSERT_NULL(error);
+  TEST_ASSERT_EQUAL_INT(SJ_RESTORE_BLACKOUT, cmd.kind);
 }
 
 void test_serial_json_pattern_maps_name_brightness_and_params() {
@@ -1851,25 +1956,14 @@ void test_serial_json_ota_begin_chunk_and_end_parse() {
   TEST_ASSERT_EQUAL_INT(SJ_OTA_PROGRESS, cmd.kind);
 }
 
-void test_serial_json_keepalive_parses_settings() {
+void test_serial_json_rejects_retired_keepalive_command() {
   SerialJsonCommand cmd;
   const char* error = nullptr;
 
-  TEST_ASSERT_TRUE(serialJsonParse(
-      "{\"id\":17,\"cmd\":\"keepalive\",\"enabled\":true,"
-      "\"interval_ms\":10000,\"pulse_ms\":250,\"brightness\":96}",
+  TEST_ASSERT_FALSE(serialJsonParse(
+      "{\"id\":17,\"cmd\":\"keepalive\",\"enabled\":true}",
       cmd, error));
-
-  TEST_ASSERT_NULL(error);
-  TEST_ASSERT_EQUAL_INT(SJ_KEEPALIVE, cmd.kind);
-  TEST_ASSERT_TRUE(cmd.has_keepalive_enabled);
-  TEST_ASSERT_TRUE(cmd.keepalive_enabled);
-  TEST_ASSERT_TRUE(cmd.has_keepalive_interval_ms);
-  TEST_ASSERT_EQUAL_UINT16(10000, cmd.keepalive_interval_ms);
-  TEST_ASSERT_TRUE(cmd.has_keepalive_pulse_ms);
-  TEST_ASSERT_EQUAL_UINT16(250, cmd.keepalive_pulse_ms);
-  TEST_ASSERT_TRUE(cmd.has_keepalive_brightness);
-  TEST_ASSERT_EQUAL_UINT8(96, cmd.keepalive_brightness);
+  TEST_ASSERT_EQUAL_STRING("unknown cmd", error);
 }
 
 void test_serial_json_rejects_bad_command() {
@@ -1925,6 +2019,7 @@ void test_table_chunk_build_single_chunk() {
   tableSet(t, b, 3.0f, 4.0f);
   tableAdoptIdentity(t, a, 11);
   tableAdoptIdentity(t, b, 12);
+  TEST_ASSERT_TRUE(tableSetLedCount(t, b, 32));
 
   TableMsg m;
   size_t len = tableChunkBuild(t, 0, m);
@@ -1937,6 +2032,7 @@ void test_table_chunk_build_single_chunk() {
   TEST_ASSERT_EQUAL_UINT8(2, m.n);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(b, m.rows[1].mac, 6);
   TEST_ASSERT_EQUAL_UINT16(12, m.rows[1].id);
+  TEST_ASSERT_EQUAL_UINT8(32, m.rows[1].led_count);
   TEST_ASSERT_TRUE((m.rows[1].flags & TABLE_FLAG_POSITIONED) != 0);
   TEST_ASSERT_EQUAL_FLOAT(3.0f, m.rows[1].x);
   TEST_ASSERT_EQUAL_FLOAT(4.0f, m.rows[1].y);
@@ -1996,15 +2092,18 @@ void test_table_msg_find_row() {
   macN(b, 2);
   macN(absent, 99);
   tableSet(t, a, 1.0f, 2.0f);
-  tableSet(t, b, -7.5f, 0.25f);
+  tableSetWithGroup(t, b, -7.5f, 0.25f, 4);
   tableAdoptIdentity(t, b, 22);
+  TEST_ASSERT_TRUE(tableSetLedCount(t, b, 64));
   TableMsg m;
   tableChunkBuild(t, 0, m);
 
-  TableAssignment assignment;
+  TableAssignment assignment = {};
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(22, assignment.id);
   TEST_ASSERT_TRUE(assignment.has_position);
+  TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
+  TEST_ASSERT_EQUAL_UINT8(64, assignment.led_count);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, assignment.x);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, assignment.y);
   TEST_ASSERT_FALSE(tableMsgFindRow(m, absent, assignment));
@@ -2022,17 +2121,26 @@ void test_table_msg_find_row() {
 void test_table_row_reply_wanted() {
   // First join since conductor boot (or a full roster dropped the insert —
   // known-ness is computed BEFORE the upsert, so full can't mask new).
-  TEST_ASSERT_TRUE(tableRowReplyWanted(/*mac_known*/ false, /*reported*/ 7,
-                                       /*have_authoritative*/ true, 7));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(/*mac_known*/ false, /*reported id*/ 7,
+                                       /*reported group*/ 0, /*reported leds*/ 16,
+                                       /*have_authoritative*/ true,
+                                       /*authoritative id*/ 7,
+                                       /*authoritative group*/ 0,
+                                       /*authoritative leds*/ 16));
   // Unprovisioned (id 0): fresh flash / erase_flash recovery — its NVS
   // position cache is gone even though the conductor has seen the MAC.
-  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 0, true, 7));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 0, 0, 16, true, 7, 0, 16));
   // A conflicting board gets the authoritative row so it can log the conflict;
   // receiver logic refuses to silently change a non-zero physical-board ID.
-  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 8, true, 7));
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 8, 0, 16, true, 7, 0, 16));
+  // A placed node that missed a live group edit reports its old cached group in
+  // REGISTER; the mismatch earns the same reliable row reply.
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 7, 2, 16, true, 7, 3, 16));
+  // The same repair path covers a performer that missed a hardware-profile edit.
+  TEST_ASSERT_TRUE(tableRowReplyWanted(true, 7, 3, 16, true, 7, 3, 64));
   // Known + provisioned re-register (every 10 s, all night): no reply —
   // steady state costs zero table traffic.
-  TEST_ASSERT_FALSE(tableRowReplyWanted(true, 7, true, 7));
+  TEST_ASSERT_FALSE(tableRowReplyWanted(true, 7, 3, 64, true, 7, 3, 64));
 }
 
 void test_table_row_build() {
@@ -2043,18 +2151,21 @@ void test_table_row_build() {
   macN(b, 2);
   macN(absent, 99);
   tableSet(t, a, 1.0f, 2.0f);
-  tableSet(t, b, -7.5f, 0.25f);
+  tableSetWithGroup(t, b, -7.5f, 0.25f, 4);
   tableAdoptIdentity(t, b, 42);
+  TEST_ASSERT_TRUE(tableSetLedCount(t, b, 32));
 
   TableMsg m;
   size_t len = tableRowBuild(t, b, m);
-  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);
+  TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);  // 28 B on the wire
   TEST_ASSERT_EQUAL_UINT32(BEACON_MAGIC, m.hdr.magic);
   TEST_ASSERT_EQUAL_UINT8(PROTO_VERSION, m.hdr.version);
   TEST_ASSERT_EQUAL_UINT8(MSG_TABLE, m.hdr.type);
   TEST_ASSERT_EQUAL_UINT8(1, m.n);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(b, m.rows[0].mac, 6);
   TEST_ASSERT_EQUAL_UINT16(42, m.rows[0].id);
+  TEST_ASSERT_EQUAL_UINT8(4, m.rows[0].group_id);
+  TEST_ASSERT_EQUAL_UINT8(32, m.rows[0].led_count);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, m.rows[0].x);
   TEST_ASSERT_EQUAL_FLOAT(0.25f, m.rows[0].y);
   // The receiver-side path accepts it end to end: length gates + own-row scan.
@@ -2063,6 +2174,8 @@ void test_table_row_build() {
   TableAssignment assignment;
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
+  TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
+  TEST_ASSERT_EQUAL_UINT8(32, assignment.led_count);
   TEST_ASSERT_EQUAL_FLOAT(-7.5f, assignment.x);
   TEST_ASSERT_TRUE(assignment.has_position);
   TEST_ASSERT_TRUE(tableClearPosition(t, b));
@@ -2070,6 +2183,8 @@ void test_table_row_build() {
   TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);
   TEST_ASSERT_TRUE(tableMsgFindRow(m, b, assignment));
   TEST_ASSERT_EQUAL_UINT16(42, assignment.id);
+  TEST_ASSERT_EQUAL_UINT8(4, assignment.group_id);
+  TEST_ASSERT_EQUAL_UINT8(32, assignment.led_count);
   TEST_ASSERT_FALSE(assignment.has_position);
   // No inventory row yet: nothing to say.
   TEST_ASSERT_EQUAL_size_t(0, tableRowBuild(t, absent, m));
@@ -2199,12 +2314,10 @@ int main(int, char**) {
   RUN_TEST(test_power_policy_window_handles_daytime_and_overnight_ranges);
   RUN_TEST(test_power_policy_force_awake_overrides_schedule);
   RUN_TEST(test_power_policy_force_sleep_overrides_disabled_schedule);
-  RUN_TEST(test_power_policy_force_sleep_overrides_keepalive);
+  RUN_TEST(test_power_policy_scheduled_off_deep_sleeps);
   RUN_TEST(test_power_policy_sanitize_clamps_runtime_intervals);
   RUN_TEST(test_power_policy_sleep_check_aligns_to_utc_interval);
   RUN_TEST(test_power_policy_advance_by_seconds_preserves_off_window);
-  RUN_TEST(test_keepalive_sanitizes_and_pulses);
-  RUN_TEST(test_keepalive_disabled_never_pulses);
   RUN_TEST(test_ota_crc32_matches_standard_vector);
   RUN_TEST(test_ota_hex_decode_rejects_bad_or_oversized_input);
   RUN_TEST(test_ota_chunk_decision_accepts_repeated_written_chunks);
@@ -2219,6 +2332,7 @@ int main(int, char**) {
   RUN_TEST(test_table_permanent_ids_are_unique_and_survive_position_changes);
   RUN_TEST(test_table_reports_live_identity_conflicts);
   RUN_TEST(test_table_migrates_legacy_positions_without_inventing_ids);
+  RUN_TEST(test_table_group_assignment_preserves_position_and_rejects_bad_ids);
   RUN_TEST(test_table_remove);
   RUN_TEST(test_table_overflow_drops_new);
   RUN_TEST(test_heartbeat_square_wave);
@@ -2267,7 +2381,12 @@ int main(int, char**) {
   RUN_TEST(test_mac_parse_rejects_out_of_range_group);
   RUN_TEST(test_mac_format_roundtrip);
   RUN_TEST(test_pattern_boot_safe);
+  RUN_TEST(test_group_beacon_selects_independent_configs_and_fits_espnow);
+  RUN_TEST(test_blackout_restores_distinct_brightness_and_preserves_patterns);
+  RUN_TEST(test_blackout_rejects_missing_or_corrupt_restore_state);
   RUN_TEST(test_serial_json_assign_parses_mac_and_position);
+  RUN_TEST(test_serial_json_group_and_targeted_pattern_parse);
+  RUN_TEST(test_serial_json_blackout_restore_parses);
   RUN_TEST(test_serial_json_pattern_maps_name_brightness_and_params);
   RUN_TEST(test_serial_json_glow_maps_hue_and_saturation_params);
   RUN_TEST(test_serial_json_white_maps_pattern_name);
@@ -2276,7 +2395,7 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_power_policy_parses_runtime_sleep_controls);
   RUN_TEST(test_serial_json_ota_mode_parses_enabled_flag);
   RUN_TEST(test_serial_json_ota_begin_chunk_and_end_parse);
-  RUN_TEST(test_serial_json_keepalive_parses_settings);
+  RUN_TEST(test_serial_json_rejects_retired_keepalive_command);
   RUN_TEST(test_serial_json_rejects_bad_command);
   RUN_TEST(test_table_wire_len_fits_espnow);
   RUN_TEST(test_table_chunk_count);

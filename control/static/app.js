@@ -12,8 +12,9 @@ let movingDrag = null;
 let replaceMode = false;
 let replacementMac = null;
 let patternDraft = null;
+let selectedGroup = 0;
+let groupNameBaseline = null;
 let powerBaseline = null;
-let keepaliveBaseline = null;
 let otaArtifact = null;
 let otaInstall = null;
 let savedPatterns = [];
@@ -25,6 +26,8 @@ let wifiStatus = null;
 let releaseInfo = null;
 
 const MAP_PADDING = 0.08;
+const GROUP_COUNT = 8;
+const LED_COUNTS = [16, 32, 64];
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 3;
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
@@ -179,6 +182,31 @@ function lanterns() {
   return state?.lanterns || [];
 }
 
+function patternForGroup(groupId) {
+  const entry = (state?.patterns || []).find((item) => Number(item.group_id) === Number(groupId));
+  return entry?.config || (Number(groupId) === 0 ? state?.pattern : null) || state?.pattern || {
+    pattern: "Glow",
+    brightness: 48,
+    params: {},
+  };
+}
+
+function activePatternState() {
+  return patternForGroup(selectedGroup);
+}
+
+function groupEntry(groupId) {
+  return (state?.groups || []).find((item) => Number(item.group_id) === Number(groupId));
+}
+
+function groupName(groupId) {
+  return String(groupEntry(groupId)?.name || "");
+}
+
+function groupLabel(groupId) {
+  return String(groupEntry(groupId)?.label || `Group ${Number(groupId) + 1}`);
+}
+
 function lanternDisplayName(mac) {
   const lantern = lanterns().find((item) => item.mac === mac);
   if (lantern?.label && lantern.label !== "Unknown") return lantern.label;
@@ -268,7 +296,9 @@ function render() {
 
   $("#connection-status").textContent = state.conductor.connected ? "connected" : "disconnected";
   $("#field-count").textContent = `${state.summary.alive} / ${state.summary.total}`;
-  $("#show-name").textContent = state.pattern.pattern;
+  const activePattern = activePatternState();
+  renderGroupControls();
+  $("#show-name").textContent = `${groupLabel(selectedGroup)}: ${activePattern.pattern}`;
   $("#attention-count").textContent = `${state.summary.attention} lights`;
   $("#sync-status").textContent = `sync ${state.conductor.sync}`;
   $("#table-sync-status").textContent = `sync ${state.conductor.sync}`;
@@ -288,58 +318,60 @@ function render() {
   renderPowerMonitor();
   renderCalibration();
   renderPowerPolicy();
-  renderKeepalive();
   renderOta();
   renderEvents();
   renderDetailVisibility();
 }
 
 function patternHueFromState() {
-  const params = state.pattern.params || {};
+  const live = activePatternState();
+  const params = live.params || {};
   // Firefly is positional: hue lives in p1 (p0 is the period).
-  if (state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") {
-    return params.p1 !== undefined ? Number(params.p1) : PATTERN_DEFAULTS[state.pattern.pattern].hue;
+  if (live.pattern === "Firefly" || live.pattern === "Fire Flicker") {
+    return params.p1 !== undefined ? Number(params.p1) : PATTERN_DEFAULTS[live.pattern].hue;
   }
   // Ocean Wave is positional: base water hue lives in p3.
-  if (state.pattern.pattern === "Ocean Wave") {
+  if (live.pattern === "Ocean Wave") {
     return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS["Ocean Wave"].hue;
   }
   if (params.hue !== undefined) return Number(params.hue);
-  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") && params.p0 !== undefined) {
+  if ((live.pattern === "Glow" || live.pattern === "Pulse") && params.p0 !== undefined) {
     return Number(params.p0);
   }
   return 40;
 }
 
 function patternSaturationFromState() {
-  const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Firefly" || live.pattern === "Fire Flicker") {
     if (colorValuePresent(params.p2) && params.p3 !== undefined) return Math.min(100, Number(params.p3));
-    return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS[state.pattern.pattern].saturation;
+    return params.p3 !== undefined ? Number(params.p3) : PATTERN_DEFAULTS[live.pattern].saturation;
   }
-  if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+  if (live.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
     return Math.round(((Number(params.p1) >> 10) & 0x3f) * 100 / 63);
   }
-  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") &&
+  if ((live.pattern === "Glow" || live.pattern === "Pulse") &&
       colorValuePresent(params.p2) && params.p1 !== undefined) {
     return Math.min(100, Number(params.p1));
   }
   if (params.saturation !== undefined) return Number(params.saturation);
-  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") && params.p1 !== undefined) {
+  if ((live.pattern === "Glow" || live.pattern === "Pulse") && params.p1 !== undefined) {
     return Number(params.p1);
   }
   return 100;
 }
 
 function patternValueFromState() {
-  const params = state.pattern.params || {};
-  if ((state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker") && colorValuePresent(params.p2)) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if ((live.pattern === "Firefly" || live.pattern === "Fire Flicker") && colorValuePresent(params.p2)) {
     return (Number(params.p2) >> 7) & 0xff;
   }
-  if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+  if (live.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
     return Math.round(((Number(params.p2) >> 9) & 0x3f) * 255 / 63);
   }
-  if ((state.pattern.pattern === "Glow" || state.pattern.pattern === "Pulse") &&
+  if ((live.pattern === "Glow" || live.pattern === "Pulse") &&
       colorValuePresent(params.p2)) {
     return Number(params.p2) & 0xff;
   }
@@ -347,17 +379,19 @@ function patternValueFromState() {
 }
 
 function patternPeriodFromState() {
-  const params = state.pattern.params || {};
+  const live = activePatternState();
+  const params = live.params || {};
   if (params.period !== undefined) return Number(params.period);
-  if ((state.pattern.pattern === "Sweep" || state.pattern.pattern === "Palette Drift" || state.pattern.pattern === "Firefly" || state.pattern.pattern === "Fire Flicker" || state.pattern.pattern === "Ocean Wave") && params.p0 !== undefined) {
+  if ((live.pattern === "Sweep" || live.pattern === "Palette Drift" || live.pattern === "Firefly" || live.pattern === "Fire Flicker" || live.pattern === "Ocean Wave") && params.p0 !== undefined) {
     return Number(params.p0);
   }
-  return PATTERN_DEFAULTS[state.pattern.pattern]?.period || 4000;
+  return PATTERN_DEFAULTS[live.pattern]?.period || 4000;
 }
 
 function patternScatterFromState() {
-  const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Firefly" && params.p2 !== undefined) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Firefly" && params.p2 !== undefined) {
     if (colorValuePresent(params.p2)) return Number(params.p2) & FIREFLY_SCATTER_MASK;
     return Number(params.p2);
   }
@@ -365,8 +399,9 @@ function patternScatterFromState() {
 }
 
 function patternTextureFromState() {
-  const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Fire Flicker" && params.p2 !== undefined) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Fire Flicker" && params.p2 !== undefined) {
     if (colorValuePresent(params.p2)) return Number(params.p2) & FIREFLY_SCATTER_MASK;
     return Number(params.p2);
   }
@@ -374,37 +409,41 @@ function patternTextureFromState() {
 }
 
 function patternAngleFromState() {
-  const params = state.pattern.params || {};
-  if (state.pattern.pattern === "Ocean Wave" && params.p2 !== undefined) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Ocean Wave" && params.p2 !== undefined) {
     return colorValuePresent(params.p2) ? Number(params.p2) & OCEAN_ANGLE_MASK : Number(params.p2);
   }
   return PATTERN_DEFAULTS["Ocean Wave"].angle;
 }
 
 function patternWavelengthFromState() {
-  const params = state.pattern.params || {};
+  const live = activePatternState();
+  const params = live.params || {};
   if (params.wavelength !== undefined) return Number(params.wavelength);
-  if ((state.pattern.pattern === "Sweep" || state.pattern.pattern === "Ocean Wave") && params.p1 !== undefined) {
-    if (state.pattern.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
+  if ((live.pattern === "Sweep" || live.pattern === "Ocean Wave") && params.p1 !== undefined) {
+    if (live.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
       return Number(params.p1) & OCEAN_WAVELENGTH_MASK;
     }
     return Number(params.p1);
   }
-  return PATTERN_DEFAULTS[state.pattern.pattern]?.wavelength ?? PATTERN_DEFAULTS.Sweep.wavelength;
+  return PATTERN_DEFAULTS[live.pattern]?.wavelength ?? PATTERN_DEFAULTS.Sweep.wavelength;
 }
 
 function patternSpatialFromState() {
-  const params = state.pattern.params || {};
+  const live = activePatternState();
+  const params = live.params || {};
   if (params.spatial !== undefined) return Number(params.spatial);
-  if (state.pattern.pattern === "Palette Drift" && params.p1 !== undefined) return Number(params.p1);
+  if (live.pattern === "Palette Drift" && params.p1 !== undefined) return Number(params.p1);
   return PATTERN_DEFAULTS["Palette Drift"].spatial;
 }
 
 function patternDraftFromState() {
-  const defaults = PATTERN_DEFAULTS[state.pattern.pattern] || PATTERN_DEFAULTS.Pulse;
+  const live = activePatternState();
+  const defaults = PATTERN_DEFAULTS[live.pattern] || PATTERN_DEFAULTS.Pulse;
   return {
-    pattern: state.pattern.pattern,
-    brightness: Number(state.pattern.brightness),
+    pattern: live.pattern,
+    brightness: Number(live.brightness),
     hue: patternHueFromState(),
     saturation: patternSaturationFromState(),
     value: patternValueFromState(),
@@ -421,7 +460,7 @@ function patternDraftForSelection(pattern) {
   const defaults = PATTERN_DEFAULTS[pattern] || PATTERN_DEFAULTS.Pulse;
   return {
     pattern,
-    brightness: Number(patternDraft?.brightness ?? state?.pattern?.brightness ?? 48),
+    brightness: Number(patternDraft?.brightness ?? activePatternState()?.brightness ?? 48),
     hue: Number(defaults.hue),
     saturation: Number(defaults.saturation),
     value: Number(defaults.value),
@@ -558,6 +597,13 @@ function renderPatternControls() {
   const changeButton = $('[data-action="broadcast"]');
   changeButton.disabled = !isPatternDirty();
   changeButton.ariaDisabled = String(changeButton.disabled);
+  const groupOffButton = $('[data-action="turn-off-group"]');
+  groupOffButton.textContent = `Turn off ${groupLabel(selectedGroup)}`;
+  groupOffButton.disabled = Number(activePatternState()?.brightness || 0) === 0;
+  groupOffButton.ariaDisabled = String(groupOffButton.disabled);
+  const restoreButton = $('[data-action="restore-blackout"]');
+  restoreButton.disabled = state?.blackout?.restore_available !== true;
+  restoreButton.ariaDisabled = String(restoreButton.disabled);
 }
 
 function renderSavedPatterns() {
@@ -635,6 +681,76 @@ function renderUnpositionedTray() {
   });
 }
 
+function groupOptions(selectedGroupId) {
+  return Array.from({ length: GROUP_COUNT }, (_, groupId) =>
+    `<option value="${groupId}" ${groupId === selectedGroupId ? "selected" : ""}>${escapeHtml(groupLabel(groupId))}</option>`
+  ).join("");
+}
+
+function updateGroupNameDirtyState() {
+  const input = $("#group-name");
+  const saveButton = $('[data-action="save-group-name"]');
+  if (!input || !saveButton) return;
+  saveButton.disabled = groupNameBaseline === null || input.value.trim() === groupNameBaseline;
+}
+
+function renderGroupControls() {
+  const patternSelect = $("#pattern-group");
+  patternSelect.innerHTML = groupOptions(selectedGroup);
+  patternSelect.value = String(selectedGroup);
+  const input = $("#group-name");
+  const liveName = groupName(selectedGroup);
+  const dirty = groupNameBaseline !== null && input.value.trim() !== groupNameBaseline;
+  if (groupNameBaseline === null || !dirty) {
+    groupNameBaseline = liveName;
+    input.value = liveName;
+  }
+  updateGroupNameDirtyState();
+}
+
+function ledCountSafe(value) {
+  const count = Number(value || 16);
+  return LED_COUNTS.includes(count) ? count : 16;
+}
+
+function ledCountOptions(selectedCount) {
+  return LED_COUNTS.map((count) =>
+    `<option value="${count}" ${count === selectedCount ? "selected" : ""}>${count}</option>`
+  ).join("");
+}
+
+async function assignLanternGroup(mac, groupId, control = null) {
+  if (!mac) return;
+  if (control) control.disabled = true;
+  try {
+    const ack = await api(`/api/lanterns/${encodeURIComponent(mac)}/group`, {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupId }),
+    });
+    toast(ack.message);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    await refresh();
+  }
+}
+
+async function assignLanternLedCount(mac, ledCount, control = null) {
+  if (!mac) return;
+  if (control) control.disabled = true;
+  try {
+    const ack = await api(`/api/lanterns/${encodeURIComponent(mac)}/led-count`, {
+      method: "POST",
+      body: JSON.stringify({ led_count: ledCount }),
+    });
+    toast(ack.message);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    await refresh();
+  }
+}
+
 function renderRows() {
   const rows = lanterns().filter((lantern) => {
     if (filter === "attention") return lantern.attention !== "None";
@@ -648,8 +764,12 @@ function renderRows() {
     const isFirmwareBad = lantern.attention === "Firmware mismatch";
     const dotClass = isBad || isFirmwareBad ? "bad" : lantern.position === "Missing" ? "warn" : "";
     const attentionClass = lantern.attention === "None" ? "" : isBad || isFirmwareBad ? "bad" : "warn";
+    const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(lantern.group_id || 0)));
+    const ledCount = ledCountSafe(lantern.led_count);
     return `<tr data-mac="${lantern.mac}" class="${lantern.mac === selectedMac ? "selected" : ""}">
       <td><strong>${escapeHtml(lantern.label)}</strong><br><span class="mono">${escapeHtml(lantern.mac)}</span></td>
+      <td><select class="table-group-select" data-group-mac="${escapeHtml(lantern.mac)}" aria-label="Group for ${escapeHtml(lantern.label)}">${groupOptions(groupId)}</select></td>
+      <td><select class="table-led-select" data-led-mac="${escapeHtml(lantern.mac)}" aria-label="LED count for ${escapeHtml(lantern.label)}">${ledCountOptions(ledCount)}</select></td>
       <td><span class="status"><span class="dot ${dotClass}"></span>${statusText(lantern)}</span></td>
       <td class="${isBad ? "bad" : "ok"}">${escapeHtml(lantern.last_seen_label)}</td>
       <td class="${lantern.position === "Missing" ? "warn" : ""}">${escapeHtml(lantern.position)}</td>
@@ -660,6 +780,21 @@ function renderRows() {
 
   $$("#lantern-rows tr").forEach((row) => {
     row.addEventListener("click", () => selectLantern(row.dataset.mac));
+  });
+  $$("#lantern-rows [data-group-mac]").forEach((select) => {
+    select.addEventListener("click", (event) => event.stopPropagation());
+    select.addEventListener("change", async (event) => {
+      event.stopPropagation();
+      const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(select.value || 0)));
+      await assignLanternGroup(select.dataset.groupMac, groupId, select);
+    });
+  });
+  $$("#lantern-rows [data-led-mac]").forEach((select) => {
+    select.addEventListener("click", (event) => event.stopPropagation());
+    select.addEventListener("change", async (event) => {
+      event.stopPropagation();
+      await assignLanternLedCount(select.dataset.ledMac, ledCountSafe(select.value), select);
+    });
   });
   $$("#lantern-rows [data-locate-mac]").forEach((button) => {
     button.addEventListener("click", async (event) => {
@@ -674,14 +809,20 @@ function renderDetail() {
   const lantern = selectedLantern();
   if (!lantern) return;
   const isOk = lantern.status === "alive" && lantern.position !== "Missing";
+  const groupId = Number(lantern.group_id || 0);
+  const ledCount = ledCountSafe(lantern.led_count);
+  const groupPattern = patternForGroup(groupId);
   const moveLabel = isPositioned(lantern) ? "Move" : "Place";
   $("#detail-title").textContent = `${lantern.label} is ${isOk ? "healthy" : statusText(lantern)}`;
   $("#detail-title").className = isOk ? "" : "warn";
   $("#detail-summary").textContent = detailSummary(lantern);
+  $("#lantern-group").innerHTML = groupOptions(groupId);
+  $("#lantern-group").value = String(groupId);
+  $("#lantern-led-count").value = String(ledCount);
   $("#detail-tech").innerHTML = [
     `MAC ${escapeHtml(lantern.mac)} · x=${fmt(lantern.x)} y=${fmt(lantern.y)} · status=${escapeHtml(statusText(lantern))}`,
     `firmware=${firmwareHtml(lantern.firmware)}`,
-    `pattern=${escapeHtml(state.pattern.pattern)} bri=${state.pattern.brightness} · seq=${state.conductor.seq}`,
+    `group=${escapeHtml(groupLabel(groupId))} · leds=${ledCount} · pattern=${escapeHtml(groupPattern.pattern)} bri=${groupPattern.brightness} · seq=${state.conductor.seq}`,
     `power E=${fmt(lantern.power.wh)}Wh avg=${fmt(lantern.power.avg_w)}W · last report=${escapeHtml(lantern.power.last_report_label || "none")}`,
   ].join("<br>");
   $$('[data-action="move"]').forEach((button) => {
@@ -965,9 +1106,10 @@ function renderOta() {
   renderOtaProgress();
   renderOtaNodes();
   const serialActions = [
-    "identify", "move", "replace", "forget", "broadcast", "blackout",
+    "identify", "move", "replace", "forget", "broadcast", "turn-off-group",
+    "blackout", "restore-blackout",
     "save-power-policy", "sleep-field", "wake-field", "follow-schedule",
-    "save-power-monitor", "save-keepalive",
+    "save-power-monitor",
     "enter-ota", "exit-ota", "stage-ota-artifact", "install-ota",
     "toggle-calibration-mode", "upload-calibration-frames",
     "save-calibration-proposal",
@@ -980,6 +1122,14 @@ function renderOta() {
   });
   $$('[data-pattern-action="broadcast-saved"], [data-power-sync]').forEach((button) => {
     setOtaControlDisabled(button, installing);
+  });
+  setOtaControlDisabled($("#lantern-group"), installing);
+  setOtaControlDisabled($("#lantern-led-count"), installing);
+  $$("#lantern-rows [data-group-mac]").forEach((select) => {
+    setOtaControlDisabled(select, installing);
+  });
+  $$("#lantern-rows [data-led-mac]").forEach((select) => {
+    setOtaControlDisabled(select, installing);
   });
   if (!installing) {
     const fileInput = $("#ota-file");
@@ -1564,54 +1714,6 @@ function renderPowerPolicy() {
   updateSleepScheduleDirtyState();
 }
 
-function keepaliveSnapshotFromState(keepalive = state?.keepalive || {}) {
-  return {
-    enabled: Boolean(keepalive.enabled),
-    interval_ms: Number(keepalive.interval_ms ?? 10000),
-    pulse_ms: Number(keepalive.pulse_ms ?? 100),
-    brightness: Number(keepalive.brightness ?? 64),
-  };
-}
-
-function keepaliveSnapshotFromForm() {
-  return {
-    enabled: $("#keepalive-enabled").checked,
-    interval_ms: Number($("#keepalive-interval").value || 10000),
-    pulse_ms: Number($("#keepalive-pulse").value || 100),
-    brightness: Number($("#keepalive-brightness").value || 64),
-  };
-}
-
-function keepaliveSnapshotKey(snapshot) {
-  return JSON.stringify(snapshot);
-}
-
-function isKeepaliveDirty() {
-  if (!keepaliveBaseline) return false;
-  return keepaliveSnapshotKey(keepaliveSnapshotFromForm()) !== keepaliveSnapshotKey(keepaliveBaseline);
-}
-
-function updateKeepaliveDirtyState() {
-  const saveButton = $('[data-action="save-keepalive"]');
-  if (saveButton) saveButton.disabled = !isKeepaliveDirty();
-}
-
-function renderKeepalive() {
-  const keepalive = state.keepalive || {};
-  const nextBaseline = keepaliveSnapshotFromState(keepalive);
-  if (!keepaliveBaseline || !isKeepaliveDirty()) {
-    keepaliveBaseline = nextBaseline;
-    $("#keepalive-enabled").checked = nextBaseline.enabled;
-    $("#keepalive-interval").value = nextBaseline.interval_ms;
-    $("#keepalive-pulse").value = nextBaseline.pulse_ms;
-    $("#keepalive-brightness").value = nextBaseline.brightness;
-  }
-  $("#keepalive-state").textContent = nextBaseline.enabled
-    ? `${nextBaseline.pulse_ms}ms / ${nextBaseline.interval_ms}ms`
-    : "off";
-  updateKeepaliveDirtyState();
-}
-
 function powerWindowActive(power) {
   const minute = Number(power.current_min ?? currentMinuteInTimezone()) % 1440;
   const start = Number(power.led_on_start_min ?? 20 * 60) % 1440;
@@ -2046,15 +2148,19 @@ async function runAction(action) {
       const params = patternParams(patternDraft);
       const ack = await api("/api/show/pattern", {
         method: "POST",
-        body: JSON.stringify({ pattern, brightness, params }),
+        body: JSON.stringify({ pattern, brightness, params, group_id: selectedGroup }),
       });
+      const nextConfig = {
+        pattern,
+        brightness,
+        params: patternStateParams(patternDraft),
+      };
       state = {
         ...state,
-        pattern: {
-          pattern,
-          brightness,
-          params: patternStateParams(patternDraft),
-        },
+        pattern: selectedGroup === 0 ? nextConfig : state.pattern,
+        patterns: (state.patterns || []).map((entry) => Number(entry.group_id) === selectedGroup
+          ? { ...entry, config: nextConfig }
+          : entry),
       };
       render();
       toast(ack.message);
@@ -2080,10 +2186,48 @@ async function runAction(action) {
       toast(`saved ${ack.pattern.name}`);
       return;
     }
+    if (action === "save-group-name") {
+      const ack = await api(`/api/groups/${selectedGroup}`, {
+        method: "PUT",
+        body: JSON.stringify({ name: $("#group-name").value }),
+      });
+      state.groups = (state.groups || []).map((item) => Number(item.group_id) === selectedGroup ? ack.group : item);
+      groupNameBaseline = ack.group.name;
+      $("#group-name").value = ack.group.name;
+      render();
+      toast(ack.message);
+      await refresh();
+      return;
+    }
     if (action === "blackout") {
-      if (!confirm("Broadcast blackout brightness 0?")) return;
+      if (!confirm("Black out all groups? You can restore their previous brightness afterward.")) return;
       const ack = await api("/api/show/blackout", { method: "POST" });
+      patternDraft = null;
       toast(ack.message, true);
+      await refresh();
+      return;
+    }
+    if (action === "restore-blackout") {
+      const ack = await api("/api/show/restore", { method: "POST" });
+      patternDraft = null;
+      toast(ack.message);
+      await refresh();
+      return;
+    }
+    if (action === "turn-off-group") {
+      const live = activePatternState();
+      if (!confirm(`Turn off ${groupLabel(selectedGroup)}?`)) return;
+      const ack = await api("/api/show/pattern", {
+        method: "POST",
+        body: JSON.stringify({
+          pattern: live.pattern,
+          brightness: 0,
+          params: live.params || {},
+          group_id: selectedGroup,
+        }),
+      });
+      patternDraft = null;
+      toast(ack.message);
       await refresh();
       return;
     }
@@ -2123,19 +2267,6 @@ async function runAction(action) {
           full_voltage: Number($("#battery-full-voltage").value || 14.4),
         }),
       });
-      toast(ack.message);
-      await refresh();
-      return;
-    }
-    if (action === "save-keepalive") {
-      if (!isKeepaliveDirty()) return;
-      const config = keepaliveSnapshotFromForm();
-      const ack = await api("/api/operations/keepalive", {
-        method: "POST",
-        body: JSON.stringify(config),
-      });
-      keepaliveBaseline = config;
-      updateKeepaliveDirtyState();
       toast(ack.message);
       await refresh();
       return;
@@ -2336,7 +2467,7 @@ document.addEventListener("click", (event) => {
   const action = patternTarget.dataset.patternAction;
   if (!id || !action) return;
   if (action === "broadcast-saved") {
-    api(`/api/patterns/${encodeURIComponent(id)}/broadcast`, { method: "POST" })
+    api(`/api/patterns/${encodeURIComponent(id)}/broadcast?group_id=${selectedGroup}`, { method: "POST" })
       .then(async (ack) => {
         toast(ack.message);
         await refresh();
@@ -2401,6 +2532,33 @@ $("#brightness").addEventListener("input", (event) => {
   if (patternDraft) patternDraft.brightness = Number(event.target.value);
   $("#brightness-value").textContent = event.target.value;
   renderPatternControls();
+});
+
+$("#pattern-group").addEventListener("change", (event) => {
+  const next = Math.max(0, Math.min(GROUP_COUNT - 1, Number(event.target.value || 0)));
+  if (next === selectedGroup) return;
+  const groupNameDirty = groupNameBaseline !== null && $("#group-name").value.trim() !== groupNameBaseline;
+  if ((isPatternDirty() || groupNameDirty) && !confirm("Discard the unsaved changes?")) {
+    event.target.value = String(selectedGroup);
+    return;
+  }
+  selectedGroup = next;
+  groupNameBaseline = null;
+  patternDraft = patternDraftFromState();
+  render();
+});
+
+$("#lantern-group").addEventListener("change", async (event) => {
+  const lantern = selectedLantern();
+  if (!lantern) return;
+  const groupId = Math.max(0, Math.min(GROUP_COUNT - 1, Number(event.target.value || 0)));
+  await assignLanternGroup(lantern.mac, groupId, event.target);
+});
+
+$("#lantern-led-count").addEventListener("change", async (event) => {
+  const lantern = selectedLantern();
+  if (!lantern) return;
+  await assignLanternLedCount(lantern.mac, ledCountSafe(event.target.value), event.target);
 });
 
 $("#pattern-picker").addEventListener("click", (event) => {
@@ -2499,10 +2657,12 @@ $("#pattern-angle").addEventListener("input", (event) => {
   input.addEventListener("change", updateSleepScheduleDirtyState);
 });
 
-["#keepalive-enabled", "#keepalive-interval", "#keepalive-pulse", "#keepalive-brightness"].forEach((selector) => {
-  const input = $(selector);
-  input.addEventListener("input", updateKeepaliveDirtyState);
-  input.addEventListener("change", updateKeepaliveDirtyState);
+$("#group-name").addEventListener("input", updateGroupNameDirtyState);
+$("#group-name").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !$('[data-action="save-group-name"]').disabled) {
+    event.preventDefault();
+    runAction("save-group-name").catch((error) => toast(error.message, true));
+  }
 });
 
 $("#map").addEventListener("wheel", (event) => {
