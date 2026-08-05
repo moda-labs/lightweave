@@ -240,8 +240,14 @@ recovery UI shows what remains.
 
 An unhealthy Pi release rolls back automatically during reconciliation. To roll
 back a healthy-but-undesired release, promote an older immutable manifest using
-the same promotion process. Only GitOps-capable releases (`v0.4.0` and newer)
-are supported rollback targets.
+the same promotion process. Only releases published from the current repository
+location (`v0.7.1` and newer) are supported rollback targets.
+
+Releases up to `v0.7.0` were published under the previous `underminedsk` owner.
+Their manifests are immutable and name that owner in every asset URL, and the
+old name is now a reserved placeholder rather than a redirect, so those assets
+no longer resolve. Do not promote a manifest older than `v0.7.1`: the Pi will
+fail to download it and reconciliation will error on every timer run.
 
 Firmware rollback is a normal manual OTA using the older promoted artifact. The
 Pi never changes lantern firmware merely because the control-plane release was
