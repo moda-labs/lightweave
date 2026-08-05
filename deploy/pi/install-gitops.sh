@@ -77,6 +77,9 @@ install -o root -g root -m 0644 \
   "$repo/deploy/pi/lightweave-control.service" \
   /etc/systemd/system/lightweave-control.service
 install -o root -g root -m 0644 \
+  "$repo/deploy/pi/lightweave-provisioner.service" \
+  /etc/systemd/system/lightweave-provisioner.service
+install -o root -g root -m 0644 \
   "$repo/deploy/pi/lightweave-gitops-recovery.service" \
   /etc/systemd/system/lightweave-gitops-recovery.service
 install -o root -g root -m 0644 \
@@ -88,6 +91,7 @@ install -o root -g root -m 0644 \
 systemctl daemon-reload
 systemd-analyze verify \
   /etc/systemd/system/lightweave-control.service \
+  /etc/systemd/system/lightweave-provisioner.service \
   /etc/systemd/system/lightweave-gitops-recovery.service \
   /etc/systemd/system/lightweave-gitops.service \
   /etc/systemd/system/lightweave-gitops.timer

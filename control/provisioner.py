@@ -25,6 +25,8 @@ from scripts.firebeetle_autoflash import (
     PortCandidate,
     approved_build,
     candidate_port_infos,
+    esptool_command,
+    extract_bundle,
     load_cached_artifact,
     process_port,
     refresh_artifact,
@@ -43,6 +45,22 @@ ACTIVE_STATES = {
     "assigning_id",
 }
 ID_RE = re.compile(r"permanent ID #(\d+)")
+
+
+def validate_station_artifact(
+    approved: tuple[dict[str, Any], Path], state_dir: Path
+) -> tuple[dict[str, Any], Path]:
+    manifest, bundle = approved
+    destination = state_dir / "preflight" / approved_build(manifest)
+    extract_bundle(bundle, destination)
+    try:
+        esptool_command(destination)
+    except RuntimeError as error:
+        raise RuntimeError(
+            "approved production serial bundle does not include a usable flashing runtime; "
+            "promote a release built with flash-plan schema 2"
+        ) from error
+    return approved
 
 
 @dataclass
@@ -126,6 +144,9 @@ class ProvisioningManager:
         id_resolver: Callable[[str, int], tuple[int, bool]] | None = None,
         artifact_loader: Callable[[Path], tuple[dict[str, Any], Path] | None] = load_cached_artifact,
         artifact_refresher: Callable[[str, Path], tuple[dict[str, Any], Path] | None] = refresh_artifact,
+        artifact_validator: Callable[
+            [tuple[dict[str, Any], Path], Path], tuple[dict[str, Any], Path]
+        ] = validate_station_artifact,
         clock: Callable[[], float] = time.time,
         poll_interval_s: float = 1.0,
         refresh_interval_s: float = 300.0,
@@ -137,6 +158,7 @@ class ProvisioningManager:
         self.id_resolver = id_resolver
         self.artifact_loader = artifact_loader
         self.artifact_refresher = artifact_refresher
+        self.artifact_validator = artifact_validator
         self.clock = clock
         self.poll_interval_s = poll_interval_s
         self.refresh_interval_s = refresh_interval_s
@@ -238,7 +260,10 @@ class ProvisioningManager:
     async def start(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self._approved = self.artifact_loader(self.state_dir / "cache")
+            cached = self.artifact_loader(self.state_dir / "cache")
+            self._approved = (
+                self.artifact_validator(cached, self.state_dir) if cached else None
+            )
         except Exception as error:
             self._artifact_error = str(error)
         await self._refresh_artifact(force=True)
@@ -264,6 +289,10 @@ class ProvisioningManager:
             refreshed = await asyncio.to_thread(
                 self.artifact_refresher, self.channel, self.state_dir / "cache"
             )
+            if refreshed is not None:
+                refreshed = await asyncio.to_thread(
+                    self.artifact_validator, refreshed, self.state_dir
+                )
             with self._lock:
                 self._approved = refreshed
                 self._artifact_error = None if refreshed else "production channel is disabled"
@@ -415,6 +444,8 @@ class ProvisioningManager:
         with self._lock:
             if self._approved is None:
                 raise RuntimeError(self._artifact_error or "approved production artifact unavailable")
+            if self.id_resolver is None:
+                raise RuntimeError("Permanent-ID authority is unavailable")
             self._active = True
             self._max_workers = max_workers
             self._factory_until = self.clock() + 15 * 60 if factory else 0.0
@@ -512,18 +543,44 @@ def _default_state_dir() -> Path:
     return Path("/var/lib/lightweave/provisioner")
 
 
+def _default_discover() -> list[PortCandidate]:
+    configured = {
+        value
+        for value in os.getenv("PROVISIONER_EXCLUDED_PORTS", "").split(os.pathsep)
+        if value
+    }
+    conductor = os.getenv("CONTROL_SERIAL_PORT", "")
+    if conductor:
+        configured.add(conductor)
+    excluded = {str(Path(value).expanduser().resolve()) for value in configured}
+    return [
+        port
+        for port in candidate_port_infos()
+        if str(Path(port.device).resolve()) not in excluded
+    ]
+
+
 def create_default_manager() -> ProvisioningManager:
     authority_url = os.getenv(
         "PROVISIONER_ID_AUTHORITY_URL",
         "http://127.0.0.1:8000/api/internal/provisioning/reserve-id",
     )
     authority_token = os.getenv("PROVISIONER_TOKEN", "")
+    if not authority_token and sys.platform == "darwin":
+        try:
+            authority_token = (
+                Path.home()
+                / "Library/Application Support/Lightweave/provisioner/token"
+            ).read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
     resolver = None
     if authority_token:
         resolver = HttpIdAuthority(authority_url, authority_token).reserve
     return ProvisioningManager(
         _default_state_dir(),
         channel=os.getenv("PROVISIONER_CHANNEL", DEFAULT_CHANNEL),
+        discover=_default_discover,
         id_resolver=resolver,
     )
 

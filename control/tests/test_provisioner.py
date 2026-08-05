@@ -11,7 +11,9 @@ from control.provisioner import (
     HttpIdAuthority,
     PortCandidate,
     ProvisioningManager,
+    _default_discover,
     create_provisioner_app,
+    validate_station_artifact,
 )
 
 
@@ -57,6 +59,7 @@ def manager_for(tmp_path: Path, discovery: Discovery, processor, *, resolver=lam
         id_resolver=resolver,
         artifact_loader=no_cache,
         artifact_refresher=approved,
+        artifact_validator=lambda artifact, _state: artifact,
         poll_interval_s=0.01,
         refresh_interval_s=3600,
     )
@@ -158,10 +161,10 @@ def test_missing_id_authority_fails_closed(tmp_path: Path) -> None:
     app = create_provisioner_app(manager)
     with TestClient(app) as client:
         wait_for(client, lambda value: len(value["jobs"]) == 1)
-        client.post("/session", json={"max_workers": 1}).raise_for_status()
-        failed = wait_for(client, lambda value: value["jobs"][0]["state"] == "failed")
+        response = client.post("/session", json={"max_workers": 1})
 
-    assert failed["jobs"][0]["error"] == "Permanent-ID authority is unavailable"
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Permanent-ID authority is unavailable"
 
 
 def test_slot_mapping_persists_without_raw_device_path(tmp_path: Path) -> None:
@@ -222,3 +225,37 @@ def test_duplicate_physical_slot_is_rejected(tmp_path: Path) -> None:
 def test_id_authority_rejects_plaintext_remote_url() -> None:
     with pytest.raises(ValueError, match="HTTPS or loopback"):
         HttpIdAuthority("http://example.com/reserve", "secret")
+
+
+def test_station_artifact_requires_usable_flash_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("control.provisioner.extract_bundle", lambda *_args: {"schema_version": 1})
+    monkeypatch.setattr(
+        "control.provisioner.esptool_command",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("missing")),
+    )
+
+    with pytest.raises(RuntimeError, match="flash-plan schema 2"):
+        validate_station_artifact((MANIFEST, tmp_path / "legacy.zip"), tmp_path)
+
+
+def test_default_discovery_excludes_configured_conductor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conductor = tmp_path / "ttyUSB0"
+    performer = tmp_path / "ttyUSB1"
+    conductor.touch()
+    performer.touch()
+    alias = tmp_path / "conductor-by-path"
+    alias.symlink_to(conductor)
+    monkeypatch.setenv("CONTROL_SERIAL_PORT", str(alias))
+    monkeypatch.setattr(
+        "control.provisioner.candidate_port_infos",
+        lambda: [
+            PortCandidate(str(conductor), "1-1.1", "wch"),
+            PortCandidate(str(performer), "1-1.2", "wch"),
+        ],
+    )
+
+    assert _default_discover() == [PortCandidate(str(performer), "1-1.2", "wch")]

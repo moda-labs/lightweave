@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import plistlib
@@ -18,7 +19,7 @@ import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -455,23 +456,64 @@ def extract_bundle(bundle: Path, destination: Path) -> dict[str, Any]:
     destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(bundle) as archive:
         names = set(archive.namelist())
-        expected = {"flash-plan.json", *EXPECTED_SEGMENTS.values()}
-        if names != expected:
-            raise ValueError("serial flash bundle members are invalid")
+        if len(names) != len(archive.namelist()):
+            raise ValueError("serial flash bundle contains duplicate members")
+        if any(
+            PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts
+            for name in names
+        ):
+            raise ValueError("serial flash bundle contains an unsafe member path")
         members = archive.infolist()
         if any(item.compress_type != zipfile.ZIP_STORED for item in members):
             raise ValueError("serial flash bundle must use stored members")
-        if sum(item.file_size for item in members) > 8 * 1024 * 1024:
+        if sum(item.file_size for item in members) > 16 * 1024 * 1024:
             raise ValueError("serial flash bundle expands beyond its size limit")
         plan = _json(archive.read("flash-plan.json"), "flash plan")
+        schema_version = plan.get("schema_version")
         if (
-            plan.get("schema_version") != 1
+            schema_version not in {1, 2}
             or plan.get("chip") != "esp32"
             or plan.get("flash_size") != "4MB"
             or plan.get("flash_mode") != "dio"
             or plan.get("flash_freq") != "40m"
         ):
             raise ValueError("flash plan settings are invalid")
+        expected = {"flash-plan.json", *EXPECTED_SEGMENTS.values()}
+        tool_members: list[dict[str, Any]] = []
+        if schema_version == 2:
+            tool = plan.get("tool")
+            if not isinstance(tool, dict) or set(tool) != {"name", "members"}:
+                raise ValueError("serial flash tool manifest is invalid")
+            raw_tool_members = tool.get("members")
+            if tool.get("name") != "esptool" or not isinstance(raw_tool_members, list):
+                raise ValueError("serial flash tool manifest is invalid")
+            tool_names: set[str] = set()
+            for item in raw_tool_members:
+                if not isinstance(item, dict) or set(item) != {"filename", "sha256", "size"}:
+                    raise ValueError("serial flash tool manifest is invalid")
+                filename = item.get("filename")
+                size = item.get("size")
+                sha256 = item.get("sha256")
+                if (
+                    not isinstance(filename, str)
+                    or filename in tool_names
+                    or (filename not in {"esptool.py", "esptool-LICENSE"} and not filename.startswith("esptool/"))
+                    or PurePosixPath(filename).is_absolute()
+                    or ".." in PurePosixPath(filename).parts
+                    or not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or size < 0
+                    or not isinstance(sha256, str)
+                    or not SHA256_RE.fullmatch(sha256)
+                ):
+                    raise ValueError("serial flash tool manifest is invalid")
+                tool_names.add(filename)
+                tool_members.append(item)
+            expected.update(tool_names)
+            if "esptool.py" not in expected or "esptool/__main__.py" not in expected:
+                raise ValueError("serial flash tool manifest is incomplete")
+        if names != expected:
+            raise ValueError("serial flash bundle members are invalid")
         segments = plan.get("segments")
         if not isinstance(segments, list) or len(segments) != len(EXPECTED_SEGMENTS):
             raise ValueError("flash plan segments are invalid")
@@ -486,6 +528,17 @@ def extract_bundle(bundle: Path, destination: Path) -> dict[str, Any]:
                 raise ValueError(f"flash segment {filename} failed integrity verification")
             (destination / filename).write_bytes(data)
             seen.add(offset)
+        for member in tool_members:
+            filename = member["filename"]
+            data = archive.read(filename)
+            if (
+                len(data) != member.get("size")
+                or hashlib.sha256(data).hexdigest() != member.get("sha256")
+            ):
+                raise ValueError(f"serial flash tool member {filename} failed integrity verification")
+            target = destination / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
     return plan
 
 
@@ -553,10 +606,15 @@ def stable_platformio_python(interpreter: Path) -> Path:
     return interpreter
 
 
-def esptool_command() -> list[str]:
+def esptool_command(directory: Path | None = None) -> list[str]:
+    bundled = directory / "esptool.py" if directory is not None else None
+    if bundled is not None and bundled.is_file():
+        return [sys.executable, str(bundled)]
+    if importlib.util.find_spec("esptool") is not None:
+        return [sys.executable, "-m", "esptool"]
     tool = Path.home() / ".platformio/packages/tool-esptoolpy/esptool.py"
     if not tool.is_file():
-        raise RuntimeError("PlatformIO esptool.py is not installed")
+        raise RuntimeError("esptool is not installed in this environment or through PlatformIO")
     return [str(stable_platformio_python(Path(sys.executable))), str(tool)]
 
 
@@ -567,22 +625,22 @@ def run_tool(arguments: list[str]) -> str:
     return result.stdout
 
 
-def probe_board(port: str) -> dict[str, str]:
-    output = run_tool(esptool_command() + ["--port", port, "flash_id"])
+def probe_board(port: str, directory: Path | None = None) -> dict[str, str]:
+    output = run_tool(esptool_command(directory) + ["--port", port, "flash_id"])
     probe = parse_probe(output)
     if not probe:
         raise RuntimeError("device is not the expected ESP32-D0WD-V3/40MHz/4MB class")
     return probe
 
 
-def erase_board(port: str) -> None:
-    base = esptool_command() + ["--chip", "esp32", "--port", port, "--baud", "115200"]
+def erase_board(port: str, directory: Path | None = None) -> None:
+    base = esptool_command(directory) + ["--chip", "esp32", "--port", port, "--baud", "115200"]
     log(f"{port}: factory/unrecognized firmware; performing one-time erase")
     run_tool(base + ["erase_flash"])
 
 
 def flash_board(port: str, plan: dict[str, Any], directory: Path) -> None:
-    base = esptool_command() + ["--chip", "esp32", "--port", port, "--baud", "115200"]
+    base = esptool_command(directory) + ["--chip", "esp32", "--port", port, "--baud", "115200"]
     arguments = base + [
         "write_flash", "-z", "--flash_mode", plan["flash_mode"],
         "--flash_freq", plan["flash_freq"], "--flash_size", plan["flash_size"],
@@ -626,9 +684,12 @@ def process_port(
         return assigned, created
 
     devices = load_device_registry(device_registry)
+    destination = work / hashlib.sha256(port.encode()).hexdigest()[:16]
+    report("preparing", "Validating production firmware bundle")
+    plan = extract_bundle(bundle, destination)
     report("probing", "Reading board identity")
     before = read_info(port)
-    probe = probe_board(port)
+    probe = probe_board(port, destination)
     if before is None:
         # A valid field node may be in daytime deep sleep and unable to answer
         # until esptool's non-destructive ROM probe resets it into a cold boot.
@@ -677,9 +738,6 @@ def process_port(
             f"{port}: starting flash of {probe['mac']} "
             f"to production build {approved_build(manifest)}"
         )
-        destination = work / probe["mac"].replace(":", "")
-        report("preparing", "Validating production firmware bundle")
-        plan = extract_bundle(bundle, destination)
         erase = should_erase(
             before,
             device_state=device_state,
@@ -690,7 +748,7 @@ def process_port(
             # error requires explicit per-MAC operator authorization.
             write_device_state(device_registry, probe["mac"], "erase_pending")
             report("erasing", "Erasing factory flash")
-            erase_board(port)
+            erase_board(port, destination)
             write_device_state(device_registry, probe["mac"], "known")
         report("flashing", f"Writing production build {approved_build(manifest)}")
         flash_board(port, plan, destination)

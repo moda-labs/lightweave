@@ -573,6 +573,9 @@ def test_initial_stop_failure_attempts_a_full_service_recovery(tmp_path: Path) -
 def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> None:
     installer = (SCRIPT.parent / "install-gitops.sh").read_text(encoding="utf-8")
     control_unit = (SCRIPT.parent / "lightweave-control.service").read_text(encoding="utf-8")
+    provisioner_unit = (SCRIPT.parent / "lightweave-provisioner.service").read_text(
+        encoding="utf-8"
+    )
     runbook = (SCRIPT.parent / "README.md").read_text(encoding="utf-8")
 
     assert "install -d -o root -g root -m 0700 /var/backups/lightweave" in installer
@@ -580,10 +583,14 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert 'mv -Tf "$repo/.venv.new" "$repo/.venv"' in installer
     assert "lightweave-gitops-recovery.service" in installer
     assert '"$repo/deploy/pi/lightweave-control.service"' in installer
+    assert '"$repo/deploy/pi/lightweave-provisioner.service"' in installer
     assert "systemctl restart lightweave-control.service" in installer
     assert 'if [ "$health_commit" != "$running_commit" ]' in installer
     assert "ReadOnlyPaths=-/var/lib/lightweave-gitops" in control_unit
     assert "ExecStart=/opt/lightweave/.venv/bin/python -m uvicorn" in control_unit
+    assert "Wants=network-online.target lightweave-provisioner.service" in control_unit
+    assert "PartOf=lightweave-control.service" in provisioner_unit
+    assert "--uds /run/lightweave-provisioner/provisioner.sock" in provisioner_unit
     emergency_upgrade = runbook.split("The commands below are retained", 1)[1].split(
         "## 13. Emergency manual rollback", 1
     )[0]
@@ -731,7 +738,10 @@ def test_systemd_orders_boot_recovery_before_control_start() -> None:
     assert "After=network-online.target lightweave-gitops-recovery.service" in control_unit
     assert "Requires=lightweave-gitops-recovery.service" in gitops_unit
     assert "After=network-online.target lightweave-gitops-recovery.service" in gitops_unit
-    assert "Before=lightweave-control.service lightweave-gitops.service" in recovery_unit
+    assert (
+        "Before=lightweave-control.service lightweave-provisioner.service "
+        "lightweave-gitops.service"
+    ) in recovery_unit
     assert "ExecStart=/usr/local/lib/lightweave/gitops_reconcile.py --recover-only" in recovery_unit
     assert "RemainAfterExit=yes" in recovery_unit
 
