@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "manifest_sha256": "3d518967e5677b5d08ff79d0225e1ab19a150d92c25416b223bb36a7d52485b8",
-  "manifest_url": "https://github.com/underminedsk/lightweave/releases/download/v0.7.0/lightweave-release.json",
+  "manifest_sha256": "f886aa96fd763213afff4eb6ec04a0f2587174294ab8a901496cb2c2e6826f36",
+  "manifest_url": "https://github.com/moda-labs/lightweave/releases/download/v0.7.1/lightweave-release.json",
   "schema_version": 1
 }
