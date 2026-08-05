@@ -107,6 +107,11 @@ Snapshot shape:
     {"group_id": 0, "config": {"pattern": "Glow", "brightness": 48, "params": {"hue": 40, "saturation": 100}}},
     {"group_id": 1, "config": {"pattern": "Sweep", "brightness": 64, "params": {"period": 8000}}}
   ],
+  "groups": [
+    {"group_id": 0, "name": "Box lanterns", "label": "Group 1 · Box lanterns"},
+    {"group_id": 1, "name": "Bikes", "label": "Group 2 · Bikes"}
+  ],
+  "blackout": {"restore_available": false},
   "power": {
     "light_sleep_check_s": 4,
     "deep_sleep_check_min": 15,
@@ -153,6 +158,10 @@ Snapshot shape:
 
 The `patterns` array contains all eight group configs. The singular `pattern`
 field remains a Group 1 compatibility view for older clients.
+The `groups` array always contains all eight fixed slots. Names are optional,
+persist in the control plane's data directory, and decorate the numbered labels
+without changing the zero-based IDs sent to the conductor. `/api/state` and
+`/api/lanterns` apply the same labels to each lantern's `group` field.
 
 Lantern status values currently used by the prototype:
 
@@ -185,11 +194,13 @@ The map renders only positioned lanterns.
   action **Locate** in the selected-lantern sheet and Node List rows.
 - `POST /api/lanterns/{mac}/assign` with `{"x":0.25,"y":0.75}`
 - `POST /api/lanterns/{mac}/group` with `{"group_id":2}` -> assign any
-  inventoried lantern to Group 3, whether or not it has coordinates. Group IDs
-  are zero-based in the API and labeled 1–8 in the UI.
+  visible lantern to Group 3, whether or not it has an ID or coordinates. The
+  conductor creates its inventory row if needed. Group IDs are zero-based in
+  the API and labeled 1–8 in the UI.
 - `POST /api/lanterns/{mac}/led-count` with `{"led_count":32}` -> set an
-  inventoried board's physical profile. Accepted values are exactly 16, 32, and
-  64; the setting works before placement and follows the board, not its position.
+  board's physical profile, creating its inventory row if needed. Accepted
+  values are exactly 16, 32, and 64; the setting works before placement and
+  follows the board, not its position.
 - `POST /api/lanterns/{mac}/forget`
 - `POST /api/lanterns/replace` with `{"old_mac":"...","new_mac":"..."}`
 - `GET /api/patterns` -> saved pattern configs.
@@ -200,6 +211,10 @@ The map renders only positioned lanterns.
 - `PUT /api/patterns/{id}` with the same body as create -> replace a saved
   pattern config.
 - `DELETE /api/patterns/{id}` -> delete a saved pattern config.
+- `GET /api/groups` -> all eight numbered group slots with optional names and
+  display labels.
+- `PUT /api/groups/{group_id}` with `{"name":"Bikes"}` -> persist an operator
+  alias. Whitespace is normalized; an empty name restores the numbered label.
 - `GET /api/patterns/{id}/preview?t=0` -> PNG preview of that saved pattern
   config on the current positioned lantern layout.
 - `GET /api/patterns/{id}/preview.json?t=0` -> per-lantern RGBW/RGB/luma
@@ -218,6 +233,8 @@ The map renders only positioned lanterns.
   -> change only Group 3. Omitting `group_id` updates all eight groups for
   backward-compatible API clients.
 - `POST /api/show/blackout`
+- `POST /api/show/restore` -> restore all eight brightness values captured by
+  the most recent blackout. Returns an error when no restore point is available.
 - `POST /api/operations/power-policy` with the runtime sleep/check policy.
 - `POST /api/operations/power-monitor` with
   `{"battery_capacity_wh":384.0,"full_voltage":14.4}` -> update the SOC

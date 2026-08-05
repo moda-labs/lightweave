@@ -1888,7 +1888,7 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       broadcastTable();
       jsonOk(cmd.id, "group changed");
     } else {
-      jsonError(cmd.id, "unknown lantern");
+      jsonError(cmd.id, "inventory full");
     }
   } else if (cmd.kind == SJ_LED_COUNT) {
     if (!isConductor()) {
@@ -1900,7 +1900,7 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       broadcastTable();
       jsonOk(cmd.id, "led count changed");
     } else {
-      jsonError(cmd.id, "unknown lantern");
+      jsonError(cmd.id, "inventory full");
     }
   } else if (cmd.kind == SJ_FORGET) {
     if (!isConductor()) {

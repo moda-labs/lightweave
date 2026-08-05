@@ -213,6 +213,19 @@ class RejectingPatternConductor(MockConductor):
         return {"ok": False, "error": "bad pattern"}
 
 
+class RejectingNodeConfigurationConductor(MockConductor):
+    def assign_group(self, mac: str, group_id: int) -> dict:
+        return {"ok": False, "error": "group rejected"}
+
+    def assign_led_count(self, mac: str, led_count: int) -> dict:
+        return {"ok": False, "error": "LED profile rejected"}
+
+
+class FailingGroupSerialConductor(MockConductor):
+    def assign_group(self, mac: str, group_id: int) -> dict:
+        raise SerialProtocolError("timeout waiting for group ack")
+
+
 class DroppingOtaChunkConductor(MockConductor):
     def __init__(self) -> None:
         super().__init__()
@@ -439,7 +452,11 @@ def test_health_endpoint_identifies_the_running_release(monkeypatch) -> None:
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "version": "0.5.1", "commit": "a" * 40}
+    assert response.json() == {
+        "ok": True,
+        "version": Path("VERSION").read_text(encoding="utf-8").strip(),
+        "commit": "a" * 40,
+    }
 
 
 def test_health_endpoint_identifies_the_started_process_when_marker_changes(
@@ -640,6 +657,7 @@ def test_pattern_update_rejected_by_conductor_is_400() -> None:
 def test_calibration_mode_toggle_restores_previous_pattern() -> None:
     conductor = MockConductor()
     conductor.update_pattern("Sweep", 72, {"period": 8000}, group_id=3)
+    conductor.update_pattern("White", 0, {}, group_id=5)
     client = TestClient(create_app(conductor))
 
     started = client.post("/api/operations/calibration-mode", json={"enabled": True})
@@ -661,6 +679,11 @@ def test_calibration_mode_toggle_restores_previous_pattern() -> None:
         "brightness": 72,
         "params": {"period": 8000},
     }
+    assert restored["patterns"][5]["config"] == {
+        "pattern": "White",
+        "brightness": 0,
+        "params": {},
+    }
 
 
 def test_group_name_round_trips_to_state_and_persists(tmp_path: Path) -> None:
@@ -669,6 +692,7 @@ def test_group_name_round_trips_to_state_and_persists(tmp_path: Path) -> None:
 
     response = client.put("/api/groups/0", json={"name": "  Box   lanterns  "})
     state = client.get("/api/state").json()
+    lanterns = client.get("/api/lanterns").json()
 
     assert response.status_code == 200
     assert response.json()["group"] == {
@@ -678,6 +702,7 @@ def test_group_name_round_trips_to_state_and_persists(tmp_path: Path) -> None:
     }
     assert state["groups"][0] == response.json()["group"]
     assert state["lanterns"][0]["group"] == "Group 1 · Box lanterns"
+    assert lanterns[0]["group"] == "Group 1 · Box lanterns"
     assert GroupStore(tmp_path).list()[0] == response.json()["group"]
 
 
@@ -1217,6 +1242,29 @@ def test_pattern_library_broadcast_updates_live_pattern(tmp_path) -> None:
     assert state["pattern"]["pattern"] == "Sweep"
     assert state["pattern"]["brightness"] == 64
     assert state["pattern"]["params"] == {"period": 8000, "spatial": 300}
+
+
+def test_pattern_library_broadcast_can_target_one_group(tmp_path) -> None:
+    client = TestClient(create_app(MockConductor(), pattern_store=PatternStore(tmp_path)))
+    created = client.post(
+        "/api/patterns",
+        json={
+            "name": "Group Sweep",
+            "pattern": "Sweep",
+            "brightness": 64,
+            "params": {"period": 8000, "spatial": 300},
+        },
+    )
+    pattern_id = created.json()["pattern"]["id"]
+
+    response = client.post(
+        f"/api/patterns/{pattern_id}/broadcast", params={"group_id": 2}
+    )
+    patterns = client.get("/api/state").json()["patterns"]
+
+    assert response.status_code == 200
+    assert patterns[2]["config"]["pattern"] == "Sweep"
+    assert patterns[0]["config"]["pattern"] == "Glow"
 
 
 def test_pattern_library_broadcast_unknown_is_404(tmp_path) -> None:
@@ -2310,6 +2358,35 @@ def test_led_count_endpoint_accepts_supported_profiles_for_unpositioned_lantern(
     assert rejected.status_code == 422
     assert lantern["position"] == "Missing"
     assert lantern["led_count"] == 64
+
+
+def test_group_and_led_count_endpoints_surface_conductor_rejections() -> None:
+    conductor = RejectingNodeConfigurationConductor()
+    client = TestClient(create_app(conductor))
+    mac = conductor._lanterns[0].mac
+
+    grouped = client.post(f"/api/lanterns/{mac}/group", json={"group_id": 2})
+    configured = client.post(
+        f"/api/lanterns/{mac}/led-count", json={"led_count": 32}
+    )
+
+    assert grouped.status_code == 400
+    assert grouped.json()["detail"] == "group rejected"
+    assert configured.status_code == 400
+    assert configured.json()["detail"] == "LED profile rejected"
+
+
+def test_group_endpoint_surfaces_serial_failures() -> None:
+    conductor = FailingGroupSerialConductor()
+    client = TestClient(create_app(conductor))
+
+    response = client.post(
+        f"/api/lanterns/{conductor._lanterns[0].mac}/group",
+        json={"group_id": 2},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "timeout waiting for group ack"
 
 
 def test_calibration_apply_proposal_saves_assignments_and_skips_uncertain() -> None:

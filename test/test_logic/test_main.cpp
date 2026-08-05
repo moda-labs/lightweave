@@ -1019,8 +1019,8 @@ void test_table_group_assignment_preserves_position_and_rejects_bad_ids() {
   uint8_t a[6], spare[6];
   macN(a, 1);
   macN(spare, 2);
-  TEST_ASSERT_FALSE(tableSetGroup(t, spare, 5));
-  TEST_ASSERT_EQUAL_INT(0, tableEnsure(t, spare));
+  TEST_ASSERT_TRUE(tableSetGroup(t, spare, 5));
+  TEST_ASSERT_EQUAL_INT(0, tableFind(t, spare));
   TEST_ASSERT_TRUE(tableSetGroup(t, spare, 5));
   TEST_ASSERT_TRUE(tableSetLedCount(t, spare, 32));
   TEST_ASSERT_FALSE(tableSetLedCount(t, spare, 24));

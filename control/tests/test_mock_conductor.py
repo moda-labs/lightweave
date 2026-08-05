@@ -218,6 +218,17 @@ def test_groups_keep_independent_patterns_and_membership() -> None:
     assert snapshot["patterns"][0]["config"]["pattern"] == "Glow"
 
 
+def test_pattern_update_without_group_targets_every_group() -> None:
+    conductor = MockConductor()
+
+    ack = conductor.update_pattern("White", 36, {})
+    patterns = conductor.snapshot()["patterns"]
+
+    assert ack["ok"] is True
+    expected = {"pattern": "White", "brightness": 36, "params": {}}
+    assert all(item["config"] == expected for item in patterns)
+
+
 def test_unpositioned_lantern_keeps_group_before_and_after_placement_changes() -> None:
     conductor = MockConductor()
     mac = "8C:94:DF:57:7F:14"

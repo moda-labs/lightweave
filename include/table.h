@@ -185,7 +185,7 @@ inline bool tableSetWithGroup(LayoutTable& t, const uint8_t mac[6], float x,
 inline bool tableSetGroup(LayoutTable& t, const uint8_t mac[6],
                           uint8_t group_id) {
   if (group_id >= GROUP_COUNT) return false;
-  int i = tableFind(t, mac);
+  int i = tableEnsure(t, mac);
   if (i < 0) return false;
   t.entries[i].group_id = group_id;
   return true;
@@ -196,7 +196,7 @@ inline bool tableSetGroup(LayoutTable& t, const uint8_t mac[6],
 inline bool tableSetLedCount(LayoutTable& t, const uint8_t mac[6],
                              uint8_t led_count) {
   if (!ledCountValid(led_count)) return false;
-  int i = tableFind(t, mac);
+  int i = tableEnsure(t, mac);
   if (i < 0) return false;
   t.entries[i].led_count = led_count;
   return true;

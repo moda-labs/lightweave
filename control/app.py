@@ -644,13 +644,25 @@ def create_app(
             "samples": samples,
         }
 
+    def enrich_lantern_groups(
+        lanterns: list[dict[str, Any]], groups: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        labels = {item["group_id"]: item["label"] for item in groups}
+        enriched = []
+        for lantern in lanterns:
+            group_id = int(lantern.get("group_id") or 0)
+            enriched.append(
+                {
+                    **lantern,
+                    "group": labels.get(group_id, f"Group {group_id + 1}"),
+                }
+            )
+        return enriched
+
     def enrich_state(state: dict[str, Any]) -> dict[str, Any]:
         groups = app.state.group_store.list()
         state["groups"] = groups
-        labels = {item["group_id"]: item["label"] for item in groups}
-        for lantern in state.get("lanterns") or []:
-            group_id = int(lantern.get("group_id") or 0)
-            lantern["group"] = labels.get(group_id, f"Group {group_id + 1}")
+        state["lanterns"] = enrich_lantern_groups(state.get("lanterns") or [], groups)
         state["power_monitor"] = power_monitor_summary(state)
         state["recovery"] = recovery_summary(state)
         return state
@@ -765,7 +777,9 @@ def create_app(
                             {
                                 "group_id": group_id,
                                 "pattern": str(config.get("pattern") or "Glow"),
-                                "brightness": int(config.get("brightness") or 48),
+                                "brightness": int(
+                                    48 if config.get("brightness") is None else config["brightness"]
+                                ),
                                 "params": dict(config.get("params") or {}),
                             }
                         )
@@ -774,7 +788,9 @@ def create_app(
                     else:
                         previous = {
                             "pattern": str(current.get("pattern") or "Glow"),
-                            "brightness": int(current.get("brightness") or 48),
+                            "brightness": int(
+                                48 if current.get("brightness") is None else current["brightness"]
+                            ),
                             "params": dict(current.get("params") or {}),
                         }
                 plan = calibration_mode_plan(state)
@@ -1165,9 +1181,11 @@ def create_app(
     @app.get("/api/lanterns")
     async def get_lanterns() -> list[dict[str, Any]]:
         try:
-            return await conductor_call("lanterns")
+            lanterns = await conductor_call("lanterns")
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+        groups = await group_store_call("list")
+        return enrich_lantern_groups(lanterns, groups)
 
     @app.get("/api/network/wifi")
     async def get_wifi_status() -> dict[str, Any]:
