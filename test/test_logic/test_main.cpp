@@ -815,6 +815,7 @@ void test_ota_chunk_decision_accepts_repeated_written_chunks() {
   TEST_ASSERT_EQUAL_UINT8(8, OTA_RADIO_SEND_COPIES);
   TEST_ASSERT_TRUE(OTA_RADIO_SEND_MAX_ATTEMPTS >= OTA_RADIO_SEND_COPIES);
   TEST_ASSERT_TRUE(OTA_RADIO_SEND_DELAY_MS >= 4);
+  TEST_ASSERT_TRUE(OTA_RADIO_REPAIR_MAX_ATTEMPTS >= OTA_RADIO_REPAIR_COPIES);
 
   TEST_ASSERT_EQUAL_UINT8(OTA_CHUNK_ACCEPT,
                           otaChunkDecision(0, 1000, 0, 200));
@@ -873,6 +874,35 @@ void test_ota_status_complete_requires_matching_fresh_complete() {
   TEST_ASSERT_FALSE(otaStatusCompleteForMac(t, a, 1000, 43, 1000, 200));
   TEST_ASSERT_FALSE(otaStatusCompleteForMac(t, b, 1000, 42, 1000, 200));
   TEST_ASSERT_FALSE(otaStatusCompleteForMac(t, a, 1000, 42, 1200, 200));
+}
+
+void test_ota_status_slots_spread_inventory_ids_and_hash_unknown_nodes() {
+  const uint8_t a[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t b[6] = {1, 2, 3, 4, 5, 7};
+
+  TEST_ASSERT_EQUAL_UINT16(0, otaStatusSlot(1, a));
+  TEST_ASSERT_EQUAL_UINT16(52, otaStatusSlot(53, a));
+  TEST_ASSERT_NOT_EQUAL(otaStatusSlot(0, a), otaStatusSlot(0, b));
+  TEST_ASSERT_EQUAL_UINT32(
+      (uint32_t)otaStatusSlot(53, a) * OTA_STATUS_SLOT_MS,
+      otaStatusDelayMs(53, a));
+}
+
+void test_ota_staged_and_checkpoint_status_require_exact_crc_and_freshness() {
+  OtaNodeStatusEntry staged = {{1, 2, 3, 4, 5, 6}, OTA_PHASE_STAGED,
+                               OTA_ERR_NONE, 1000, 42, 900};
+  TEST_ASSERT_TRUE(otaStatusEntryStaged(staged, 1000, 42, 1000, 200));
+  TEST_ASSERT_TRUE(otaStatusEntryAtCheckpoint(staged, 1000, 42, 1000, 200));
+  TEST_ASSERT_FALSE(otaStatusEntryStaged(staged, 1000, 43, 1000, 200));
+  TEST_ASSERT_FALSE(otaStatusEntryStaged(staged, 1000, 42, 1200, 200));
+
+  staged.phase = OTA_PHASE_ACTIVATING;
+  TEST_ASSERT_TRUE(otaStatusEntryStaged(staged, 1000, 42, 1000, 200));
+  staged.phase = OTA_PHASE_REPAIRING;
+  TEST_ASSERT_FALSE(otaStatusEntryStaged(staged, 1000, 42, 1000, 200));
+  TEST_ASSERT_EQUAL_STRING("repairing", otaPhaseName(OTA_PHASE_REPAIRING));
+  TEST_ASSERT_EQUAL_STRING("staged", otaPhaseName(OTA_PHASE_STAGED));
+  TEST_ASSERT_EQUAL_STRING("activating", otaPhaseName(OTA_PHASE_ACTIVATING));
 }
 
 void test_ota_cohort_freezes_online_targets_and_ignores_offline_rows() {
@@ -2052,6 +2082,31 @@ void test_serial_json_ota_begin_chunk_and_end_parse() {
 
   TEST_ASSERT_TRUE(serialJsonParse("{\"id\":16,\"cmd\":\"ota_progress\"}", cmd, error));
   TEST_ASSERT_EQUAL_INT(SJ_OTA_PROGRESS, cmd.kind);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":17,\"cmd\":\"ota_repair\",\"mac\":\"01:02:03:04:05:06\","
+      "\"offset\":128,\"data\":\"e90010ff\"}", cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_REPAIR, cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(128, cmd.ota_offset);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":18,\"cmd\":\"ota_restart\",\"mac\":\"01:02:03:04:05:06\"}",
+      cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_RESTART, cmd.kind);
+
+  TEST_ASSERT_TRUE(serialJsonParse("{\"id\":19,\"cmd\":\"ota_probe\"}", cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_PROBE, cmd.kind);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":20,\"cmd\":\"ota_activate\",\"mac\":\"01:02:03:04:05:06\"}",
+      cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_ACTIVATE, cmd.kind);
+  TEST_ASSERT_FALSE(cmd.ota_self);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":21,\"cmd\":\"ota_activate\",\"conductor\":true}", cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_ACTIVATE, cmd.kind);
+  TEST_ASSERT_TRUE(cmd.ota_self);
 }
 
 void test_serial_json_rejects_retired_keepalive_command() {
@@ -2422,6 +2477,8 @@ int main(int, char**) {
   RUN_TEST(test_ota_expected_chunk_len_uses_full_chunks_until_tail);
   RUN_TEST(test_ota_status_table_upserts_by_mac);
   RUN_TEST(test_ota_status_complete_requires_matching_fresh_complete);
+  RUN_TEST(test_ota_status_slots_spread_inventory_ids_and_hash_unknown_nodes);
+  RUN_TEST(test_ota_staged_and_checkpoint_status_require_exact_crc_and_freshness);
   RUN_TEST(test_ota_cohort_freezes_online_targets_and_ignores_offline_rows);
   RUN_TEST(test_ota_cohort_requires_every_frozen_target_to_complete);
   RUN_TEST(test_ota_online_freshness_has_explicit_boundary);

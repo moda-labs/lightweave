@@ -59,16 +59,17 @@ def test_ota_readiness_updates_online_performers_and_defers_missing_rows() -> No
     conductor = MockConductor()
 
     idle = conductor.snapshot()["ota"]
-    assert idle["mode"] == "idle"
-    assert idle["ready"] is False
-    assert "not in maintenance mode" in idle["blocked"]
+    assert idle["mode"] == "ready"
+    assert idle["ready"] is True
+    assert idle["ready_count"] == 9
+    assert idle["blocked"] == []
 
     conductor.set_ota_mode(True)
     missing = conductor.snapshot()["ota"]
-    assert missing["mode"] == "maintenance"
+    assert missing["mode"] == "updating"
     assert missing["ready"] is True
-    assert missing["ready_count"] == 8
-    assert missing["deferred"] == 1
+    assert missing["ready_count"] == 9
+    assert missing["deferred"] == 0
     assert missing["blocked"] == []
     assert conductor.snapshot()["recovery"]["status"] == "missing_nodes"
 
@@ -94,11 +95,10 @@ def test_ota_readiness_updates_online_performers_and_defers_missing_rows() -> No
     assert recovery_ready["recovery"]["status"] == "mixed_firmware"
 
 
-def test_ota_readiness_blocks_when_no_placed_performer_is_online() -> None:
+def test_ota_readiness_blocks_when_no_performer_is_online() -> None:
     conductor = MockConductor()
     for lantern in conductor._lanterns:
-        if lantern.x is not None and lantern.y is not None:
-            lantern.status = "missing"
+        lantern.status = "missing"
 
     conductor.set_ota_mode(True)
     ota = conductor.snapshot()["ota"]
@@ -106,7 +106,7 @@ def test_ota_readiness_blocks_when_no_placed_performer_is_online() -> None:
     assert ota["ready"] is False
     assert ota["ready_count"] == 0
     assert ota["deferred"] == ota["expected"]
-    assert ota["blocked"] == ["no placed lanterns online"]
+    assert ota["blocked"] == ["no performers online"]
 
 
 def test_recovery_summary_reports_failed_ota_node() -> None:

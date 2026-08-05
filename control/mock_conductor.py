@@ -419,18 +419,18 @@ class MockConductor:
 
     def ota_begin(self, size: int, crc32: int) -> dict[str, Any]:
         if self.ota_started_at is None:
-            return {"ok": False, "error": "ota maintenance mode is not active"}
+            self.ota_started_at = _now()
         self._ota_write = bytearray()
         self._ota_expected_size = size
         self._ota_expected_crc32 = crc32
         self._ota_nodes = {
             item.mac: {"mac": item.mac, "phase": "begin", "error": "none", "offset": 0, "crc32": 0, "last_seen_s": 0}
             for item in self._lanterns
-            if item.status == "alive" and item.x is not None and item.y is not None
+            if item.status == "alive"
         }
         if not self._ota_nodes:
             self._ota_write = None
-            return {"ok": False, "error": "no placed lanterns online"}
+            return {"ok": False, "error": "no performers online"}
         return {
             "ok": True,
             "message": "ota write started",
@@ -468,10 +468,48 @@ class MockConductor:
             "written": len(self._ota_write or b""),
             "crc32": zlib.crc32(self._ota_write or b"") & 0xFFFFFFFF,
             "nodes": list(self._ota_nodes.values()),
+            "staged": self._ota_write is None and self.ota_installed_crc32 is not None,
+            "targets": list(self._ota_nodes),
         }
+
+    def ota_repair(self, mac: str, offset: int, data: bytes) -> dict[str, Any]:
+        node = self._ota_nodes.get(mac)
+        if node is None:
+            return {"ok": False, "error": "ota repair target is not active"}
+        current = int(node.get("offset") or 0)
+        if offset < current and offset + len(data) <= current:
+            return {"ok": True, "message": "ota repair chunk already written"}
+        if offset != current:
+            return {"ok": False, "error": "ota repair range is invalid"}
+        prefix = bytes(self._ota_write or b"")[: offset + len(data)]
+        node.update({
+            "phase": "writing",
+            "error": "none",
+            "offset": offset + len(data),
+            "crc32": zlib.crc32(prefix) & 0xFFFFFFFF,
+            "last_seen_s": 0,
+        })
+        return {"ok": True, "message": "ota repair chunk sent"}
+
+    def ota_restart(self, mac: str) -> dict[str, Any]:
+        node = self._ota_nodes.get(mac)
+        if node is None:
+            return {"ok": False, "error": "ota restart target is not active"}
+        node.update({"phase": "begin", "error": "none", "offset": 0, "crc32": 0})
+        return {"ok": True, "message": "ota performer restarted"}
+
+    def ota_probe(self) -> dict[str, Any]:
+        return {"ok": True, "message": "ota status requested", "settle_s": 0}
 
     def ota_end(self) -> dict[str, Any]:
         if self._ota_write is None:
+            if self.ota_installed_crc32 == self._ota_expected_crc32 and self._ota_expected_size > 0:
+                return {
+                    "ok": True,
+                    "message": "ota image already staged",
+                    "staged": True,
+                    "nodes": list(self._ota_nodes.values()),
+                }
             return {"ok": False, "error": "ota write is not active"}
         if len(self._ota_write) != self._ota_expected_size:
             self._ota_write = None
@@ -485,20 +523,38 @@ class MockConductor:
             return {"ok": False, "error": "ota crc mismatch"}
         self.ota_installed_crc32 = self._ota_expected_crc32
         for node in self._ota_nodes.values():
+            if int(node.get("offset") or 0) != self._ota_expected_size:
+                node.update({"phase": "repairing", "error": "image incomplete"})
+                continue
             node.update({
-                "phase": "complete",
+                "phase": "staged",
                 "error": "none",
                 "offset": self._ota_expected_size,
                 "crc32": self._ota_expected_crc32,
                 "last_seen_s": 0,
             })
         self._ota_write = None
-        self._event("ota install complete")
+        self._event("ota image staged")
         return {
             "ok": True,
-            "message": "ota install complete; rebooting",
+            "message": "ota image staged",
+            "staged": True,
             "nodes": list(self._ota_nodes.values()),
         }
+
+    def ota_activate(self, mac: str | None = None) -> dict[str, Any]:
+        if mac is None:
+            self._event("conductor firmware activated")
+            return {"ok": True, "message": "activating conductor firmware"}
+        node = self._ota_nodes.get(mac)
+        if node is None or node.get("phase") not in {"staged", "activating", "complete"}:
+            return {"ok": False, "error": "performer firmware is not staged"}
+        node.update({"phase": "complete", "error": "none", "last_seen_s": 0})
+        lantern = self._find(mac)
+        if lantern is not None:
+            lantern.firmware = deepcopy(FIELD_FIRMWARE)
+            lantern.attention = "None"
+        return {"ok": True, "message": "performer activation sent"}
 
     def _find(self, mac: str) -> Lantern | None:
         normalized = mac.upper()
@@ -541,25 +597,20 @@ class MockConductor:
     ) -> dict[str, Any]:
         if self.ota_started_at is not None and now - self.ota_started_at >= OTA_WINDOW_S:
             self.ota_started_at = None
-        positioned = [item for item in lanterns if item["position"] == "Set" and item["status"] == "alive"]
+        online = [item for item in lanterns if item["status"] == "alive"]
         firmware_summary = firmware_summary or self._firmware_summary(lanterns, table_rows)
         active = self.ota_started_at is not None
-        deferred = max(0, table_rows - len(positioned))
+        deferred = max(0, table_rows - len(online))
         blocked: list[str] = []
-        if not active:
-            blocked.append("not in maintenance mode")
-        if not positioned:
-            blocked.append("no placed lanterns" if table_rows == 0 else "no placed lanterns online")
-        firmware_recovery_ready = active and bool(positioned)
-        if not firmware_summary["consistent"] and not firmware_recovery_ready:
-            blocked.append("firmware mismatch")
-        ready = active and bool(positioned)
+        if not online:
+            blocked.append("no registered performers" if table_rows == 0 else "no performers online")
+        ready = bool(online)
         timeout_s = max(0, int(OTA_WINDOW_S - (now - self.ota_started_at))) if active else 0
         return {
-            "mode": "maintenance" if active else "idle",
+            "mode": "updating" if active else "ready",
             "enabled": active,
             "ready": ready,
-            "ready_count": len(positioned),
+            "ready_count": len(online),
             "expected": table_rows,
             "missing": deferred,
             "deferred": deferred,

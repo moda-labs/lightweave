@@ -54,6 +54,10 @@ class ConductorAdapter(Protocol):
     def ota_chunk(self, offset: int, data: bytes) -> dict[str, Any]: ...
     def ota_end(self) -> dict[str, Any]: ...
     def ota_progress(self) -> dict[str, Any]: ...
+    def ota_repair(self, mac: str, offset: int, data: bytes) -> dict[str, Any]: ...
+    def ota_restart(self, mac: str) -> dict[str, Any]: ...
+    def ota_probe(self) -> dict[str, Any]: ...
+    def ota_activate(self, mac: str | None = None) -> dict[str, Any]: ...
 
 
 class JsonLineTransport(Protocol):
@@ -148,6 +152,34 @@ class JsonLineSerialConductor:
 
     def ota_progress(self) -> dict[str, Any]:
         return self._request("ota_progress")
+
+    def ota_repair(self, mac: str, offset: int, data: bytes) -> dict[str, Any]:
+        return self._request(
+            "ota_repair",
+            _timeout_s=max(self.timeout_s, OTA_CHUNK_TIMEOUT_S),
+            mac=mac,
+            offset=offset,
+            data=data.hex(),
+        )
+
+    def ota_restart(self, mac: str) -> dict[str, Any]:
+        return self._request("ota_restart", mac=mac)
+
+    def ota_probe(self) -> dict[str, Any]:
+        return self._request("ota_probe", _timeout_s=max(self.timeout_s, OTA_CHUNK_TIMEOUT_S))
+
+    def ota_activate(self, mac: str | None = None) -> dict[str, Any]:
+        if mac is None:
+            return self._request(
+                "ota_activate",
+                _timeout_s=max(self.timeout_s, OTA_FINALIZE_TIMEOUT_S),
+                conductor=True,
+            )
+        return self._request(
+            "ota_activate",
+            _timeout_s=max(self.timeout_s, OTA_CHUNK_TIMEOUT_S),
+            mac=mac,
+        )
 
     def _request(self, command: str, _timeout_s: float | None = None, **payload: Any) -> dict[str, Any]:
         with self._lock:

@@ -1113,7 +1113,7 @@ function effectiveRecovery() {
       status: "ota_failed",
       ready: false,
       title: "Firmware update needs recovery",
-      action: "Exit maintenance mode, enter it again, wait for readiness, then rerun the same staged firmware. Power-cycle any listed lantern that does not check back in.",
+      action: "Start the same staged firmware again. The update resumes from the verified image prefix; power-cycle only a performer that never checks back in.",
       missing: [],
       mismatched: [],
       failed_ota: failed.length
@@ -1129,21 +1129,6 @@ function effectiveRecovery() {
   return state?.recovery || {};
 }
 
-function setOtaControlDisabled(button, installing) {
-  if (!button) return;
-  if (installing) {
-    if (button.dataset.otaWasDisabled === undefined) {
-      button.dataset.otaWasDisabled = String(button.disabled);
-    }
-    button.disabled = true;
-    return;
-  }
-  if (button.dataset.otaWasDisabled !== undefined) {
-    button.disabled = button.dataset.otaWasDisabled === "true";
-    delete button.dataset.otaWasDisabled;
-  }
-}
-
 function renderOta() {
   const ota = state?.ota || {};
   const active = Boolean(ota.enabled);
@@ -1152,57 +1137,28 @@ function renderOta() {
   const expected = Number(ota.expected ?? state?.summary?.total ?? 0);
   const readyCount = Number(ota.ready_count ?? 0);
   const deferred = Number(ota.deferred ?? ota.missing ?? Math.max(0, expected - readyCount));
-  const timeout = Number(ota.timeout_s ?? 0);
   const blockers = Array.isArray(ota.blocked) ? ota.blocked : [];
-  $("#ota-mode").textContent = active ? "maintenance" : "idle";
+  $("#ota-mode").textContent = installing ? "updating" : "field live";
   $("#ota-mode").className = `chip ${active ? "sync" : ""}`;
   $("#ota-readiness").textContent = `${readyCount} online · ${deferred} deferred`;
   $("#ota-readiness").className = `ops-value ${ready ? "ok" : "warn"}`;
-  $("#ota-timeout").textContent = active ? `${Math.max(0, Math.floor(timeout / 60))}m ${timeout % 60}s` : "closed";
-  $("#ota-timeout").className = `ops-value ${active ? "ok" : ""}`;
+  $("#ota-timeout").textContent = "Until verified";
+  $("#ota-timeout").className = "ops-value ok";
   $("#ota-blockers").textContent = blockers.length
     ? `Blocked: ${blockers.join(", ")}.`
     : deferred > 0
-      ? "Ready. Offline lanterns will stay deferred for a later maintenance run."
-      : "Ready for the next firmware upload step.";
+      ? "Ready. The show stays live; offline performers remain deferred until a later run."
+      : "Ready. The show stays live while chunks are broadcast, repaired, and verified.";
   $("#ota-artifact").innerHTML = otaArtifact
     ? `Staged ${escapeHtml(otaArtifact.filename)} · ${formatBytes(otaArtifact.size)} · ${otaArtifact.chunks} chunks · sha256 <span class="mono">${escapeHtml(shortHash(otaArtifact.sha256))}</span>`
     : "No firmware staged.";
   renderOtaProgress();
   renderOtaNodes();
-  const serialActions = [
-    "identify", "move", "replace", "forget", "broadcast", "turn-off-group",
-    "blackout", "restore-blackout",
-    "save-power-policy", "sleep-field", "wake-field", "follow-schedule",
-    "save-power-monitor",
-    "enter-ota", "exit-ota", "stage-ota-artifact", "install-ota",
-    "toggle-calibration-mode", "upload-calibration-frames",
-    "save-calibration-proposal",
-  ];
-  serialActions.forEach((action) => {
-    setOtaControlDisabled($(`[data-action="${action}"]`), installing);
-  });
-  $$("[data-pattern]").forEach((button) => {
-    setOtaControlDisabled(button, installing);
-  });
-  $$('[data-pattern-action="broadcast-saved"], [data-power-sync]').forEach((button) => {
-    setOtaControlDisabled(button, installing);
-  });
-  setOtaControlDisabled($("#lantern-group"), installing);
-  setOtaControlDisabled($("#lantern-led-count"), installing);
-  $$("#lantern-rows [data-group-mac]").forEach((select) => {
-    setOtaControlDisabled(select, installing);
-  });
-  $$("#lantern-rows [data-led-mac]").forEach((select) => {
-    setOtaControlDisabled(select, installing);
-  });
-  if (!installing) {
-    const fileInput = $("#ota-file");
-    $('[data-action="stage-ota-artifact"]').disabled = !fileInput?.files?.length;
-    $('[data-action="enter-ota"]').disabled = active;
-    $('[data-action="install-ota"]').disabled = !otaReadyForInstall() || !otaArtifact;
-    $('[data-action="exit-ota"]').disabled = !active;
-  }
+  const fileInput = $("#ota-file");
+  fileInput.disabled = installing;
+  $('[data-action="stage-ota-artifact"]').disabled = installing || !fileInput?.files?.length;
+  $('[data-action="install-ota"]').disabled = installing || !otaReadyForInstall() || !otaArtifact;
+  $('[data-action="pause-ota"]').hidden = !installing;
 }
 
 function otaReadyForInstall() {
@@ -1234,11 +1190,23 @@ function renderOtaProgress() {
   const bytesSent = Number(otaInstall?.bytes_sent || 0);
   const size = Number(otaInstall?.size || 0);
   const percent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 0;
+  const phase = String(otaInstall?.phase || "starting");
+  const phaseLabels = {
+    starting: "Preparing firmware update",
+    waiting: "Retrying conductor connection",
+    broadcasting: "Broadcasting firmware while the field stays live",
+    repairing: "Repairing missed chunks",
+    staging: "Verifying staged images",
+    staged: "Firmware staged on performers",
+    activating: "Restarting performers one at a time",
+    "activating-conductor": "Restarting the conductor",
+    paused: "Firmware update paused",
+  };
   const label = error
     ? `Install failed: ${error}`
     : complete
       ? `Install complete for ${targetCount || "online"} performer${targetCount === 1 ? "" : "s"}; ${deferredCount} deferred`
-      : `Installing ${otaInstall?.filename || "firmware"}`;
+      : phaseLabels[phase] || `Installing ${otaInstall?.filename || "firmware"}`;
   $("#ota-progress-label").textContent = label;
   $("#ota-progress-count").textContent = total > 0
     ? `${sent} / ${total} chunks`
@@ -1247,8 +1215,19 @@ function renderOtaProgress() {
   const eta = Number(otaInstall?.eta_s || 0);
   const rate = Number(otaInstall?.bytes_per_s || 0);
   const rateLabel = rate > 0 ? `${formatBytes(rate)}/s` : "--";
+  const repairChunks = Number(otaInstall?.repair_chunks || 0);
+  const activated = Array.isArray(otaInstall?.activated_macs) ? otaInstall.activated_macs.length : 0;
+  const staged = Array.isArray(otaInstall?.staged_macs) ? otaInstall.staged_macs.length : 0;
+  const activeMac = otaInstall?.active_mac;
+  const activity = phase === "repairing"
+    ? `${repairChunks} repair chunks sent`
+    : phase === "activating"
+      ? `${activated} / ${targetCount} restarted${activeMac ? ` · ${activeMac}` : ""}`
+      : phase === "staging" || phase === "staged"
+        ? `${staged} / ${targetCount} verified`
+        : `ETA ${formatDuration(eta)} · ${rateLabel}`;
   $("#ota-progress-meta").textContent = running
-    ? `Elapsed ${formatDuration(elapsed)} · ETA ${formatDuration(eta)} · ${rateLabel}`
+    ? `Elapsed ${formatDuration(elapsed)} · ${activity}`
     : complete
       ? `Completed in ${formatDuration(elapsed)} · average ${rateLabel}`
       : error
@@ -2414,7 +2393,7 @@ async function runAction(action) {
     }
     if (action === "install-ota") {
       if (!otaArtifact || !otaReadyForInstall()) return;
-      if (!confirm("Install staged firmware across the field? Boards will reboot.")) return;
+      if (!confirm("Update every online performer? The field stays live; each performer will briefly restart only after its firmware is verified.")) return;
       otaInstall = {
         running: true,
         complete: false,
@@ -2433,6 +2412,13 @@ async function runAction(action) {
       if (otaInstall.error) throw new Error(otaInstall.error);
       toast("OTA install complete");
       await refresh();
+      return;
+    }
+    if (action === "pause-ota") {
+      const ack = await api("/api/operations/ota-install", { method: "DELETE" });
+      otaInstall = ack.install;
+      renderOta();
+      toast(ack.message);
       return;
     }
     if (action === "upload-calibration-frames") {

@@ -198,6 +198,33 @@ def test_ota_write_commands_map_to_json() -> None:
     assert json.loads(transport.writes[3]) == {"id": 4, "cmd": "ota_end"}
 
 
+def test_ota_repair_probe_restart_and_activation_commands_map_to_json() -> None:
+    transport = FakeTransport([
+        json.dumps({"id": 1, "ok": True}),
+        json.dumps({"id": 2, "ok": True}),
+        json.dumps({"id": 3, "ok": True}),
+        json.dumps({"id": 4, "ok": True}),
+        json.dumps({"id": 5, "ok": True}),
+    ])
+    conductor = JsonLineSerialConductor(transport)
+    mac = "01:02:03:04:05:06"
+
+    conductor.ota_repair(mac, 128, b"\xe9\x00")
+    conductor.ota_restart(mac)
+    conductor.ota_probe()
+    conductor.ota_activate(mac)
+    conductor.ota_activate()
+
+    assert json.loads(transport.writes[0]) == {
+        "id": 1, "cmd": "ota_repair", "mac": mac,
+        "offset": 128, "data": "e900",
+    }
+    assert json.loads(transport.writes[1]) == {"id": 2, "cmd": "ota_restart", "mac": mac}
+    assert json.loads(transport.writes[2]) == {"id": 3, "cmd": "ota_probe"}
+    assert json.loads(transport.writes[3]) == {"id": 4, "cmd": "ota_activate", "mac": mac}
+    assert json.loads(transport.writes[4]) == {"id": 5, "cmd": "ota_activate", "conductor": True}
+
+
 def test_error_ack_returns_adapter_error() -> None:
     transport = FakeTransport([
         json.dumps({

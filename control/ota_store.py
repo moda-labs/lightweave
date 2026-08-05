@@ -116,3 +116,43 @@ class OtaArtifactStore:
             )
         except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
             return None
+
+
+class OtaInstallStore:
+    """Durable OTA job state, separate from the checksum-pinned artifact."""
+
+    def __init__(self, root: Path | str = ".control_ota") -> None:
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.path = self.root / "install.json"
+
+    def load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"running": False, "complete": False, "error": None}
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"running": False, "complete": False, "error": None}
+        return value if isinstance(value, dict) else {
+            "running": False, "complete": False, "error": None,
+        }
+
+    def save(self, state: dict[str, Any]) -> None:
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        tmp.replace(self.path)
+
+
+class PersistentOtaInstall(dict[str, Any]):
+    def __init__(self, store: OtaInstallStore, initial: dict[str, Any]) -> None:
+        self.store = store
+        super().__init__(initial)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        super().update(*args, **kwargs)
+        self.store.save(dict(self))
+
+    def reset(self, value: dict[str, Any]) -> None:
+        super().clear()
+        super().update(value)
+        self.store.save(dict(self))

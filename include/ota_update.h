@@ -11,6 +11,13 @@ static constexpr uint8_t OTA_STATUS_MAX = 64;
 static constexpr uint8_t OTA_RADIO_SEND_COPIES = 8;
 static constexpr uint8_t OTA_RADIO_SEND_MAX_ATTEMPTS = 24;
 static constexpr uint8_t OTA_RADIO_SEND_DELAY_MS = 4;
+static constexpr uint8_t OTA_RADIO_REPAIR_COPIES = 4;
+static constexpr uint8_t OTA_RADIO_REPAIR_MAX_ATTEMPTS = 12;
+// Performer status reports are deterministically spread across this many
+// millisecond slots. IDs are unique across the inventoried field, so the
+// checkpoint query does not make every performer answer at once.
+static constexpr uint16_t OTA_STATUS_SLOT_MS = 4;
+static constexpr uint16_t OTA_STATUS_SLOT_COUNT = OTA_STATUS_MAX;
 
 enum OtaStatusPhase : uint8_t {
   OTA_PHASE_IDLE = 0,
@@ -18,6 +25,9 @@ enum OtaStatusPhase : uint8_t {
   OTA_PHASE_WRITING = 2,
   OTA_PHASE_COMPLETE = 3,
   OTA_PHASE_ERROR = 4,
+  OTA_PHASE_REPAIRING = 5,
+  OTA_PHASE_STAGED = 6,
+  OTA_PHASE_ACTIVATING = 7,
 };
 
 enum OtaStatusError : uint8_t {
@@ -44,6 +54,17 @@ inline OtaChunkDecision otaChunkDecision(uint32_t written, uint32_t size,
   if (offset != written) return OTA_CHUNK_OFFSET_MISMATCH;
   if (written + len > size) return OTA_CHUNK_OVERFLOW;
   return OTA_CHUNK_ACCEPT;
+}
+
+inline uint16_t otaStatusSlot(uint16_t node_id, const uint8_t mac[6]) {
+  if (node_id > 0) return (uint16_t)((node_id - 1) % OTA_STATUS_SLOT_COUNT);
+  uint16_t hash = 0;
+  for (uint8_t i = 0; i < 6; i++) hash = (uint16_t)((hash * 33U) ^ mac[i]);
+  return (uint16_t)(hash % OTA_STATUS_SLOT_COUNT);
+}
+
+inline uint32_t otaStatusDelayMs(uint16_t node_id, const uint8_t mac[6]) {
+  return (uint32_t)otaStatusSlot(node_id, mac) * OTA_STATUS_SLOT_MS;
 }
 
 inline uint16_t otaExpectedChunkLen(uint32_t size, uint32_t offset) {
@@ -155,6 +176,34 @@ inline bool otaStatusEntryComplete(const OtaNodeStatusEntry& e,
   return (now_us - e.last_us) <= max_age_us;
 }
 
+inline bool otaStatusEntryStaged(const OtaNodeStatusEntry& e,
+                                 uint32_t expected_size,
+                                 uint32_t expected_crc32,
+                                 int64_t now_us,
+                                 int64_t max_age_us) {
+  if (e.phase != OTA_PHASE_STAGED && e.phase != OTA_PHASE_ACTIVATING &&
+      e.phase != OTA_PHASE_COMPLETE) {
+    return false;
+  }
+  if (e.error != OTA_ERR_NONE || e.offset != expected_size ||
+      e.crc32 != expected_crc32) {
+    return false;
+  }
+  if (max_age_us <= 0) return true;
+  return otaSeenRecently(e.last_us, now_us, max_age_us);
+}
+
+inline bool otaStatusEntryAtCheckpoint(const OtaNodeStatusEntry& e,
+                                       uint32_t expected_offset,
+                                       uint32_t expected_crc32,
+                                       int64_t now_us,
+                                       int64_t max_age_us) {
+  if (e.phase == OTA_PHASE_ERROR) return false;
+  if (e.offset != expected_offset || e.crc32 != expected_crc32) return false;
+  if (max_age_us <= 0) return true;
+  return otaSeenRecently(e.last_us, now_us, max_age_us);
+}
+
 inline bool otaStatusCompleteForMac(const OtaStatusTable& t,
                                     const uint8_t mac[6],
                                     uint32_t expected_size,
@@ -183,10 +232,31 @@ inline bool otaCohortComplete(const OtaStatusTable& status,
   return true;
 }
 
+inline bool otaCohortStaged(const OtaStatusTable& status,
+                            const OtaCohort& cohort,
+                            uint32_t expected_size,
+                            uint32_t expected_crc32,
+                            int64_t now_us,
+                            int64_t max_age_us) {
+  if (cohort.count == 0) return false;
+  for (uint8_t i = 0; i < cohort.count; i++) {
+    int status_index = otaStatusFind(status, cohort.macs[i]);
+    if (status_index < 0 ||
+        !otaStatusEntryStaged(status.entries[status_index], expected_size,
+                              expected_crc32, now_us, max_age_us)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 inline const char* otaPhaseName(uint8_t phase) {
   switch (phase) {
     case OTA_PHASE_BEGIN: return "begin";
     case OTA_PHASE_WRITING: return "writing";
+    case OTA_PHASE_REPAIRING: return "repairing";
+    case OTA_PHASE_STAGED: return "staged";
+    case OTA_PHASE_ACTIVATING: return "activating";
     case OTA_PHASE_COMPLETE: return "complete";
     case OTA_PHASE_ERROR: return "failed";
     default: return "idle";

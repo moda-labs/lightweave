@@ -8,8 +8,23 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**158 pass**) is green; control tests (**369 pass**) are green; all three
+(**160 pass**) is green; control tests are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+
+Latest in this branch (2026-08-05): **field OTA is reliable and remains live
+during operation.** The conductor continues normal beacons and the control plane
+interleaves show commands between 128-byte OTA chunks. Every 256 chunks it probes
+the frozen online cohort; a performer that missed data receives its suffix by
+MAC-addressed unicast, while a bad prefix CRC or fatal flash error restarts only
+that board. Serial timeouts retry until they recover. Images stage without an
+immediate reboot, performers activate and re-register one at a time, and the
+conductor activates last. The UI exposes broadcast/repair/staging/activation
+phases and leaves pattern, blackout, and power controls available. Install state
+is journaled beside the checksum-pinned artifact, resumes after control-service
+restart, and supports an explicit pause/resume from the verified conductor
+prefix. Native logic, control API fault injection, rolling-order, persistence,
+and canonical field-build checks are green. Full 53-board hardware verification
+is still required before calling the scale behavior field-proven.
 
 Latest on main (2026-08-04): **the multi-board USB flashing station is built.**
 The control plane now has a Flashing screen backed by
@@ -417,15 +432,11 @@ Priority order:
    the same Lantern Locations flow and add a fixture if it exposes a new failure
    mode. Temporal code scoring should ignore constant extra lights; only extra
    lights blinking with the same planned code should remain ambiguous.
-7. **Scale-harden OTA when more boards exist:** manual maintenance OTA and
-   same-protocol mixed-firmware recovery are hardware-verified on the 3-board
-   bench. The updater retries serial chunk timeouts/NACKs, rejects unsafe resume
-   offsets and wrong-length chunks, freezes the fresh online cohort at begin,
-   reports offline rows as deferred, and verifies every targeted performer after
-   reboot before declaring success. Defer
-   explicit per-node chunk ACK/retry until a larger bench/field test shows
-   repeated ESP-NOW chunk loss that the current 3x broadcast repetition cannot
-   cover.
+7. **Hardware-verify scale-hardened OTA:** use the 53-board inventory to confirm
+   checkpoint status collection, targeted suffix repair, rolling activation, and
+   live show control under real ESP-NOW contention. The implementation is
+   code-complete and fault-injection tested; record total duration, repair counts,
+   and any nodes requiring a targeted restart.
 8. **Optional negative OTA-safety check:** if useful, intentionally flash one
    performer with a same-v8 but different build and confirm it appears as
    `Firmware mismatch`; restore all boards to one build afterward. Any

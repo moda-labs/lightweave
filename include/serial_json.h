@@ -37,6 +37,10 @@ enum SerialJsonKind {
   SJ_OTA_CHUNK,
   SJ_OTA_END,
   SJ_OTA_PROGRESS,
+  SJ_OTA_REPAIR,
+  SJ_OTA_RESTART,
+  SJ_OTA_PROBE,
+  SJ_OTA_ACTIVATE,
 };
 
 struct SerialJsonCommand {
@@ -81,6 +85,7 @@ struct SerialJsonCommand {
   uint32_t ota_crc32 = 0;
   uint32_t ota_offset = 0;
   char ota_data_hex[OTA_SERIAL_CHUNK_MAX * 2 + 1] = {0};
+  bool ota_self = false;
 };
 
 inline bool serialJsonLooksLike(const char* line) {
@@ -399,6 +404,31 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     cmd.kind = SJ_OTA_END;
   } else if (!strcmp(norm, "otaprogress")) {
     cmd.kind = SJ_OTA_PROGRESS;
+  } else if (!strcmp(norm, "otarepair")) {
+    cmd.kind = SJ_OTA_REPAIR;
+    if (!sjMac(json, "mac", cmd.mac) ||
+        !sjUint(json, "offset", cmd.ota_offset) ||
+        !sjString(json, "data", cmd.ota_data_hex, sizeof(cmd.ota_data_hex))) {
+      error = "bad ota repair";
+      return false;
+    }
+  } else if (!strcmp(norm, "otarestart")) {
+    cmd.kind = SJ_OTA_RESTART;
+    if (!sjMac(json, "mac", cmd.mac)) {
+      error = "bad ota restart";
+      return false;
+    }
+  } else if (!strcmp(norm, "otaprobe")) {
+    cmd.kind = SJ_OTA_PROBE;
+  } else if (!strcmp(norm, "otaactivate")) {
+    cmd.kind = SJ_OTA_ACTIVATE;
+    bool self = false;
+    if (sjBool(json, "conductor", self) && self) {
+      cmd.ota_self = true;
+    } else if (!sjMac(json, "mac", cmd.mac)) {
+      error = "bad ota activate";
+      return false;
+    }
   } else {
     error = "unknown cmd";
     return false;

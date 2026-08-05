@@ -174,33 +174,20 @@ if (rendered !== 1 || releaseRendered !== 1) process.exit(2);
     assert completed.returncode == 0, completed.stderr
 
 
-def test_ota_control_lock_is_reversible_in_executed_javascript() -> None:
+def test_ota_ui_keeps_field_controls_live_and_locks_only_firmware_inputs() -> None:
     app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
         encoding="utf-8"
     )
-    start = app_js.index("function setOtaControlDisabled")
-    end = app_js.index("\n}\n\nfunction renderOta()", start) + 2
+    start = app_js.index("function renderOta()")
+    end = app_js.index("\n}\n\nfunction otaReadyForInstall", start) + 2
     function_source = app_js[start:end]
-    script = f"""
-{function_source}
-const enabled = {{disabled: false, dataset: {{}}}};
-const disabled = {{disabled: true, dataset: {{}}}};
-setOtaControlDisabled(enabled, true);
-setOtaControlDisabled(disabled, true);
-if (!enabled.disabled || !disabled.disabled) process.exit(1);
-setOtaControlDisabled(enabled, false);
-setOtaControlDisabled(disabled, false);
-if (enabled.disabled || !disabled.disabled) process.exit(2);
-"""
 
-    completed = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
+    assert "setOtaControlDisabled" not in app_js
+    assert "[data-pattern]" not in function_source
+    assert "fileInput.disabled = installing" in function_source
+    assert "stage-ota-artifact" in function_source
+    assert "install-ota" in function_source
+    assert "pause-ota" in function_source
 
 
 def test_fresh_page_retries_terminal_ota_reservation_gap_in_javascript() -> None:

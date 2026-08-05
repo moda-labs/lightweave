@@ -40,9 +40,11 @@ independent group pattern control, reversible blackout, runtime power policy, an
 the local web control plane. The control plane now includes a same-host flashing
 station for automatically detecting and provisioning up to ten USB-connected
 FireBeetles in parallel, with permanent performer-ID assignment for physical
-labeling. Field-wide OTA is implemented and has completed successful bench
-installs, including same-protocol mixed-firmware recovery back to a consistent
-field. See [docs/HANDOFF.md](docs/HANDOFF.md) for the exact latest state.
+labeling. Field-wide OTA runs in the background with checkpoint repair, durable
+resume, and rolling per-performer activation; the earlier transfer path has
+completed successful bench installs, including same-protocol mixed-firmware
+recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
+the exact latest state and the pending scale hardware gate.
 
 Production Pi updates use a pull-based, hash-pinned release channel with health
 checks and automatic code rollback. Each promoted release stages its immutable
@@ -162,8 +164,8 @@ batch notes.
 - Radio duty cycling, CPU light-sleep support, and schedule-driven deep-sleep
   policy.
 - Optional INA228 energy telemetry from reference nodes back to the conductor.
-- Manual maintenance-mode OTA transport over serial to conductor, then ESP-NOW to
-  performers.
+- Background field-wide OTA over serial and ESP-NOW with per-performer repair,
+  durable resume, and rolling activation while show controls remain available.
 - Human serial CLI plus newline-delimited JSON serial protocol for the web UI.
 
 ### Control plane

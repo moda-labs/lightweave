@@ -63,6 +63,8 @@ enum MsgType : uint8_t {
   MSG_OTA_CHUNK = 7, // conductor -> all: firmware OTA chunk
   MSG_OTA_END   = 8, // conductor -> all: finalize firmware OTA
   MSG_OTA_STATUS = 9, // performer -> conductor: OTA progress/error report
+  MSG_OTA_QUERY = 10, // conductor -> performers: report current OTA checkpoint
+  MSG_OTA_ACTIVATE = 11, // conductor -> performer: reboot staged image
 };
 
 typedef struct __attribute__((packed)) {
@@ -210,6 +212,14 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;
 } OtaEndMsg;
+
+typedef struct __attribute__((packed)) {
+  MsgHeader hdr;
+} OtaQueryMsg;
+
+typedef struct __attribute__((packed)) {
+  MsgHeader hdr;
+} OtaActivateMsg;
 
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;

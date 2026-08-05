@@ -427,23 +427,27 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   REGISTER unicast path. Added without a PROTO_VERSION bump — no existing
   layout changed, and receivers ignore unknown types via the dispatch default.
 - **[done]** `MSG_OTA_BEGIN`, `MSG_OTA_CHUNK`, `MSG_OTA_END`: conductor
-  broadcasts a staged firmware image during manual maintenance-mode OTA.
+  broadcasts a staged firmware image during a background field-wide OTA.
   Performers write the image into their OTA partition and accept it only after
   size and CRC checks pass. This is field-wide only; no selected-node firmware
   updates.
 - **[done]** `MSG_OTA_STATUS`: performers report begin/writing/complete/error
-  status with offset and CRC, and the API filters stale statuses. If no fresh
-  terminal ACKs arrive after reboot, the API can record per-node completion from
-  verified post-reboot field state.
+  status with offset and prefix CRC, and the API filters stale statuses.
+- **[done]** `MSG_OTA_QUERY` and `MSG_OTA_ACTIVATE`: the conductor requests
+  deterministically time-slotted status replies and activates a fully staged
+  performer. These additive v10 message types preserve compatibility with
+  already-flashed v10 receivers, which ignore unknown types.
 - **[planned]** `MSG_ACK` + richer machine Pi↔conductor serial (lands with the Pi
   UI).
 - Time base: 64-bit `esp_timer` microseconds throughout (no 32-bit `millis` wrap).
 
-### 7.1 OTA policy, transfer, and recovery **[done; 3-board bench verified]**
+### 7.1 OTA policy, transfer, and recovery **[done; scale hardware verification pending]**
 
-OTA is manual maintenance-mode only and field-wide only. The system must never
-offer selected-node firmware updates as a normal workflow. Mixed firmware can
-still happen after a failed update, but it is treated as an error/recovery state.
+OTA is an explicit operator action and field-wide only. It runs in the background:
+beacons and normal serial control commands continue between chunks, so pattern,
+blackout, and power operations remain available. The system must never offer
+selected-node firmware updates as a normal workflow. Mixed firmware can still
+happen after a failed update, but it is treated as an error/recovery state.
 
 The foundation is in place: device builds get a release version from `VERSION`,
 a git-derived 32-bit build id, and dirty flag via `scripts/firmware_build_id.py`;
@@ -452,40 +456,34 @@ conductor/per-node firmware in machine state; the control plane shows field
 firmware consistency in Operations, links build hashes to GitHub commits, and
 flags `Firmware mismatch` in the Node List.
 
-The transfer path is also in place: the control plane stages a `.bin` artifact,
+The transfer path stages a `.bin` artifact,
 streams it over machine serial with `ota_begin`/`ota_chunk`/`ota_end`, the
 conductor writes its own OTA partition, and the conductor broadcasts the same
-chunk stream to performers via ESP-NOW. The UI shows install progress by chunk.
+chunk stream to performers via ESP-NOW. The UI shows broadcast, repair, staging,
+and activation phases per board.
 This was hardware-verified on the 3-board bench on 2026-07-06, including a
 same-protocol mixed-firmware recovery that restored performer #1 from
-`0.3.0-mismatch` to `0.3.0`. Serial chunk timeouts and retryable chunk NACKs are
-retried, duplicate already-written chunks are idempotent on both conductor and
-performers, and unsafe mid-chunk resume offsets are rejected instead of papering
-over a partial write. The current serial/ESP-NOW chunk payload is 128 bytes for
-command-buffer margin. Firmware requires each decoded chunk length to equal the
-expected full/tail length at the current offset; this avoids the old failure mode
-where a truncated but even-length hex command decoded as a shorter chunk and
-advanced the flash writer to a non-chunk boundary. OTA maintenance beacons keep
-performer radios awake for the window so duty cycling does not fight the updater.
-Performer OTA status is freshness filtered; the API only reports install success
-after every expected placed performer reports complete or verifies from live
-post-reboot firmware consistency. Missing placed lanterns block install with a
-Recovery row, and post-reboot verification failures synthesize per-node failed
-OTA rows for expected performers that did not verify. A final `ota_end` serial
-ACK timeout after all bytes land is treated as a post-reboot verification path,
-not an immediate install failure; periodic `ota_progress` poll timeouts are
-recorded and ignored while chunk transfer continues. Remaining deployment
-hardening: decide whether a 60-node deployment needs explicit performer ACK/retry
-beyond the current status reporting.
+`0.3.0-mismatch` to `0.3.0`. The scale-hardened path now checkpoints every 256
+chunks. Each performer reports its exact written offset and prefix CRC in a
+deterministic status slot; the control plane unicasts only its missing suffix.
+CRC divergence or a fatal flash error restarts and replays only that performer.
+Transient serial failures retry with bounded backoff until success. Duplicate
+chunks and finalization are idempotent.
 
-The control plane derives a Recovery summary from live state and the last install
-attempt. It classifies missing placed lanterns, same-protocol mixed firmware, and
-failed OTA nodes into one operator action surface. Mixed firmware is never a
-normal running state: enter maintenance mode, wait for readiness, and reinstall
-the staged firmware field-wide. Same-protocol mixed firmware is allowed to
-proceed with maintenance install as the recovery action once all placed nodes are
-present. Failed OTA installs instruct the operator to reset the maintenance
-window and rerun the same staged firmware after nodes check back in.
+Performers finalize into a staged state without rebooting. Once the complete
+online cohort is staged, the control plane activates performers one at a time,
+verifies each re-registration, then activates the conductor last. This bounds the
+visible disruption to one lantern at a time. The durable install journal and
+checksum-pinned artifact survive browser disconnects and service restarts; a
+restarted control plane reconciles the conductor's live offset/CRC and resumes.
+An operator may pause between commands and later continue from the verified
+prefix. Offline inventory rows are deferred rather than blocking the online
+field.
+
+The control plane derives a Recovery summary from live state and the durable last
+install attempt. It classifies missing lanterns, same-protocol mixed firmware,
+and failed OTA nodes into one operator action surface. Rerunning the same staged
+artifact resumes or repairs the field; no maintenance-window reset is required.
 
 ## 8. Resilience model
 
