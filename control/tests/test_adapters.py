@@ -104,6 +104,16 @@ def test_pattern_command_can_target_one_group() -> None:
     assert json.loads(transport.writes[0])["group_id"] == 2
 
 
+def test_restore_blackout_maps_to_json_command() -> None:
+    transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "blackout restored"})])
+    conductor = JsonLineSerialConductor(transport)
+
+    ack = conductor.restore_blackout()
+
+    assert ack == {"ok": True, "message": "blackout restored"}
+    assert json.loads(transport.writes[0]) == {"id": 1, "cmd": "restore_blackout"}
+
+
 def test_legacy_glow_params_get_explicit_full_value_and_optional_value_is_packed() -> None:
     transport = FakeTransport([
         json.dumps({"id": 1, "ok": True}),

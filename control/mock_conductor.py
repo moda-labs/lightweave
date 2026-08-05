@@ -148,6 +148,7 @@ class MockConductor:
         }
     )
     group_patterns: list[dict[str, Any]] = field(default_factory=list)
+    _blackout_brightness: list[int] | None = field(default=None, init=False, repr=False)
     ota_started_at: float | None = None
     ota_installed_crc32: int | None = None
     _ota_write: bytearray | None = field(default=None, init=False, repr=False)
@@ -211,6 +212,7 @@ class MockConductor:
                 {"group_id": group_id, "config": deepcopy(config)}
                 for group_id, config in enumerate(self.group_patterns)
             ],
+            "blackout": {"restore_available": self._blackout_brightness is not None},
             "power": deepcopy(self.power),
             "keepalive": deepcopy(self.keepalive),
             "ota": ota,
@@ -316,6 +318,10 @@ class MockConductor:
         return {"ok": True, "message": f"pattern changed to {pattern} for {scope}", "pattern": deepcopy(updated)}
 
     def blackout(self) -> dict[str, Any]:
+        if self._blackout_brightness is None:
+            self._blackout_brightness = [
+                int(current["brightness"]) for current in self.group_patterns
+            ]
         for group_id, current in enumerate(self.group_patterns):
             self.group_patterns[group_id] = {
                 "pattern": current["pattern"],
@@ -325,6 +331,16 @@ class MockConductor:
         self.pattern = deepcopy(self.group_patterns[0])
         self._event("blackout bri=0")
         return {"ok": True, "message": "blackout broadcast", "pattern": deepcopy(self.pattern)}
+
+    def restore_blackout(self) -> dict[str, Any]:
+        if self._blackout_brightness is None:
+            return {"ok": False, "error": "no blackout to restore"}
+        for group_id, brightness in enumerate(self._blackout_brightness):
+            self.group_patterns[group_id]["brightness"] = brightness
+        self._blackout_brightness = None
+        self.pattern = deepcopy(self.group_patterns[0])
+        self._event("blackout restored")
+        return {"ok": True, "message": "blackout restored", "pattern": deepcopy(self.pattern)}
 
     def update_power_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
         updated = deepcopy(self.power)

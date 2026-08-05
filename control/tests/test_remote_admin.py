@@ -129,6 +129,9 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Field firmware" in index_html
     assert "field-release-pending-changes" in index_html
     assert "Full release changelog" in index_html
+    assert "Blackout all groups" in index_html
+    assert "Restore all groups" in index_html
+    assert 'data-action="turn-off-group"' in index_html
     assert "event.code === 4401" in app_js
     assert 'await api("/api/auth/logout", { method: "POST" })' in app_js
     assert "JSON.stringify({password: passwordInput.value})" in login_js

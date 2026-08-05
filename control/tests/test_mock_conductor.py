@@ -180,18 +180,26 @@ def test_assign_sets_position_and_clears_attention() -> None:
     assert lantern["y"] == 0.75
 
 
-def test_blackout_preserves_pattern_and_sets_brightness_zero() -> None:
+def test_blackout_can_restore_distinct_group_brightness_values() -> None:
     conductor = MockConductor()
 
-    conductor.update_pattern("Sweep", 72, {"period": 8000})
-    ack = conductor.blackout()
+    conductor.update_pattern("White", 24, {}, group_id=0)
+    conductor.update_pattern("Fire Flicker", 56, {"period": 1200}, group_id=1)
+    blackout_ack = conductor.blackout()
+    # A repeated emergency click must not replace the saved values with zeroes.
+    conductor.blackout()
+    blacked_out = conductor.snapshot()
+    restore_ack = conductor.restore_blackout()
+    restored = conductor.snapshot()
 
-    assert ack["ok"] is True
-    assert conductor.snapshot()["pattern"] == {
-        "pattern": "Sweep",
-        "brightness": 0,
-        "params": {"period": 8000},
-    }
+    assert blackout_ack["ok"] is True
+    assert blacked_out["blackout"] == {"restore_available": True}
+    assert [entry["config"]["brightness"] for entry in blacked_out["patterns"][:2]] == [0, 0]
+    assert restore_ack["ok"] is True
+    assert restored["blackout"] == {"restore_available": False}
+    assert [entry["config"]["brightness"] for entry in restored["patterns"][:2]] == [24, 56]
+    assert restored["patterns"][0]["config"]["pattern"] == "White"
+    assert restored["patterns"][1]["config"]["pattern"] == "Fire Flicker"
 
 
 def test_groups_keep_independent_patterns_and_membership() -> None:

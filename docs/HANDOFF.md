@@ -8,11 +8,26 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**152 pass**) is green; control tests (**310 pass**) are green; all three device
+(**155 pass**) is green; control tests (**314 pass**) are green; all three device
 envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-04): **mixed 16/32/64 LED counts are code-complete;
-bench verification is pending.** Each inventoried board carries an LED-count
+Latest locally (2026-08-04): **protocol-v10 groups and mixed LED counts are
+bench-verified, and global blackout is reversible.** The live three-board bench
+runs one conductor plus performer #23 in Group 1 on a 16-pixel ring and performer
+#24 in Group 2 on a 64-pixel strip. Group 1 ran White while Group 2 simultaneously
+ran Fire Flicker. Both performers retained group, LED count, and build identity
+across direct flashes; the 64-pixel chain also visibly honored live 64 → 32 → 16
+→ 64 profile changes and restored 64 from NVS after reboot. The Patterns UI now
+distinguishes `Turn off Group N` from `Blackout all groups`. A global blackout
+captures all eight brightness values in a separate NVS recovery record before
+saving zeroes; repeated blackout does not overwrite that record, and `Restore
+all groups` recovers it. Hardware proof blacked out both bench groups, hard-reset
+the conductor, confirmed the recovery record and zeroes survived boot, then
+restored Group 1 White/24 and Group 2 Fire Flicker/24. A targeted Group 1 off
+through the real HTTPS API left Group 2 at 24 and Group 1 was returned to 24.
+
+Previous latest (2026-08-04): **mixed 16/32/64 LED counts are code-complete.**
+Each inventoried board carries an LED-count
 hardware profile independent of its group and placement. The control plane can
 change it from the lantern detail sheet or inline Node List dropdown, including
 before placement. One firmware image allocates a 64-emitter RGBW chain, renders
@@ -20,7 +35,7 @@ only the configured active prefix, clears inactive pixels, and normalizes
 ring-local effects by the active count. Existing inventory and performer NVS
 migrate to 16. The profile stays with the physical board during move, forget,
 and replacement. Protocol v10 adds the profile to REGISTER and `MSG_TABLE`, so
-every board must be updated together. No boards were flashed in this session.
+every board must be updated together.
 
 Previous latest (2026-08-03): **eight independent lantern groups are
 code-complete; bench verification is pending.** Each inventoried MAC now carries
@@ -328,16 +343,17 @@ full-repo adversarial self-review with all 5 correctness findings fixed, the
 production BOM, and the **pilot-batch order placed 2026-07-03** (most parts
 arrive Mon Jul 6, batteries Jul 10 — see "Pilot batch: ORDERED" below).
 
-## ▶ Next session: pick up here (updated 2026-08-03)
+## ▶ Next session: pick up here (updated 2026-08-04)
 
 Priority order:
-1. **Protocol-v10 group/profile bench verification:** read `docs/FLASHING.md`, update the
-   conductor and every performer to the same protocol-v10 build, place two
-   performers in different groups, and verify simultaneous distinct patterns.
-   Then change one membership while its radio is asleep and confirm its next
-   REGISTER triggers the targeted row repair and persists across reboot. Repeat
-   with LED counts 16, 32, and 64 on matching physical chains; confirm a missed
-   edit repairs on REGISTER and survives reboot.
+1. **Finish the remaining protocol-v10 repair checks:** simultaneous Group 1/2
+   patterns, 16/64 physical chains, live 16/32/64 profiles, profile NVS restore,
+   reversible global blackout across conductor reboot, and selected-group off
+   are hardware-verified. Still change one membership and one LED count while a
+   performer radio is asleep, then confirm its next REGISTER triggers the
+   targeted row repair and persists across performer reboot. Test a physical
+   32-pixel chain when one is available; 32 is currently verified as the active
+   prefix of the 64-pixel strip.
 2. **Fire Flicker bench tuning:** after the field shares the current protocol-v10
    build, select Fire at brightness 56 / period 1200 ms /
    hue 24 / saturation 95 / texture 85, and evaluate it through the physical
@@ -435,12 +451,16 @@ revised cost roll-up.
   are adopted from the conductor table.
 - **Group pattern configs persist** too: all eight
   `pattern_id`/`brightness`/`params` slots survive a conductor power-cycle in
-  the `patterns` blob; Group 1 remains mirrored to the legacy keys.
+  the `patterns` blob; Group 1 remains mirrored to the legacy keys. Global
+  blackout snapshots all eight brightness values separately before persisting
+  zeroes, so Restore remains available across conductor reboot and repeated
+  blackout cannot overwrite the recovery point.
 - **Control plane serial bridge + UI** (hardware-verified 2026-07-05): FastAPI
   serves the static operator UI and HTTP/WS API; `JsonLineSerialConductor`
   talks to the conductor over pyserial with request ids and ok/error acks.
   Mutations currently implemented: identify ack, assign/place, group assignment,
-  forget, replace, per-group pattern changes, blackout, power policy changes, OTA maintenance
+  forget, replace, per-group pattern changes/off, reversible field-wide blackout,
+  power policy changes, OTA maintenance
   mode enter/exit, firmware artifact staging, and field-wide OTA install.
   Serial calls are serialized and run
   off the FastAPI event loop, so one serial timeout does not block unrelated
@@ -469,8 +489,8 @@ revised cost roll-up.
   shown in `info`; **bidirectional ESP-NOW** — performers unicast `REGISTER`
   every 10 s and the conductor builds a **MAC-keyed roster** (`roster` command).
   Sync hot path unchanged (still `LOCKED gaps` flat after the rework).
-- **Protocol foundation Half 2** (v7 position path hardware-verified; v8 ID,
-  v9 group, and v10 LED-profile paths code-complete): **conductor-authoritative
+- **Protocol foundation Half 2** (v7 position, v8 ID, v9 group, and v10
+  LED-profile paths hardware-verified on the current bench): **conductor-authoritative
   `MAC→permanent ID + optional (x,y) + group + LED count` inventory** in NVS, broadcast as
   chunked `MSG_TABLE`; a node finds its row, adopts its number, placement, and
   hardware profile, and caches them (survives reboot, no laptop needed). Conductor edits it
@@ -505,7 +525,7 @@ revised cost roll-up.
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 152) and control tests (310): sync
+- **Host unit tests** (`test/test_logic/`, 155) and control tests (314): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),
@@ -649,7 +669,19 @@ the physical chip.
 
 ## Hardware state
 
-- 3× DOIT ESP32 DevKit V1, all on the unified image. Rings on 2 of them; LED data
+- **As of 2026-08-04 (live HTTPS API on `https://127.0.0.1:8000`):**
+  - `/dev/cu.usbserial-0001`, `8C:94:DF:8F:71:50` — conductor, protocol 10,
+    build `143a14a8` during the verified WIP flash.
+  - `/dev/cu.wchusbserial110`, `68:FE:71:A6:32:4C` — performer #23, Group 1,
+    16 LEDs, White at brightness 24.
+  - `/dev/cu.wchusbserial1220`, `68:FE:71:A6:30:84` — performer #24, Group 2,
+    64 LEDs, Fire Flicker at brightness 24.
+  - Both performers were alive, locked, and reported protocol 10 / build
+    `143a14a8` after the reversible-blackout reboot test. The macOS automatic
+    flasher LaunchAgent remains uninstalled so it cannot contend for these
+    serial ports during bench work.
+- **Historical 2026-07 bench:** 3× DOIT ESP32 DevKit V1 on the unified image;
+  rings on 2 of them. LED data
   on **GPIO13 (`D13`)**, USB 5V (no 12 V / buck yet).
 - **As of 2026-07-06 (live API checked on `http://127.0.0.1:8001` after recovery hardening):**
   - `/dev/cu.usbserial-7`, `8C:94:DF:57:7F:14` — **CONDUCTOR**, serial-backed

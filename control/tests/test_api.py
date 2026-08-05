@@ -608,6 +608,22 @@ def test_pattern_update_round_trips_to_state() -> None:
     assert state["pattern"]["params"] == {"period": 8000}
 
 
+def test_blackout_restore_endpoint_recovers_previous_group_brightness() -> None:
+    conductor = MockConductor()
+    conductor.update_pattern("White", 24, {}, group_id=0)
+    conductor.update_pattern("Fire Flicker", 56, {"period": 1200}, group_id=1)
+    client = TestClient(create_app(conductor))
+
+    blacked_out = client.post("/api/show/blackout")
+    restored = client.post("/api/show/restore")
+    state = client.get("/api/state").json()
+
+    assert blacked_out.status_code == 200
+    assert restored.status_code == 200
+    assert state["blackout"] == {"restore_available": False}
+    assert [entry["config"]["brightness"] for entry in state["patterns"][:2]] == [24, 56]
+
+
 def test_pattern_update_rejected_by_conductor_is_400() -> None:
     client = TestClient(create_app(RejectingPatternConductor()))
 

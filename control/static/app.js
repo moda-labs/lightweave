@@ -586,6 +586,13 @@ function renderPatternControls() {
   const changeButton = $('[data-action="broadcast"]');
   changeButton.disabled = !isPatternDirty();
   changeButton.ariaDisabled = String(changeButton.disabled);
+  const groupOffButton = $('[data-action="turn-off-group"]');
+  groupOffButton.textContent = `Turn off Group ${selectedGroup + 1}`;
+  groupOffButton.disabled = Number(activePatternState()?.brightness || 0) === 0;
+  groupOffButton.ariaDisabled = String(groupOffButton.disabled);
+  const restoreButton = $('[data-action="restore-blackout"]');
+  restoreButton.disabled = state?.blackout?.restore_available !== true;
+  restoreButton.ariaDisabled = String(restoreButton.disabled);
 }
 
 function renderSavedPatterns() {
@@ -1066,7 +1073,8 @@ function renderOta() {
   renderOtaProgress();
   renderOtaNodes();
   const serialActions = [
-    "identify", "move", "replace", "forget", "broadcast", "blackout",
+    "identify", "move", "replace", "forget", "broadcast", "turn-off-group",
+    "blackout", "restore-blackout",
     "save-power-policy", "sleep-field", "wake-field", "follow-schedule",
     "save-power-monitor", "save-keepalive",
     "enter-ota", "exit-ota", "stage-ota-artifact", "install-ota",
@@ -2194,9 +2202,34 @@ async function runAction(action) {
       return;
     }
     if (action === "blackout") {
-      if (!confirm("Broadcast blackout brightness 0?")) return;
+      if (!confirm("Black out all groups? You can restore their previous brightness afterward.")) return;
       const ack = await api("/api/show/blackout", { method: "POST" });
+      patternDraft = null;
       toast(ack.message, true);
+      await refresh();
+      return;
+    }
+    if (action === "restore-blackout") {
+      const ack = await api("/api/show/restore", { method: "POST" });
+      patternDraft = null;
+      toast(ack.message);
+      await refresh();
+      return;
+    }
+    if (action === "turn-off-group") {
+      const live = activePatternState();
+      if (!confirm(`Turn off Group ${selectedGroup + 1}?`)) return;
+      const ack = await api("/api/show/pattern", {
+        method: "POST",
+        body: JSON.stringify({
+          pattern: live.pattern,
+          brightness: 0,
+          params: live.params || {},
+          group_id: selectedGroup,
+        }),
+      });
+      patternDraft = null;
+      toast(ack.message);
       await refresh();
       return;
     }

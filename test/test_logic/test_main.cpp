@@ -9,6 +9,7 @@
 #include <unity.h>
 
 #include "beacon.h"
+#include "blackout.h"
 #include "sync.h"
 #include "bootplan.h"
 #include "dusk.h"
@@ -1735,6 +1736,40 @@ void test_group_beacon_selects_independent_configs_and_fits_espnow() {
   TEST_ASSERT_TRUE(sizeof(BeaconMsg) <= 250);
 }
 
+void test_blackout_restores_distinct_brightness_and_preserves_patterns() {
+  PatternConfig configs[GROUP_COUNT] = {};
+  configs[0] = {patterns::WHITE, 24, 0, {0, 0, 0, 0}};
+  configs[1] = {patterns::FIRE_FLICKER, 56, 0, {1200, 24, 65493, 95}};
+  BlackoutState state;
+  blackoutStateInit(state);
+
+  TEST_ASSERT_TRUE(blackoutApply(state, configs));
+  TEST_ASSERT_TRUE(state.restore_available);
+  TEST_ASSERT_EQUAL_UINT8(0, configs[0].brightness);
+  TEST_ASSERT_EQUAL_UINT8(0, configs[1].brightness);
+
+  // Repeated blackout keeps the first recovery point instead of saving zeroes.
+  TEST_ASSERT_FALSE(blackoutApply(state, configs));
+  TEST_ASSERT_TRUE(blackoutRestore(state, configs));
+  TEST_ASSERT_FALSE(state.restore_available);
+  TEST_ASSERT_EQUAL_UINT8(24, configs[0].brightness);
+  TEST_ASSERT_EQUAL_UINT8(56, configs[1].brightness);
+  TEST_ASSERT_EQUAL_UINT16(patterns::WHITE, configs[0].pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::FIRE_FLICKER, configs[1].pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(1200, configs[1].params[0]);
+}
+
+void test_blackout_rejects_missing_or_corrupt_restore_state() {
+  PatternConfig configs[GROUP_COUNT] = {};
+  BlackoutState state;
+  blackoutStateInit(state);
+
+  TEST_ASSERT_FALSE(blackoutRestore(state, configs));
+  state.restore_available = 1;
+  state.brightness[0] = MAX_BRIGHTNESS + 1;
+  TEST_ASSERT_FALSE(blackoutRestore(state, configs));
+}
+
 // ---- Machine serial JSON protocol -------------------------------------------
 
 void test_serial_json_assign_parses_mac_and_position() {
@@ -1779,6 +1814,16 @@ void test_serial_json_group_and_targeted_pattern_parse() {
   TEST_ASSERT_FALSE(serialJsonParse(
       "{\"id\":12,\"cmd\":\"led_count\",\"mac\":\"8C:94:DF:57:7F:14\",\"led_count\":24}",
       led_cmd, error));
+}
+
+void test_serial_json_blackout_restore_parses() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":13,\"cmd\":\"restore_blackout\"}", cmd, error));
+  TEST_ASSERT_NULL(error);
+  TEST_ASSERT_EQUAL_INT(SJ_RESTORE_BLACKOUT, cmd.kind);
 }
 
 void test_serial_json_pattern_maps_name_brightness_and_params() {
@@ -2373,8 +2418,11 @@ int main(int, char**) {
   RUN_TEST(test_mac_format_roundtrip);
   RUN_TEST(test_pattern_boot_safe);
   RUN_TEST(test_group_beacon_selects_independent_configs_and_fits_espnow);
+  RUN_TEST(test_blackout_restores_distinct_brightness_and_preserves_patterns);
+  RUN_TEST(test_blackout_rejects_missing_or_corrupt_restore_state);
   RUN_TEST(test_serial_json_assign_parses_mac_and_position);
   RUN_TEST(test_serial_json_group_and_targeted_pattern_parse);
+  RUN_TEST(test_serial_json_blackout_restore_parses);
   RUN_TEST(test_serial_json_pattern_maps_name_brightness_and_params);
   RUN_TEST(test_serial_json_glow_maps_hue_and_saturation_params);
   RUN_TEST(test_serial_json_white_maps_pattern_name);

@@ -1803,6 +1803,17 @@ def create_app(
         await publish_state("blackout")
         return ack
 
+    @app.post("/api/show/restore")
+    async def restore_blackout() -> dict[str, Any]:
+        try:
+            ack = await conductor_call("restore_blackout")
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        if not ack["ok"]:
+            raise HTTPException(status_code=400, detail=ack["error"])
+        await publish_state("blackout-restore")
+        return ack
+
     @app.post("/api/operations/calibration-mode")
     async def update_calibration_mode(request: CalibrationModeUpdate) -> dict[str, Any]:
         try:

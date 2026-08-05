@@ -29,6 +29,7 @@ enum SerialJsonKind {
   SJ_REPLACE,
   SJ_PATTERN,
   SJ_BLACKOUT,
+  SJ_RESTORE_BLACKOUT,
   SJ_POWER_POLICY,
   SJ_OTA_MODE,
   SJ_OTA_BEGIN,
@@ -322,6 +323,8 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     }
   } else if (!strcmp(norm, "blackout")) {
     cmd.kind = SJ_BLACKOUT;
+  } else if (!strcmp(norm, "restoreblackout")) {
+    cmd.kind = SJ_RESTORE_BLACKOUT;
   } else if (!strcmp(norm, "powerpolicy")) {
     cmd.kind = SJ_POWER_POLICY;
     uint32_t v = 0;

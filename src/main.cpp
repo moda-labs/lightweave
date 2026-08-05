@@ -30,6 +30,7 @@
 
 #include "config.h"
 #include "beacon.h"
+#include "blackout.h"
 #include "bootplan.h"
 #include "dusk.h"
 #include "firmware_version.h"
@@ -334,6 +335,7 @@ static void tableSave() {
 // so 64-bit fields can't tear across the two contexts.
 static SyncState g_sync;
 static BeaconMsg g_beacon = {};
+static BlackoutState g_blackout_state = {};
 static uint32_t g_tx_seq = 0;
 static portMUX_TYPE g_sync_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -421,6 +423,23 @@ static void patternConfigLoad() {
   g_beacon.power = g_power_policy;
   g_beacon.keepalive = g_keepalive;
   g_beacon.seq = 0;
+  g_prefs.end();
+}
+
+static void blackoutStateLoad() {
+  g_prefs.begin("node", /*readonly*/ true);
+  size_t got = g_prefs.getBytes("blackout", &g_blackout_state,
+                                sizeof(g_blackout_state));
+  g_prefs.end();
+  if (got != sizeof(g_blackout_state) ||
+      !blackoutStateValid(g_blackout_state)) {
+    blackoutStateInit(g_blackout_state);
+  }
+}
+
+static void blackoutStateSave() {
+  g_prefs.begin("node", /*readonly*/ false);
+  g_prefs.putBytes("blackout", &g_blackout_state, sizeof(g_blackout_state));
   g_prefs.end();
 }
 
@@ -1811,7 +1830,8 @@ static void printMachineState(uint32_t id) {
                 (unsigned long)conductor_fw.build_id,
                 conductor_fw.dirty ? "true" : "false");
   printPatternsJson(b);
-  Serial.print(",");
+  Serial.printf(",\"blackout\":{\"restore_available\":%s},",
+                g_blackout_state.restore_available ? "true" : "false");
   printPowerPolicyJson(policy);
   Serial.print(",");
   printKeepAliveJson(isConductor() ? g_keepalive : b.keepalive);
@@ -1984,12 +2004,30 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     saveBeaconSnapshot();
     jsonOk(cmd.id, "pattern changed");
   } else if (cmd.kind == SJ_BLACKOUT) {
+    bool captured;
     portENTER_CRITICAL(&g_sync_mux);
-    for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
-      g_beacon.patterns[group_id].brightness = 0;
+    captured = blackoutApply(g_blackout_state, g_beacon.patterns);
     portEXIT_CRITICAL(&g_sync_mux);
+    // Persist the recovery point before the zeroed pattern snapshot. A power
+    // loss between these writes can leave a harmless extra restore, never an
+    // unrecoverable blackout.
+    if (captured) blackoutStateSave();
     saveBeaconSnapshot();
     jsonOk(cmd.id, "blackout broadcast");
+  } else if (cmd.kind == SJ_RESTORE_BLACKOUT) {
+    bool restored;
+    portENTER_CRITICAL(&g_sync_mux);
+    restored = blackoutRestore(g_blackout_state, g_beacon.patterns);
+    portEXIT_CRITICAL(&g_sync_mux);
+    if (!restored) {
+      jsonError(cmd.id, "no blackout to restore");
+    } else {
+      // Write the lit pattern first. If power drops before the blackout state
+      // clears, restore remains safely repeatable after reboot.
+      saveBeaconSnapshot();
+      blackoutStateSave();
+      jsonOk(cmd.id, "blackout restored");
+    }
   } else if (cmd.kind == SJ_POWER_POLICY) {
     if (!isConductor()) {
       jsonError(cmd.id, "power policy is conductor-only");
@@ -2332,6 +2370,7 @@ void setup() {
   configLoad();
   g_policy_clock_set_us = now_us();
   patternConfigLoad();
+  blackoutStateLoad();
   if (g_timer_wake && g_rtc_have_power_policy) {
     g_power_policy = g_rtc_power_policy;
     powerPolicySanitize(g_power_policy);
