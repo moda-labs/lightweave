@@ -34,9 +34,10 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   native unit tests, so sync math, pattern math, roster/table logic, power policy,
   and OTA helpers can be tested without hardware.
 
-Current release: `0.5.1`. The bench system has been verified with one conductor
-and two performers for sync, layout assignment, pattern control, runtime power
-policy, and the local web control plane. Field-wide OTA is implemented and has
+Current release: `0.6.0`. The bench system has been verified with one conductor
+and mixed 16/64-LED performers for sync, layout and pre-placement group assignment,
+independent group pattern control, reversible blackout, runtime power policy, and
+the local web control plane. Field-wide OTA is implemented and has
 completed successful bench installs, including same-protocol mixed-firmware
 recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
 the exact latest state.
