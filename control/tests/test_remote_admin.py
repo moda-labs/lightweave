@@ -130,6 +130,13 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Field firmware" in index_html
     assert "field-release-pending-changes" in index_html
     assert "Full release changelog" in index_html
+    assert "Blackout all groups" in index_html
+    assert "Restore all groups" in index_html
+    assert 'data-action="turn-off-group"' in index_html
+    assert 'data-action="save-group-name"' in index_html
+    assert "USB power-bank keepalive" not in index_html
+    assert 'api(`/api/groups/${selectedGroup}`' in app_js
+    assert "/api/operations/keepalive" not in app_js
     assert "event.code === 4401" in app_js
     assert 'await api("/api/auth/logout", { method: "POST" })' in app_js
     assert "JSON.stringify({password: passwordInput.value})" in login_js
@@ -612,6 +619,7 @@ def test_data_directory_and_network_change_policy(tmp_path: Path) -> None:
 
     assert app.state.ota_store.root == tmp_path / "ota"
     assert app.state.pattern_store.root == tmp_path / "patterns"
+    assert app.state.group_store.root == tmp_path / "groups"
     assert app.state.calibration_store.root == tmp_path / "calibration"
     assert wifi.json()["wifi"]["allow_changes"] is False
     assert join.status_code == 403
@@ -635,6 +643,7 @@ def test_data_directory_stores_survive_app_restart(tmp_path: Path) -> None:
         48,
         {"hue": 40},
     )
+    group = first.state.group_store.update(1, "Lotus lanterns")
     image_data = BytesIO()
     Image.new("RGB", (2, 2), "black").save(image_data, format="PNG")
     frame = first.state.calibration_store.add_image(
@@ -646,6 +655,7 @@ def test_data_directory_stores_survive_app_restart(tmp_path: Path) -> None:
 
     assert restarted.state.ota_store.current()["sha256"] == artifact["sha256"]
     assert restarted.state.pattern_store.get(pattern["id"])["name"] == "Saved glow"
+    assert restarted.state.group_store.list()[1] == group
     assert restarted.state.calibration_store.frame(frame["frame_id"]) is not None
 
 

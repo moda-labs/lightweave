@@ -27,6 +27,7 @@ def test_snapshot_counts_healthy_placed_over_placed_total() -> None:
     assert snapshot["summary"]["total"] == 9
     assert snapshot["summary"]["attention"] == 2
     assert snapshot["pattern"]["pattern"] == "Glow"
+    assert len(snapshot["patterns"]) == 8
     assert snapshot["summary"]["firmware"]["consistent"] is True
     assert snapshot["summary"]["firmware"]["matching"] == 8
     assert snapshot["summary"]["firmware"]["expected"] == 9
@@ -196,25 +197,94 @@ def test_assign_sets_position_and_clears_attention() -> None:
     assert lantern["y"] == 0.75
 
 
-def test_blackout_preserves_pattern_and_sets_brightness_zero() -> None:
+def test_blackout_can_restore_distinct_group_brightness_values() -> None:
     conductor = MockConductor()
 
-    conductor.update_pattern("Sweep", 72, {"period": 8000})
-    ack = conductor.blackout()
+    conductor.update_pattern("White", 24, {}, group_id=0)
+    conductor.update_pattern("Fire Flicker", 56, {"period": 1200}, group_id=1)
+    blackout_ack = conductor.blackout()
+    # A repeated emergency click must not replace the saved values with zeroes.
+    conductor.blackout()
+    blacked_out = conductor.snapshot()
+    restore_ack = conductor.restore_blackout()
+    restored = conductor.snapshot()
+
+    assert blackout_ack["ok"] is True
+    assert blacked_out["blackout"] == {"restore_available": True}
+    assert [entry["config"]["brightness"] for entry in blacked_out["patterns"][:2]] == [0, 0]
+    assert restore_ack["ok"] is True
+    assert restored["blackout"] == {"restore_available": False}
+    assert [entry["config"]["brightness"] for entry in restored["patterns"][:2]] == [24, 56]
+    assert restored["patterns"][0]["config"]["pattern"] == "White"
+    assert restored["patterns"][1]["config"]["pattern"] == "Fire Flicker"
+
+
+def test_groups_keep_independent_patterns_and_membership() -> None:
+    conductor = MockConductor()
+    mac = conductor._lanterns[0].mac
+
+    group_ack = conductor.assign_group(mac, 2)
+    pattern_ack = conductor.update_pattern("Sweep", 72, {"period": 8000}, group_id=2)
+    snapshot = conductor.snapshot()
+
+    lantern = next(item for item in snapshot["lanterns"] if item["mac"] == mac)
+    assert group_ack["ok"] is True
+    assert pattern_ack["ok"] is True
+    assert lantern["group_id"] == 2
+    assert snapshot["patterns"][2]["config"]["pattern"] == "Sweep"
+    assert snapshot["patterns"][0]["config"]["pattern"] == "Glow"
+
+
+def test_pattern_update_without_group_targets_every_group() -> None:
+    conductor = MockConductor()
+
+    ack = conductor.update_pattern("White", 36, {})
+    patterns = conductor.snapshot()["patterns"]
 
     assert ack["ok"] is True
-    assert conductor.snapshot()["pattern"] == {
-        "pattern": "Sweep",
-        "brightness": 0,
-        "params": {"period": 8000},
-    }
+    expected = {"pattern": "White", "brightness": 36, "params": {}}
+    assert all(item["config"] == expected for item in patterns)
 
 
-def test_replace_moves_only_position_to_unpositioned_spare() -> None:
+def test_unpositioned_lantern_keeps_group_before_and_after_placement_changes() -> None:
+    conductor = MockConductor()
+    mac = "8C:94:DF:57:7F:14"
+
+    grouped = conductor.assign_group(mac, 4)
+    before = next(item for item in conductor.lanterns() if item["mac"] == mac)
+    conductor.assign(mac, 0.2, 0.3)
+    conductor.forget(mac)
+    after = next(item for item in conductor.lanterns() if item["mac"] == mac)
+
+    assert grouped["ok"] is True
+    assert before["position"] == "Missing"
+    assert before["group_id"] == 4
+    assert after["position"] == "Missing"
+    assert after["group_id"] == 4
+
+
+def test_led_count_profile_is_board_specific_and_survives_placement_changes() -> None:
+    conductor = MockConductor()
+    mac = "8C:94:DF:57:7F:14"
+
+    assert conductor.assign_led_count(mac, 64)["ok"] is True
+    assert conductor.assign_led_count(mac, 24)["ok"] is False
+    conductor.assign(mac, 0.2, 0.3)
+    conductor.forget(mac)
+    lantern = next(item for item in conductor.lanterns() if item["mac"] == mac)
+
+    assert lantern["position"] == "Missing"
+    assert lantern["led_count"] == 64
+
+
+def test_replace_moves_position_and_group_but_keeps_each_boards_led_profile() -> None:
     conductor = MockConductor()
     old_mac = "A0:B7:65:11:44:91"
     new_mac = "8C:94:DF:57:7F:14"
 
+    assert conductor.assign_group(old_mac, 2)["ok"] is True
+    assert conductor.assign_led_count(old_mac, 64)["ok"] is True
+    assert conductor.assign_led_count(new_mac, 32)["ok"] is True
     ack = conductor.replace(old_mac, new_mac)
     lanterns = conductor.lanterns()
     old = next(item for item in lanterns if item["mac"] == old_mac)
@@ -225,8 +295,12 @@ def test_replace_moves_only_position_to_unpositioned_spare() -> None:
     assert old["label"] == "#18"
     assert old["status"] == "missing"
     assert old["attention"] == "Not seen"
+    assert old["group_id"] == 2
+    assert old["led_count"] == 64
     assert new["position"] == "Set"
     assert new["label"] == "#57"
+    assert new["group_id"] == 2
+    assert new["led_count"] == 32
     assert new["x"] == 0.66
     assert new["y"] == 0.69
 

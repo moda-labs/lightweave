@@ -78,7 +78,7 @@ Snapshot shape:
     "sync": "locked",
     "firmware": {
       "version": "0.3.0",
-      "proto": 7,
+      "proto": 10,
       "build_id": 3225866068,
       "build_label": "c046bf54",
       "dirty": false
@@ -104,6 +104,15 @@ Snapshot shape:
     "brightness": 48,
     "params": {"hue": 40, "saturation": 100}
   },
+  "patterns": [
+    {"group_id": 0, "config": {"pattern": "Glow", "brightness": 48, "params": {"hue": 40, "saturation": 100}}},
+    {"group_id": 1, "config": {"pattern": "Sweep", "brightness": 64, "params": {"period": 8000}}}
+  ],
+  "groups": [
+    {"group_id": 0, "name": "Box lanterns", "label": "Group 1 · Box lanterns"},
+    {"group_id": 1, "name": "Bikes", "label": "Group 2 · Bikes"}
+  ],
+  "blackout": {"restore_available": false},
   "power": {
     "light_sleep_check_s": 4,
     "deep_sleep_check_min": 15,
@@ -126,8 +135,11 @@ Snapshot shape:
       "x": 0.54,
       "y": 0.47,
       "position": "Set",
+      "group_id": 1,
+      "group": "Group 2",
+      "led_count": 16,
       "attention": "None",
-      "firmware": {"version": "0.3.0", "proto": 7, "build_id": 3225866068, "build_label": "c046bf54", "dirty": false},
+      "firmware": {"version": "0.3.0", "proto": 10, "build_id": 3225866068, "build_label": "c046bf54", "dirty": false},
       "power": {"wh": 0.38, "avg_w": 0.71, "last_report_label": "4s ago"},
       "updated_at": 1720123456.0
     }
@@ -144,6 +156,13 @@ Snapshot shape:
   "events": [{"ts": 1720123456.0, "message": "mock conductor started"}]
 }
 ```
+
+The `patterns` array contains all eight group configs. The singular `pattern`
+field remains a Group 1 compatibility view for older clients.
+The `groups` array always contains all eight fixed slots. Names are optional,
+persist in the control plane's data directory, and decorate the numbered labels
+without changing the zero-based IDs sent to the conductor. `/api/state` and
+`/api/lanterns` apply the same labels to each lantern's `group` field.
 
 Lantern status values currently used by the prototype:
 
@@ -175,6 +194,14 @@ The map renders only positioned lanterns.
   -> make one physical lantern visibly identify itself; the UI labels this
   action **Locate** in the selected-lantern sheet and Node List rows.
 - `POST /api/lanterns/{mac}/assign` with `{"x":0.25,"y":0.75}`
+- `POST /api/lanterns/{mac}/group` with `{"group_id":2}` -> assign any
+  visible lantern to Group 3, whether or not it has an ID or coordinates. The
+  conductor creates its inventory row if needed. Group IDs are zero-based in
+  the API and labeled 1–8 in the UI.
+- `POST /api/lanterns/{mac}/led-count` with `{"led_count":32}` -> set an
+  board's physical profile, creating its inventory row if needed. Accepted
+  values are exactly 16, 32, and 64; the setting works before placement and
+  follows the board, not its position.
 - `POST /api/lanterns/{mac}/forget`
 - `POST /api/lanterns/replace` with `{"old_mac":"...","new_mac":"..."}`
 - `GET /api/patterns` -> saved pattern configs.
@@ -185,6 +212,10 @@ The map renders only positioned lanterns.
 - `PUT /api/patterns/{id}` with the same body as create -> replace a saved
   pattern config.
 - `DELETE /api/patterns/{id}` -> delete a saved pattern config.
+- `GET /api/groups` -> all eight numbered group slots with optional names and
+  display labels.
+- `PUT /api/groups/{group_id}` with `{"name":"Bikes"}` -> persist an operator
+  alias. Whitespace is normalized; an empty name restores the numbered label.
 - `GET /api/patterns/{id}/preview?t=0` -> PNG preview of that saved pattern
   config on the current positioned lantern layout.
 - `GET /api/patterns/{id}/preview.json?t=0` -> per-lantern RGBW/RGB/luma
@@ -195,11 +226,16 @@ The map renders only positioned lanterns.
 - `GET /api/patterns/{id}/review?duration_ms=8000&fps=4` -> automated review
   of the saved pattern config: pass/reject, score, issues, recommendations, and
   sequence metrics.
-- `POST /api/patterns/{id}/broadcast` -> broadcast that saved pattern config
-  through the existing conductor pattern command and push a state update.
+- `POST /api/patterns/{id}/broadcast?group_id=2` -> broadcast that saved pattern
+  config to Group 3 and push a state update. Omit `group_id` only for the legacy
+  all-groups behavior.
 - `POST /api/show/pattern` with
-  `{"pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300}}`
+  `{"pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300},"group_id":2}`
+  -> change only Group 3. Omitting `group_id` updates all eight groups for
+  backward-compatible API clients.
 - `POST /api/show/blackout`
+- `POST /api/show/restore` -> restore all eight brightness values captured by
+  the most recent blackout. Returns an error when no restore point is available.
 - `POST /api/operations/power-policy` with the runtime sleep/check policy.
 - `GET /api/provisioning/status` -> local USB flashing station, approved
   production artifact, session, connected boards, and the last 100 jobs.
@@ -325,10 +361,12 @@ lanterns() -> list[dict]
 tick() -> None
 identify(mac) -> ack
 assign(mac, x, y) -> ack
+assign_group(mac, group_id) -> ack
+assign_led_count(mac, led_count) -> ack
 forget(mac) -> ack
 replace(old_mac, new_mac) -> ack
 reserve_id(mac, reported_id=0) -> ack
-update_pattern(pattern, brightness, params) -> ack
+update_pattern(pattern, brightness, params, group_id=None) -> ack
 blackout() -> ack
 update_power_policy(policy) -> ack
 set_ota_mode(enabled) -> ack
@@ -355,11 +393,14 @@ Requests are one compact JSON object per line:
 ```json
 {"id":1,"cmd":"state"}
 {"id":2,"cmd":"assign","mac":"8C:94:DF:57:7F:14","x":0.25,"y":0.75}
-{"id":3,"cmd":"forget","mac":"8C:94:DF:57:7F:14"}
-{"id":4,"cmd":"replace","old_mac":"A0:B7:65:11:44:91","new_mac":"8C:94:DF:57:7F:14"}
-{"id":5,"cmd":"pattern","pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300}}
-{"id":6,"cmd":"blackout"}
-{"id":7,"cmd":"reserve_id","mac":"8C:94:DF:57:7F:14","reported_id":0}
+{"id":3,"cmd":"group","mac":"8C:94:DF:57:7F:14","group_id":2}
+{"id":4,"cmd":"led_count","mac":"8C:94:DF:57:7F:14","led_count":32}
+{"id":5,"cmd":"forget","mac":"8C:94:DF:57:7F:14"}
+{"id":6,"cmd":"replace","old_mac":"A0:B7:65:11:44:91","new_mac":"8C:94:DF:57:7F:14"}
+{"id":7,"cmd":"pattern","pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300},"group_id":2}
+{"id":8,"cmd":"blackout"}
+{"id":9,"cmd":"restore_blackout"}
+{"id":10,"cmd":"reserve_id","mac":"8C:94:DF:57:7F:14","reported_id":0}
 ```
 
 Responses echo the request id:
@@ -402,6 +443,11 @@ number while showing "Not seen".
 
 - 2-D field map of table `(x,y)` positions with roster liveness overlaid.
 - Drag to reposition; click to add/edit; `forget` to remove.
+- Assign any lantern to one of eight fixed show groups from its detail sheet or
+  directly from the Node List dropdown. Membership is independent of position,
+  so spares can be organized before layout and keep their group when forgotten.
+- Set each board to 16, 32, or 64 active LEDs from its detail sheet or the Node
+  List dropdown. This hardware profile is independent of placement and group.
 - Replace-node flow (§5.1): pick dead node + spare → one action does
   `assign` + `forget`.
 - **Identify:** click a dot → that physical lantern blinks so it can be
@@ -413,6 +459,8 @@ number while showing "Not seen".
 
 ### 3. Live show control
 
+- Group selector targets one of eight independent live pattern slots; each
+  lantern renders only the slot named by its cached table membership.
 - Pattern picker includes field-space patterns plus the ring-addressable
   `FIRE_FLICKER`; SOLID remains a bench-only power pattern.
 - Brightness slider + per-pattern param controls with human labels:

@@ -10,6 +10,9 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "groups.h"
+#include "led_profile.h"
+
 // The live field is 60 nodes, but identities survive board replacement. Keep
 // enough conductor-side history for a full second fleet without exhausting the
 // inventory. Protocol-v7 used exactly 64 rows; its migration shape stays fixed
@@ -24,7 +27,15 @@ struct TableEntry {
   float    x;
   float    y;
   uint8_t  flags;
+  uint8_t  group_id;
+  uint8_t  led_count;
 };
+
+// v9 reused one v8 trailing padding byte for group_id; v10 uses the next one for
+// led_count. The table blob size and every pre-existing field offset stay fixed.
+// Firmware still stamps an NVS schema version so old padding is never interpreted
+// as configuration.
+static_assert(sizeof(TableEntry) == 20, "TableEntry NVS layout changed");
 
 struct LayoutTable {
   TableEntry entries[TABLE_MAX];
@@ -93,6 +104,8 @@ inline bool tableValid(const LayoutTable& t) {
   if (t.count > TABLE_MAX) return false;
   for (uint8_t i = 0; i < t.count; i++) {
     if (t.entries[i].flags & (uint8_t)~TABLE_FLAG_POSITIONED) return false;
+    if (!groupIdValid(t.entries[i].group_id)) return false;
+    if (!ledCountValid(t.entries[i].led_count)) return false;
     for (uint8_t j = 0; j < i; j++) {
       if (memcmp(t.entries[i].mac, t.entries[j].mac, 6) == 0) return false;
       if (t.entries[i].id != 0 && t.entries[i].id == t.entries[j].id)
@@ -109,6 +122,7 @@ inline int tableEnsure(LayoutTable& t, const uint8_t mac[6]) {
   i = t.count++;
   memset(&t.entries[i], 0, sizeof(t.entries[i]));
   memcpy(t.entries[i].mac, mac, 6);
+  t.entries[i].led_count = DEFAULT_LED_COUNT;
   return i;
 }
 
@@ -189,6 +203,39 @@ inline bool tableReportedIdConflict(const LayoutTable& t,
   return owner >= 0 && memcmp(t.entries[owner].mac, mac, 6) != 0;
 }
 
+// Insert/update a complete row. Position-only edits above deliberately preserve
+// the current group; this variant is used by replacement/migration paths that
+// need to set membership atomically with the position.
+inline bool tableSetWithGroup(LayoutTable& t, const uint8_t mac[6], float x,
+                              float y, uint8_t group_id) {
+  if (group_id >= GROUP_COUNT) return false;
+  if (!tableSet(t, mac, x, y)) return false;
+  t.entries[tableFind(t, mac)].group_id = group_id;
+  return true;
+}
+
+// Assign any inventoried lantern to a group without touching position.
+inline bool tableSetGroup(LayoutTable& t, const uint8_t mac[6],
+                          uint8_t group_id) {
+  if (group_id >= GROUP_COUNT) return false;
+  int i = tableEnsure(t, mac);
+  if (i < 0) return false;
+  t.entries[i].group_id = group_id;
+  return true;
+}
+
+// Change the physical emitter count without touching identity, placement, or
+// show group. Hardware profiles belong to boards, not field positions.
+inline bool tableSetLedCount(LayoutTable& t, const uint8_t mac[6],
+                             uint8_t led_count) {
+  if (!ledCountValid(led_count)) return false;
+  int i = tableEnsure(t, mac);
+  if (i < 0) return false;
+  t.entries[i].led_count = led_count;
+  return true;
+}
+
+// Look up a node's position. Writes x,y and returns true when present.
 inline bool tableLookup(const LayoutTable& t, const uint8_t mac[6], float& x,
                         float& y) {
   int i = tableFind(t, mac);
@@ -198,13 +245,30 @@ inline bool tableLookup(const LayoutTable& t, const uint8_t mac[6], float& x,
   return true;
 }
 
-// Forget only deployment placement. The permanent MAC/ID inventory survives.
+// Forget only deployment placement. Permanent identity and group membership
+// survive so a spare can be organized before it receives coordinates.
 inline bool tableClearPosition(LayoutTable& t, const uint8_t mac[6]) {
   int i = tableFind(t, mac);
   if (i < 0 || !tableHasPosition(t.entries[i])) return false;
   t.entries[i].flags &= (uint8_t)~TABLE_FLAG_POSITIONED;
   t.entries[i].x = 0.0f;
   t.entries[i].y = 0.0f;
+  return true;
+}
+
+inline bool tableLookupGroup(const LayoutTable& t, const uint8_t mac[6],
+                             uint8_t& group_id) {
+  int i = tableFind(t, mac);
+  if (i < 0) return false;
+  group_id = groupIdSafe(t.entries[i].group_id);
+  return true;
+}
+
+inline bool tableLookupLedCount(const LayoutTable& t, const uint8_t mac[6],
+                                uint8_t& led_count) {
+  int i = tableFind(t, mac);
+  if (i < 0) return false;
+  led_count = ledCountSafe(t.entries[i].led_count);
   return true;
 }
 

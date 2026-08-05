@@ -18,9 +18,10 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
 - **Resilient synchronization.** Performers lock to the conductor clock, then
   free-run through missed beacons and re-lock when packets return. A dropped packet
   should not blank the field.
-- **Position-aware patterns.** The conductor stores each board as
-  `MAC -> permanent ID + optional (x, y)`. Each lantern evaluates `f(x, y, t)`
-  locally, which makes waves
+- **Position-aware, group-controlled patterns.** The conductor stores the field
+  as `MAC -> permanent ID + optional (x, y, group)` and broadcasts eight
+  independent group looks.
+  Each lantern evaluates its group's `f(x, y, t)` locally, which makes waves
   and sweeps scale from a few nodes to a full installation without increasing
   radio bandwidth.
 - **Offline operator UI.** A FastAPI control plane can run on a laptop or
@@ -33,9 +34,10 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   native unit tests, so sync math, pattern math, roster/table logic, power policy,
   and OTA helpers can be tested without hardware.
 
-Current release: `0.5.1`. The bench system has been verified with one conductor
-and two performers for sync, layout assignment, pattern control, runtime power
-policy, and the local web control plane. Field-wide OTA is implemented and has
+Current release: `0.6.0`. The bench system has been verified with one conductor
+and mixed 16/64-LED performers for sync, layout and pre-placement group assignment,
+independent group pattern control, reversible blackout, runtime power policy, and
+the local web control plane. Field-wide OTA is implemented and has
 completed successful bench installs, including same-protocol mixed-firmware
 recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
 the exact latest state.
@@ -60,7 +62,7 @@ FastAPI control plane
     v
 conductor ESP32
     |
-    | ESP-NOW beacons: clock + pattern + power policy + layout updates
+    | ESP-NOW beacons: clock + 8 group patterns + power policy + layout updates
     v
 performer ESP32 lanterns
     |
@@ -147,12 +149,14 @@ batch notes.
 
 - ESP-NOW conductor/performer roles with one image and runtime role selection.
 - 64-bit microsecond clock sync with free-run behavior on missed beacons.
-- Pattern broadcast with `pattern_id`, brightness, palette/params, and sequence
-  tracking.
+- Eight independent lantern-group pattern configs in each beacon, with
+  `pattern_id`, brightness, palette/params, and sequence tracking.
 - Patterns: Pulse, Palette Drift, Sweep, Glow, Firefly, Ocean Wave, White,
   ring-addressable Fire Flicker, and Solid test mode.
-- MAC-keyed roster and conductor-authoritative permanent board IDs plus optional layout positions.
-- Persistent role, position, pattern, brightness, and power policy in NVS.
+- MAC-keyed roster with conductor-authoritative permanent board IDs, optional
+  layout positions, and group membership.
+- Persistent role, position, group, group patterns, brightness, and power policy
+  in NVS.
 - Radio duty cycling, CPU light-sleep support, and schedule-driven deep-sleep
   policy.
 - Optional INA228 energy telemetry from reference nodes back to the conductor.
@@ -166,9 +170,9 @@ batch notes.
 - Mock conductor for UI development without hardware.
 - Real serial adapter for a USB-attached conductor.
 - Map view with placed lanterns, missing nodes, and unpositioned spares.
-- Node actions: identify, move/place, forget, and replace.
-- Pattern controls with conductor acknowledgements before writes are treated as
-  saved.
+- Node actions: identify, move/place, assign group, forget, and replace.
+- Per-group pattern controls with conductor acknowledgements before writes are
+  treated as saved.
 - Operations view for firmware consistency, recovery state, OTA staging/install,
   runtime power policy, and sparse power monitoring. Battery capacity defaults
   to the 384 Wh KUNLUN pack and can be changed in the UI; metered nodes can
@@ -202,6 +206,7 @@ role conductor|performer
 roster
 table
 assign <mac> <x> <y>
+group <mac> <1..8>
 forget <mac>
 pattern <n>
 bri <n>
