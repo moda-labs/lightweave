@@ -73,8 +73,9 @@ def test_repository_release_catalog_is_valid_and_newest_first() -> None:
 
     assert catalog[0].version == (repo_root / "VERSION").read_text(encoding="utf-8").strip()
     assert "0.3.0" in {release.version for release in catalog}
-    assert catalog[0].control_changes
-    assert catalog[0].firmware_changes
+    # A release may touch only one side. RELEASING.md calls for an empty list on
+    # the side that did not change, so require notes overall rather than both.
+    assert catalog[0].control_changes or catalog[0].firmware_changes
 
 
 def test_release_manifest_requires_immutable_tag_commit_and_hashed_firmware() -> None:

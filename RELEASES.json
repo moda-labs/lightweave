@@ -2,6 +2,17 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.7.1",
+      "date": "2026-08-05",
+      "title": "Repository move to Moda Labs",
+      "control_changes": [
+        "Moved the project to the moda-labs GitHub organization and repointed the deployment, flashing, and release links at the new location.",
+        "Accepted release manifests from both the previous and current repository locations, so the station and the Pi keep trusting releases published before the move.",
+        "Required each release manifest to name the same repository its own download links use."
+      ],
+      "firmware_changes": []
+    },
+    {
       "version": "0.7.0",
       "date": "2026-08-04",
       "title": "Multi-board flashing station",
