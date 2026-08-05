@@ -150,7 +150,9 @@ sudo install -o root -g root -m 0644 \
   /etc/systemd/system/lightweave-control.service
 sudo /opt/lightweave/deploy/pi/install-gitops.sh
 sudo systemctl daemon-reload
-sudo systemd-analyze verify /etc/systemd/system/lightweave-control.service
+sudo systemd-analyze verify \
+  /etc/systemd/system/lightweave-control.service \
+  /etc/systemd/system/lightweave-provisioner.service
 ```
 
 Replace all placeholders. `CONTROL_ALLOWED_ORIGINS` must be the exact public
@@ -165,6 +167,18 @@ CONTROL_SERIAL_RESET_ON_OPEN=0
 CONTROL_SERIAL_TIMEOUT_S=8.0
 ```
 
+Generate the scoped same-host provisioning credential without putting it in
+shell history, then add the resulting 64 hex characters as
+`PROVISIONER_TOKEN` in `control.env`:
+
+```bash
+openssl rand -hex 32
+```
+
+The control plane uses this token only for the provisioner's permanent-ID
+reservation endpoint. The USB daemon itself is reachable only through a Unix
+socket owned by `lightweave`; it does not listen on TCP.
+
 The 8-second serial timeout leaves enough wire time for the conductor's full
 inventory snapshot at 115200 baud, including a populated 128-board field.
 
@@ -175,7 +189,9 @@ the current release; it does not pull a different version. The control unit also
 requires `/etc/lightweave/control.env`; a missing file prevents startup.
 `StateDirectory=lightweave` creates `/var/lib/lightweave` as mode 0700. Combined
 with `ProtectSystem=strict`, that state directory is the service's only writable
-persistent location. It contains `ota/`, `patterns/`, and `calibration/`.
+persistent location. It contains `ota/`, `patterns/`, `calibration/`, and the
+provisioner's `station.json`, `jobs.json`, verified artifact cache, and local
+device safety registry under `provisioner/`.
 
 Check the final ownership and permissions before starting:
 
@@ -183,11 +199,34 @@ Check the final ownership and permissions before starting:
 sudo stat -c '%U:%G %a %n' /etc/lightweave/control.env /opt/lightweave
 sudo systemctl enable --now lightweave-control.service
 sudo systemctl status lightweave-control.service
+sudo systemctl status lightweave-provisioner.service
 sudo ss -ltnp 'sport = :8000'
 ```
 
 Expected: the environment is `root:root 600`, the checkout is root-owned, and
 Uvicorn listens only on `127.0.0.1:8000`, never `0.0.0.0:8000`.
+
+### Verify the USB flashing station
+
+Use a powered USB hub and keep its numbered performer ports separate from the
+conductor's fixed port. The provisioner resolves `CONTROL_SERIAL_PORT` through
+its by-path symlink and removes that device from discovery before any probe.
+Check the private socket and both service journals:
+
+```bash
+sudo -u lightweave test -S /run/lightweave-provisioner/provisioner.sock
+sudo journalctl -u lightweave-provisioner.service -n 100 --no-pager
+sudo journalctl -u lightweave-control.service -n 100 --no-pager
+```
+
+Open the control plane's **Flashing** screen. Newly encountered hub ports wait
+without flashing until each opaque port identity is mapped to the matching
+physical slot number. Start with one board, then prove five-way throughput
+before raising the UI limit toward ten. **Arm registered performers** never
+erases blank firmware. Use **Arm new boards for 15 minutes** only during a
+supervised factory batch; it is the explicit authorization for one-time erase.
+Stopping the station prevents new jobs but lets already-running flash
+subprocesses finish.
 
 ## 5. Verify the private service boundary
 
@@ -446,11 +485,15 @@ sudo install -o root -g root -m 0644 \
   /opt/lightweave/deploy/pi/lightweave-control.service \
   /etc/systemd/system/lightweave-control.service
 sudo install -o root -g root -m 0644 \
+  /opt/lightweave/deploy/pi/lightweave-provisioner.service \
+  /etc/systemd/system/lightweave-provisioner.service
+sudo install -o root -g root -m 0644 \
   /opt/lightweave/deploy/pi/cloudflared.service \
   /etc/systemd/system/cloudflared.service
 sudo systemctl daemon-reload
 sudo systemd-analyze verify \
   /etc/systemd/system/lightweave-control.service \
+  /etc/systemd/system/lightweave-provisioner.service \
   /etc/systemd/system/cloudflared.service
 sudo ln -sfn "/opt/lightweave/.venvs/$new_commit" /opt/lightweave/.venv.new
 sudo mv -Tf /opt/lightweave/.venv.new /opt/lightweave/.venv

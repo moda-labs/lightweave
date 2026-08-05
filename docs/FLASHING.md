@@ -244,12 +244,105 @@ GPIO2 blink is the zero-wiring sync check).
 
 ---
 
-## Batch FireBeetle auto-flashing (macOS)
+## Multi-board flashing station (control-plane UI)
 
-Production releases publish the OTA binary plus a hash-pinned serial ZIP with
+The normal production workflow is now the **Flashing** screen in the control
+plane. A separate local provisioner owns USB discovery and flash subprocesses,
+so closing or refreshing the browser does not interrupt an in-progress board.
+Use a powered USB hub with individually numbered ports; the first time a port is
+seen, map its topology-derived identity to the physical number printed on the
+hub. Those mappings survive port-name shuffles and service restarts.
+
+The station defaults to five concurrent boards and can be set from one to ten.
+It downloads only the checksum-pinned serial bundle selected by the production
+channel, keeps the last verified bundle when GitHub is temporarily unavailable,
+and records the last 100 jobs. The bundle includes the matching `esptool` Python
+package and license; every tool file is hash-verified before probing, so the Pi
+does not need a separately installed source-only flashing package. The station
+never builds the local checkout. The configured
+conductor serial path is excluded before probing, and a board that reports the
+CONDUCTOR role is always refused.
+
+The Pi preflights this runtime before a session can be armed. A production
+release made before flash-plan schema 2 is rejected with an upgrade message;
+promote a release built from the station code before using the new Pi workflow.
+
+There are two explicit modes:
+
+- **Arm registered performers** updates recognized Lightweave performers and
+  fails closed on blank/factory firmware.
+- **Arm new boards for 15 minutes** temporarily authorizes the one-time full
+  erase required for previously unseen factory boards. The authorization expires
+  automatically and is captured when each job begins.
+
+Permanent numbers come from the conductor's inventory, not from a per-laptop
+counter. The provisioner asks the control plane to reserve/adopt the board's ID,
+writes it to performer NVS, reads it back, then shows a large `BOARD #n` result
+for physical labeling. If the authority is unavailable or reports a conflict,
+the board fails without receiving a new number.
+
+### macOS station
+
+Install the project dependencies into the same virtual environment used by the
+control plane, then install the per-user LaunchAgent:
+
+```bash
+.venv/bin/python -m pip install \
+  --require-hashes --only-binary=:all: \
+  --requirement control/requirements.lock
+.venv/bin/python scripts/install_flashing_station.py install
+```
+
+The installer generates a private station credential on first install and
+preserves it across reinstalls. State, the Unix socket, credential, and log live
+under `~/Library/Application Support/Lightweave/provisioner/`. The control plane
+on the same Mac discovers that socket and credential automatically. Installation
+also unloads and removes the conflicting legacy one-board LaunchAgent while
+preserving its cached artifacts and device registry.
+
+If the conductor is also attached to the Mac, exclude its stable serial path:
+
+```bash
+.venv/bin/python scripts/install_flashing_station.py install \
+  --conductor-port /dev/cu.usbserial-CONDUCTOR
+```
+
+If the authoritative conductor remains on the Pi, securely copy the Pi's
+`PROVISIONER_TOKEN` into the Mac station's `token` file (mode `0600`) and point
+the LaunchAgent at the Pi's HTTPS endpoint:
+
+```bash
+.venv/bin/python scripts/install_flashing_station.py install \
+  --authority-url https://control.example.com/api/internal/provisioning/reserve-id
+```
+
+Remote plaintext HTTP is rejected. Remove the LaunchAgent without deleting its
+history or credential with:
+
+```bash
+.venv/bin/python scripts/install_flashing_station.py uninstall
+```
+
+### Raspberry Pi station
+
+The GitOps installer deploys `lightweave-provisioner.service` beside the control
+plane. Both run as the unprivileged `lightweave` account with `dialout` access;
+the UI reaches the daemon only through
+`/run/lightweave-provisioner/provisioner.sock`. Generate one private token with
+`openssl rand -hex 32`, place it in `/etc/lightweave/control.env` as
+`PROVISIONER_TOKEN`, and keep the conductor's persistent by-path value in
+`CONTROL_SERIAL_PORT` so it is excluded from performer discovery. See the Pi
+runbook for installation and journal commands.
+
+## Legacy one-at-a-time FireBeetle watcher (macOS)
+
+The older one-at-a-time LaunchAgent remains available for a simple cable-only
+bench. Do not run it at the same time as the multi-board station. Production
+releases publish the OTA binary plus a hash-pinned serial ZIP with
 the bootloader, partition table, OTA boot helper, canonical field firmware, and
-exact flash plan. The watcher follows the reviewed GitHub production channel;
-it never builds the local checkout, so local edits cannot change provisioning.
+exact flash plan plus licensed flashing runtime. The watcher follows the
+reviewed GitHub production channel; it never builds the local checkout, so local
+edits cannot change provisioning.
 If GitHub is temporarily unavailable it retains the last verified cache.
 
 After a release is promoted:

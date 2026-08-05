@@ -8,10 +8,35 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**149 pass**) is green; control tests (**301 pass**) are green; all three
+(**152 pass**) is green; control tests (**332 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-03): **the v0.5.1 hotfix makes the permanent-ID release
+Latest locally (2026-08-04): **the multi-board USB flashing station is built on
+`feat/flashing-station`.** The control plane now has a Flashing screen backed by
+a separate same-host provisioner daemon. It detects FireBeetles on macOS and
+Linux, binds USB topology to numbered powered-hub slots, flashes five boards in
+parallel by default (configurable to ten), streams per-board stages over the
+existing WebSocket, supports retry, and persists slot configuration plus the
+last 100 jobs. Factory erase requires an explicit 15-minute session. Production
+mode fails closed on blank boards, the configured conductor path is excluded
+before probing, and role verification refuses any conductor. Permanent-ID
+reservation now goes through the conductor's canonical NVS inventory before the
+performer is written and read back. Packaging includes a hardened Pi systemd
+unit, GitOps deployment integration, a macOS LaunchAgent installer, and a pinned
+flash runtime bundled inside the checksum-pinned serial artifact. The browser
+workflow was exercised at desktop and 375 px mobile widths without
+console/network errors. Hardware throughput proof with a real powered hub and
+5-10 simultaneous FireBeetles remains the next gate.
+The Pi workflow also requires promotion of a new release whose serial ZIP uses
+flash-plan schema 2; the current v0.5.1 artifact fails preflight clearly rather
+than starting board jobs without a usable local flash runtime.
+
+The one-time inventory/tagging pass is complete: **53 boards are registered**.
+No performer firmware migration is required for the station itself; only the
+conductor needs the new `reserve_id` serial RPC before a station may allocate a
+new permanent number.
+
+Previous latest (2026-08-03): **the v0.5.1 hotfix makes the permanent-ID release
 deploy reliably on the Pi.** The first v0.5.0 production reconcile exposed that
 fresh commit-specific Python environments retained `0700` mode from their
 temporary build directory, so the unprivileged control service could not execute
