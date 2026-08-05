@@ -2371,17 +2371,6 @@ async function runAction(action) {
       toast("station stopped accepting new boards");
       return;
     }
-    if (action === "enter-ota" || action === "exit-ota") {
-      const enabled = action === "enter-ota";
-      if (enabled && !confirm("Enter maintenance mode for a field-wide firmware update?")) return;
-      const ack = await api("/api/operations/ota-mode", {
-        method: "POST",
-        body: JSON.stringify({ enabled }),
-      });
-      toast(ack.message);
-      await refresh();
-      return;
-    }
     if (action === "stage-ota-artifact") {
       const file = $("#ota-file")?.files?.[0];
       if (!file) return;

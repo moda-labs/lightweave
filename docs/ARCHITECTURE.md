@@ -480,6 +480,13 @@ An operator may pause between commands and later continue from the verified
 prefix. Offline inventory rows are deferred rather than blocking the online
 field.
 
+The first rollout has one explicit bootstrap seam: the USB-attached conductor
+must be direct-flashed once because the previously deployed firmware cannot
+serve the new repair/probe/activation serial RPCs. Control-plane preflight
+detects that legacy command set before `ota_begin` and reports the required
+action. After that, existing v10 performers can transition through OTA; unknown
+additive message types remain safe during the mixed-version pass.
+
 The control plane derives a Recovery summary from live state and the durable last
 install attempt. It classifies missing lanterns, same-protocol mixed firmware,
 and failed OTA nodes into one operator action surface. Rerunning the same staged

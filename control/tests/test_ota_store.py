@@ -19,6 +19,18 @@ def test_persistent_ota_install_survives_process_recreation(tmp_path) -> None:
     }
 
 
+def test_volatile_progress_waits_for_the_next_checkpoint_before_persisting(tmp_path) -> None:
+    store = OtaInstallStore(tmp_path)
+    install = PersistentOtaInstall(store, store.load())
+    install.reset({"running": True, "bytes_sent": 0})
+
+    install.update_volatile({"bytes_sent": 128})
+    assert store.load()["bytes_sent"] == 0
+
+    install.update({"repair_round": 1})
+    assert store.load()["bytes_sent"] == 128
+
+
 def test_ota_install_store_ignores_invalid_or_non_object_state(tmp_path) -> None:
     store = OtaInstallStore(tmp_path)
     store.path.write_text("not json", encoding="utf-8")

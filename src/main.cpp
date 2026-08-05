@@ -707,6 +707,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     case MSG_OTA_STATUS: {
       if (!isConductor()) return;
       if (len != (int)sizeof(OtaStatusMsg)) return;
+      if (!otaCohortContains(g_ota_cohort, src)) return;
       OtaStatusMsg m;
       memcpy(&m, data, sizeof(m));
       if (memcmp(m.mac, src, 6) != 0) return;

@@ -24,7 +24,12 @@ is journaled beside the checksum-pinned artifact, resumes after control-service
 restart, and supports an explicit pause/resume from the verified conductor
 prefix. Native logic, control API fault injection, rolling-order, persistence,
 and canonical field-build checks are green. Full 53-board hardware verification
-is still required before calling the scale behavior field-proven.
+is still required before calling the scale behavior field-proven. Because the
+currently deployed conductor does not yet have the new repair/probe/activation
+serial RPCs, direct-flash that one USB-attached conductor from this release
+before the first live OTA. The control plane detects the legacy command set and
+fails before `ota_begin`, with this instruction, rather than leaving a partial
+transfer. Performers may transition through OTA after that one conductor update.
 
 Latest on main (2026-08-04): **the multi-board USB flashing station is built.**
 The control plane now has a Flashing screen backed by

@@ -13,6 +13,7 @@ import sys
 import time
 import zlib
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -66,7 +67,6 @@ STATIC_DIR = Path(__file__).with_name("static")
 REPO_ROOT = STATIC_DIR.parents[1]
 OTA_CHUNK_RETRIES = 3
 OTA_STATUS_FRESH_S = 60
-OTA_PROGRESS_POLL_CHUNKS = 64
 OTA_CHECKPOINT_CHUNKS = 256
 OTA_STATUS_SETTLE_S = 0.35
 OTA_ACTIVATION_POLL_S = 0.5
@@ -385,7 +385,7 @@ def create_app(
                         attempt += 1
                         try:
                             app.state.ota_operation_lock = acquire_ota_operation_lock()
-                            state = await conductor_call("snapshot", ota_internal=True)
+                            state = await conductor_call("snapshot")
                             app.state.ota_reserved = True
                             await ota_install_worker(artifact, state, resume=True)
                             return
@@ -508,7 +508,6 @@ def create_app(
         "full_voltage": float(os.getenv("CONTROL_BATTERY_FULL_VOLTAGE", DEFAULT_FULL_VOLTAGE)),
     }
     app.state.power_full_anchors = {}
-    app.state.ota_mode_started_at = None
     app.state.conductor_lock = asyncio.Lock()
     app.state.ws_clients: dict[WebSocket, str] = {}
 
@@ -843,7 +842,7 @@ def create_app(
         ota = state.get("ota") or {}
         return ota.get("ready") is True or int(ota.get("ready_count") or 0) > 0
 
-    async def conductor_call(method: str, *args: Any, ota_internal: bool = False) -> Any:
+    async def conductor_call(method: str, *args: Any) -> Any:
         async with app.state.conductor_lock:
             result = await asyncio.to_thread(getattr(app.state.conductor, method), *args)
         if method == "snapshot" and isinstance(result, dict):
@@ -995,7 +994,7 @@ def create_app(
             if attempt:
                 await asyncio.sleep(OTA_POST_REBOOT_POLL_S)
             try:
-                state = await conductor_call("snapshot", ota_internal=True)
+                state = await conductor_call("snapshot")
             except SerialProtocolError:
                 continue
             conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
@@ -2133,7 +2132,6 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        app.state.ota_mode_started_at = time.time() if request.enabled else None
         await publish_state("ota-mode")
         return ack
 
@@ -2186,7 +2184,7 @@ def create_app(
         async def call(method: str, *args: Any) -> dict[str, Any]:
             if app.state.ota_pause_requested:
                 raise OtaPauseRequested
-            return await conductor_call(method, *args, ota_internal=True)
+            return await conductor_call(method, *args)
 
         async def call_until_ok(method: str, *args: Any) -> dict[str, Any]:
             attempt = 0
@@ -2219,6 +2217,7 @@ def create_app(
                     detail=error,
                 )
 
+        @lru_cache(maxsize=None)
         def checkpoint_crc(offset: int) -> int:
             return zlib.crc32(data[:offset]) & 0xFFFFFFFF
 
@@ -2307,8 +2306,6 @@ def create_app(
 
         try:
             await call_until_ok("set_ota_mode", True)
-            app.state.ota_mode_started_at = time.time()
-
             current = await progress()
             active = current.get("active") is True
             staged = current.get("staged") is True
@@ -2362,7 +2359,7 @@ def create_app(
                     (offset + artifact.chunk_size - 1) // artifact.chunk_size,
                     artifact.chunks,
                 )
-                app.state.ota_install.update({
+                app.state.ota_install.update_volatile({
                     "phase": "broadcasting",
                     "bytes_sent": offset,
                     "chunks_sent": chunks_sent,
@@ -2422,7 +2419,21 @@ def create_app(
                 })
 
             app.state.ota_install.update({"phase": "activating-conductor", "active_mac": None})
-            await call_until_ok("ota_activate", None)
+            try:
+                conductor_activation = await call("ota_activate", None)
+            except SerialProtocolError as error:
+                # The expected reboot can sever serial after the command was
+                # accepted but before its JSON ACK reaches the Pi. Live firmware
+                # identity below is the authoritative completion check.
+                app.state.ota_install.update({
+                    "last_retry": {"attempt": 1, "error": str(error)},
+                })
+            else:
+                if conductor_activation.get("ok") is not True:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=str(conductor_activation.get("error") or "conductor activation failed"),
+                    )
             nodes = await infer_ota_complete_nodes(artifact.size, artifact.crc32, expected_macs)
             verified_macs = {str(node["mac"]) for node in nodes}
             if verified_macs != expected_macs:
@@ -2512,6 +2523,16 @@ def create_app(
                     if not ota_ready_for_install(state):
                         blockers = ", ".join(ota.get("blocked") or ["field is not OTA-ready"])
                         raise HTTPException(status_code=400, detail=f"OTA not ready: {blockers}")
+                    capability = await asyncio.to_thread(app.state.conductor.ota_probe)
+                    capability_error = str(capability.get("error") or "").lower()
+                    if capability.get("ok") is not True and "unknown cmd" in capability_error:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "the attached conductor must be direct-flashed to this release "
+                                "before the first reliable live OTA"
+                            ),
+                        )
                     app.state.ota_reserved = True
             except Exception as error:
                 if operation_lock is not None:
@@ -2555,6 +2576,13 @@ def create_app(
             await task
             app.state.ota_task = None
             app.state.ota_reserved = False
+            if app.state.ota_install.get("complete") is True:
+                app.state.ota_pause_requested = False
+                return {
+                    "ok": True,
+                    "message": "firmware update completed before it could be paused",
+                    "install": ota_install_progress(app.state.ota_install),
+                }
             app.state.ota_install.update({
                 "running": False,
                 "complete": False,

@@ -152,6 +152,10 @@ class PersistentOtaInstall(dict[str, Any]):
         super().update(*args, **kwargs)
         self.store.save(dict(self))
 
+    def update_volatile(self, *args: Any, **kwargs: Any) -> None:
+        """Update live UI progress without wearing storage on every OTA chunk."""
+        super().update(*args, **kwargs)
+
     def reset(self, value: dict[str, Any]) -> None:
         super().clear()
         super().update(value)

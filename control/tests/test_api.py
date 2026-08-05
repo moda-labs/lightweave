@@ -293,6 +293,46 @@ class PausableOtaConductor(MockConductor):
         return super().ota_chunk(offset, data)
 
 
+class LegacyOtaCommandConductor(MockConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.begin_called = False
+
+    def ota_probe(self) -> dict:
+        return {"ok": False, "error": "unknown cmd"}
+
+    def ota_begin(self, size: int, crc32: int) -> dict:
+        self.begin_called = True
+        return super().ota_begin(size, crc32)
+
+
+class ConductorActivationAckTimeout(MockConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.activation_timed_out = False
+
+    def ota_activate(self, mac: str | None = None) -> dict:
+        ack = super().ota_activate(mac)
+        if mac is None and not self.activation_timed_out:
+            self.activation_timed_out = True
+            raise SerialProtocolError("timeout waiting for ota_activate ack")
+        return ack
+
+
+class CompletesDuringPauseConductor(MockConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.final_mode_started = threading.Event()
+        self.final_mode_release = threading.Event()
+
+    def set_ota_mode(self, enabled: bool) -> dict:
+        if not enabled and self.ota_installed_crc32 is not None:
+            self.final_mode_started.set()
+            if not self.final_mode_release.wait(timeout=5):
+                raise RuntimeError("test final OTA mode release timed out")
+        return super().set_ota_mode(enabled)
+
+
 class NackingOtaChunkConductor(MockConductor):
     def __init__(self) -> None:
         super().__init__()
@@ -1771,6 +1811,43 @@ def test_ota_install_activates_performers_one_at_a_time_then_conductor(
     assert conductor.activation_order[-1] is None
 
 
+def test_ota_install_verifies_identity_when_conductor_activation_ack_is_lost(
+    tmp_path, managed_client
+) -> None:
+    conductor = ConductorActivationAckTimeout()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9" + bytes(range(255)) * 2,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.activation_timed_out is True
+    assert install["last_retry"]["error"] == "timeout waiting for ota_activate ack"
+
+
+def test_ota_preflight_rejects_legacy_conductor_before_begin(tmp_path, managed_client) -> None:
+    conductor = LegacyOtaCommandConductor()
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    response = client.post("/api/operations/ota-install")
+
+    assert response.status_code == 409
+    assert "direct-flashed" in response.json()["detail"]
+    assert conductor.begin_called is False
+
+
 def test_ota_install_can_pause_and_resume_from_the_conductor_prefix(
     tmp_path, managed_client
 ) -> None:
@@ -1800,6 +1877,37 @@ def test_ota_install_can_pause_and_resume_from_the_conductor_prefix(
     resumed = wait_for_ota_terminal(client)
     assert resumed["complete"] is True
     assert resumed["bytes_sent"] == len(firmware)
+
+
+def test_pause_does_not_overwrite_an_install_that_completes_during_the_request(
+    tmp_path, managed_client
+) -> None:
+    conductor = CompletesDuringPauseConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9" + bytes(range(255)) * 2,
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert client.post("/api/operations/ota-install").status_code == 202
+    assert conductor.final_mode_started.wait(timeout=2)
+    response: dict[str, object] = {}
+
+    def pause() -> None:
+        response["value"] = client.delete("/api/operations/ota-install")
+
+    pause_thread = threading.Thread(target=pause)
+    pause_thread.start()
+    time.sleep(0.05)
+    conductor.final_mode_release.set()
+    pause_thread.join(timeout=2)
+
+    paused = response["value"]
+    assert paused.status_code == 200
+    assert paused.json()["install"]["complete"] is True
+    assert "completed before" in paused.json()["message"]
 
 
 def test_ota_install_restarts_and_repairs_polled_node_failure(tmp_path, managed_client) -> None:
@@ -2220,7 +2328,7 @@ def test_failed_calibration_restore_keeps_previous_pattern_for_retry() -> None:
     assert app.state.calibration_previous_pattern == previous
 
 
-def test_ota_start_returns_before_maintenance_settle_delay(
+def test_ota_start_returns_before_background_transfer_finishes(
     tmp_path, managed_client
 ) -> None:
     conductor = MockConductor()
@@ -2228,7 +2336,6 @@ def test_ota_start_returns_before_maintenance_settle_delay(
         lantern.status = "alive"
     conductor.set_ota_mode(True)
     app = create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
-    app.state.ota_mode_started_at = time.time()
     client = managed_client(app)
     client.put(
         "/api/operations/ota-artifact?filename=firmware.bin",
