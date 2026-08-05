@@ -1157,7 +1157,9 @@ function renderOta() {
   const fileInput = $("#ota-file");
   fileInput.disabled = installing;
   $('[data-action="stage-ota-artifact"]').disabled = installing || !fileInput?.files?.length;
-  $('[data-action="install-ota"]').disabled = installing || !otaReadyForInstall() || !otaArtifact;
+  const installButton = $('[data-action="install-ota"]');
+  installButton.textContent = otaInstall?.phase === "paused" ? "Resume update" : "Update online field";
+  installButton.disabled = installing || !otaReadyForInstall() || !otaArtifact;
   $('[data-action="pause-ota"]').hidden = !installing;
 }
 
@@ -1181,7 +1183,8 @@ function renderOtaProgress() {
   const error = otaInstall?.error;
   const targetCount = Number(otaInstall?.target_count || 0);
   const deferredCount = Number(otaInstall?.deferred_count || 0);
-  const show = running || complete || error;
+  const paused = otaInstall?.phase === "paused";
+  const show = running || complete || error || paused;
   progress.hidden = !show;
   if (!show) return;
 
