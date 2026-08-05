@@ -7,7 +7,7 @@ next steps only.
 **Read order:** this doc → `ARCHITECTURE.md` → `README.md` →
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
-**Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
+**Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
 (**158 pass**) is green; control tests (**369 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 

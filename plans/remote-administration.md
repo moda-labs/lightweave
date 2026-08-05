@@ -1,7 +1,7 @@
 # Remote administration
 
 > **Status:** Building
-> **Tracking issue:** underminedsk/lightweave#3 · **Created:** 2026-07-22 · **Last amended:** 2026-07-23 (see Amendments)
+> **Tracking issue:** moda-labs/lightweave#3 · **Created:** 2026-07-22 · **Last amended:** 2026-07-23 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 

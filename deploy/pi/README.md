@@ -86,7 +86,7 @@ Clone the repository, then check out an explicitly reviewed release tag or
 commit. Replace `RELEASE_REF`; do not deploy a moving branch by accident.
 
 ```bash
-sudo git clone https://github.com/underminedsk/lightweave.git /opt/lightweave
+sudo git clone https://github.com/moda-labs/lightweave.git /opt/lightweave
 sudo git -C /opt/lightweave fetch --tags --prune
 sudo git -C /opt/lightweave checkout --detach RELEASE_REF
 sudo python3 -m venv /opt/lightweave/.venv

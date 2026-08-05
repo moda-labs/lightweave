@@ -24,10 +24,17 @@ from typing import Any, Callable
 
 
 DEFAULT_CHANNEL_URL = (
-    "https://raw.githubusercontent.com/underminedsk/lightweave/"
+    "https://raw.githubusercontent.com/moda-labs/lightweave/"
     "main/deploy/channels/production.json"
 )
-DEFAULT_REPOSITORY = "https://github.com/underminedsk/lightweave.git"
+# The project moved from underminedsk/ to moda-labs/ after v0.7.0. Release
+# manifests are immutable, so releases published before the move still name the
+# old remote. Both stay allowed until every promoted release names moda-labs.
+DEFAULT_REPOSITORIES = (
+    "https://github.com/moda-labs/lightweave.git",
+    "https://github.com/underminedsk/lightweave.git",
+)
+DEFAULT_REPOSITORY = DEFAULT_REPOSITORIES[0]
 MAX_CHANNEL_BYTES = 16 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
 MAX_FIRMWARE_BYTES = 0x140000
@@ -37,10 +44,25 @@ class ReconcileError(RuntimeError):
     pass
 
 
+def _parse_repositories(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return DEFAULT_REPOSITORIES
+    entries = tuple(entry.strip() for entry in value.split(",") if entry.strip())
+    if not entries:
+        raise ReconcileError("allowed repository list is empty")
+    return entries
+
+
+def _same_repository(left: str, right: str) -> bool:
+    return (
+        left.rstrip("/").removesuffix(".git") == right.rstrip("/").removesuffix(".git")
+    )
+
+
 @dataclass(frozen=True)
 class ReconcileConfig:
     channel_url: str = DEFAULT_CHANNEL_URL
-    allowed_repository: str = DEFAULT_REPOSITORY
+    allowed_repositories: tuple[str, ...] = DEFAULT_REPOSITORIES
     repo: Path = Path("/opt/lightweave")
     data_dir: Path = Path("/var/lib/lightweave")
     deployment_dir: Path = Path("/var/lib/lightweave-gitops")
@@ -57,7 +79,9 @@ class ReconcileConfig:
     def from_environ(cls, environ: dict[str, str] | os._Environ[str]) -> "ReconcileConfig":
         return cls(
             channel_url=environ.get("LIGHTWEAVE_GITOPS_CHANNEL_URL", DEFAULT_CHANNEL_URL),
-            allowed_repository=environ.get("LIGHTWEAVE_GITOPS_ALLOWED_REPOSITORY", DEFAULT_REPOSITORY),
+            allowed_repositories=_parse_repositories(
+                environ.get("LIGHTWEAVE_GITOPS_ALLOWED_REPOSITORY")
+            ),
             repo=Path(environ.get("LIGHTWEAVE_GITOPS_REPO", "/opt/lightweave")),
             data_dir=Path(environ.get("LIGHTWEAVE_GITOPS_DATA_DIR", "/var/lib/lightweave")),
             deployment_dir=Path(
@@ -226,9 +250,25 @@ class GitOpsReconciler:
         channel = self.releases.parse_release_channel(channel_document)
         if not channel["enabled"]:
             return None
-        expected_release = self.releases.release_from_manifest_url(
-            channel["manifest_url"], self.config.allowed_repository
-        )
+        expected_release = None
+        expected_repository = None
+        last_error = None
+        for repository in self.config.allowed_repositories:
+            try:
+                expected_release = self.releases.release_from_manifest_url(
+                    channel["manifest_url"], repository
+                )
+            except self.releases.ReleaseMetadataError as error:
+                last_error = error
+                continue
+            expected_repository = repository
+            break
+        if expected_repository is None:
+            if last_error is None:
+                raise ReconcileError("no allowed repository is configured")
+            # Re-raise the release module's own error so callers keep seeing a
+            # ReleaseMetadataError for a non-canonical URL.
+            raise last_error
         manifest_bytes, manifest_document = self._json_download(
             channel["manifest_url"],
             MAX_MANIFEST_BYTES,
@@ -237,7 +277,9 @@ class GitOpsReconciler:
         if hashlib.sha256(manifest_bytes).hexdigest() != channel["manifest_sha256"]:
             raise ReconcileError("release manifest SHA-256 mismatch")
         manifest = self.releases.parse_release_manifest(manifest_document)
-        if manifest.repository != self.config.allowed_repository:
+        # The manifest must name the same remote its own URL was served from,
+        # so a moda-labs channel entry cannot smuggle in an underminedsk build.
+        if not _same_repository(manifest.repository, expected_repository):
             raise ReconcileError("release manifest repository is not allowed")
         if manifest.release != expected_release:
             raise ReconcileError("release manifest does not match its canonical URL")
@@ -308,9 +350,11 @@ class GitOpsReconciler:
             current = current.parent
 
     def _verify_origin(self) -> None:
-        actual = self._git_output("remote", "get-url", "origin").rstrip("/")
-        expected = self.config.allowed_repository.rstrip("/")
-        if actual.removesuffix(".git") != expected.removesuffix(".git"):
+        actual = self._git_output("remote", "get-url", "origin")
+        if not any(
+            _same_repository(actual, repository)
+            for repository in self.config.allowed_repositories
+        ):
             raise ReconcileError("repository origin does not match the allowed repository")
         if self._git_output("status", "--porcelain", "--untracked-files=all"):
             raise ReconcileError("repository working tree is not clean")

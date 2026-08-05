@@ -909,6 +909,45 @@ def test_autoflash_refreshes_only_canonical_hash_pinned_release(
         autoflash.refresh_artifact(channel_url, tmp_path / "cache")
 
 
+def test_autoflash_accepts_either_remote_but_rejects_a_mixed_manifest() -> None:
+    bundle_data = b"serial bundle"
+    legacy = autoflash_manifest(bundle_data)
+    assert legacy["repository"] == "https://github.com/underminedsk/lightweave.git"
+    assert autoflash._validate_manifest(legacy)[0] == TAG
+
+    current_repository = "https://github.com/moda-labs/lightweave.git"
+    assert current_repository in autoflash.ALLOWED_REPOSITORIES
+    current = json.loads(json.dumps(legacy))
+    current["repository"] = current_repository
+    current["serial_flash"]["url"] = (
+        f"{current_repository.removesuffix('.git')}/releases/download/"
+        f"{TAG}/{current['serial_flash']['filename']}"
+    )
+    assert autoflash._validate_manifest(current)[0] == TAG
+
+    # Both remotes are allowed on their own, but a manifest may not name one
+    # remote while serving its bundle from the other.
+    mixed = json.loads(json.dumps(legacy))
+    mixed["repository"] = current_repository
+    with pytest.raises(ValueError, match="URL is not canonical"):
+        autoflash._validate_manifest(mixed)
+
+    foreign = json.loads(json.dumps(legacy))
+    foreign["repository"] = "https://github.com/attacker/lightweave.git"
+    with pytest.raises(ValueError, match="repository is not allowed"):
+        autoflash._validate_manifest(foreign)
+
+
+def test_autoflash_default_channel_is_served_from_the_current_remote() -> None:
+    # The old owner's paths only redirect until that name is claimed again.
+    owner_repo = autoflash.ALLOWED_REPOSITORIES[0].removeprefix(
+        "https://github.com/"
+    ).removesuffix(".git")
+    assert autoflash.DEFAULT_CHANNEL.startswith(
+        f"https://raw.githubusercontent.com/{owner_repo}/"
+    )
+
+
 def test_autoflash_uses_stable_homebrew_platformio_interpreter(tmp_path: Path) -> None:
     prefix = tmp_path / "homebrew"
     versioned = prefix / "Cellar/platformio/6.1.19/libexec/bin/python"
@@ -1100,6 +1139,46 @@ def test_promote_rejects_noncanonical_manifest_url(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="immutable Lightweave"):
         promote.promoted_channel(json.dumps(document).encode(), "https://example.com/release.json")
+
+
+def test_promote_accepts_the_current_remote_but_not_an_unrelated_one(
+    tmp_path: Path,
+) -> None:
+    firmware = tmp_path / f"lightweave-field-{TAG}.bin"
+    firmware.write_bytes(b"field firmware")
+    serial_flash = tmp_path / f"lightweave-serial-flash-{TAG}.zip"
+    serial_flash.write_bytes(b"serial bundle")
+
+    def manifest_for(repository: str) -> dict:
+        base = f"{repository.removesuffix('.git')}/releases/download/{TAG}"
+        return build.build_manifest(
+            firmware=firmware,
+            serial_flash=serial_flash,
+            repository=repository,
+            commit="a" * 40,
+            tag=TAG,
+            artifact_url=f"{base}/lightweave-field-{TAG}.bin",
+            serial_flash_url=f"{base}/lightweave-serial-flash-{TAG}.zip",
+            published_at="2026-08-01T19:00:00Z",
+        )
+
+    current = "https://github.com/moda-labs/lightweave.git"
+    assert current in promote.ALLOWED_REPOSITORIES
+    data = json.dumps(manifest_for(current)).encode()
+    url = (
+        f"{current.removesuffix('.git')}/releases/download/"
+        f"{TAG}/lightweave-release.json"
+    )
+    assert promote.promoted_channel(data, url)["manifest_url"] == url
+
+    foreign = "https://github.com/attacker/lightweave.git"
+    foreign_data = json.dumps(manifest_for(foreign)).encode()
+    foreign_url = (
+        f"{foreign.removesuffix('.git')}/releases/download/"
+        f"{TAG}/lightweave-release.json"
+    )
+    with pytest.raises(ValueError, match="repository is not allowed"):
+        promote.promoted_channel(foreign_data, foreign_url)
 
 
 def test_release_publisher_is_retry_safe_and_verifies_assets_before_publish() -> None:
