@@ -1058,8 +1058,11 @@ def test_build_manifest_binds_code_notes_and_firmware(tmp_path: Path) -> None:
     )
 
     assert document["version"] == VERSION
-    assert document["notes"]["control_changes"]
-    assert document["notes"]["firmware_changes"]
+    # Both sides are always bound into the manifest, but a release that touched
+    # only one of them carries an empty list for the other.
+    assert isinstance(document["notes"]["control_changes"], list)
+    assert isinstance(document["notes"]["firmware_changes"], list)
+    assert document["notes"]["control_changes"] or document["notes"]["firmware_changes"]
     assert document["firmware"]["sha256"] == hashlib.sha256(b"field firmware").hexdigest()
     assert document["serial_flash"]["sha256"] == hashlib.sha256(b"serial bundle").hexdigest()
 
