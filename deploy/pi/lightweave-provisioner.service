@@ -1,9 +1,9 @@
 [Unit]
-Description=Lightweave field control plane
+Description=Lightweave multi-board USB provisioner
 Documentation=https://github.com/underminedsk/lightweave/tree/main/deploy/pi
-Wants=network-online.target lightweave-provisioner.service
-Requires=lightweave-gitops-recovery.service
-After=network-online.target lightweave-gitops-recovery.service
+Wants=network-online.target
+After=network-online.target lightweave-control.service
+PartOf=lightweave-control.service
 
 [Service]
 Type=simple
@@ -14,18 +14,20 @@ WorkingDirectory=/opt/lightweave
 EnvironmentFile=/etc/lightweave/control.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-Environment=CONTROL_DEPLOYMENT_RECORD=/var/lib/lightweave-gitops/current.json
-Environment=CONTROL_OTA_LOCK=/var/lib/lightweave-gitops/firmware-ota.lock
-Environment=CONTROL_RELEASE_COMMIT_FILE=/var/lib/lightweave-gitops/running-commit
-ExecStart=/opt/lightweave/.venv/bin/python -m uvicorn control.app:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
+Environment=PROVISIONER_STATE_DIR=/var/lib/lightweave/provisioner
+Environment=PROVISIONER_OPERATION_LOCK=/var/lib/lightweave-gitops/firmware-ota.lock
+UnsetEnvironment=CONTROL_PASSWORD_HASH
+ExecStart=/opt/lightweave/.venv/bin/python -m control.provisioner --socket /run/lightweave-provisioner/provisioner.sock
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=180
 
-StateDirectory=lightweave
+RuntimeDirectory=lightweave-provisioner
+RuntimeDirectoryMode=0700
+StateDirectory=lightweave/provisioner
 StateDirectoryMode=0700
-ReadWritePaths=/var/lib/lightweave
-ReadOnlyPaths=-/var/lib/lightweave-gitops
+ReadWritePaths=/var/lib/lightweave/provisioner
+ReadOnlyPaths=/var/lib/lightweave-gitops/firmware-ota.lock
 UMask=0077
 
 NoNewPrivileges=true

@@ -102,6 +102,7 @@ def test_registered_public_route_inventory_is_exact() -> None:
         ("GET", "/api/auth/session"),
         ("GET", "/api/health"),
         ("POST", "/api/auth/login"),
+        ("POST", "/api/internal/provisioning/reserve-id"),
     }
 
 
@@ -216,6 +217,7 @@ let savedPatterns = [];
 let otaArtifact = null;
 let calibrationFrames = [];
 let releaseInfo = null;
+let provisioning = null;
 let stateCalls = 0;
 let delays = 0;
 async function api(path) {{

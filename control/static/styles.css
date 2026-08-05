@@ -327,6 +327,27 @@ input[type="number"], input[type="time"], input[type="text"], input[type="passwo
 .release-history-row small { margin-top: 3px; color: var(--dim); font-size: 11px; }
 .release-history-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 10px 0 2px 18px; }
 .release-history-detail > div > strong { margin-bottom: 6px; }
+.flash-station .section-head { align-items: start; }
+.flash-station .section-head h2 { margin-bottom: 5px; }
+.flash-station .section-head p { max-width: 700px; margin: 0; }
+.flash-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 18px 0 12px; }
+.flash-summary > div { border: 1px solid var(--line); border-radius: 8px; background: #0b0f0c; padding: 12px; }
+.flash-controls { display: grid; grid-template-columns: minmax(150px, 190px) 1fr; gap: 14px; align-items: end; margin: 14px 0; }
+.flash-controls select { width: 100%; margin-top: 6px; }
+.flash-notice { border: 1px solid rgba(38, 48, 42, .9); border-radius: 8px; background: #0b0f0c; color: var(--muted); padding: 10px 12px; font-size: 13px; }
+.flash-notice.warn { border-color: rgba(220, 159, 73, .5); color: var(--warn); }
+.flash-jobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
+.flash-job { border: 1px solid var(--line); border-radius: 9px; background: #0b0f0c; padding: 12px; min-height: 132px; }
+.flash-job[data-state="done"] { border-color: rgba(84, 214, 122, .48); }
+.flash-job[data-state="failed"], .flash-job[data-state="disconnected"] { border-color: rgba(225, 93, 93, .55); }
+.flash-job[data-state="flashing"], .flash-job[data-state="erasing"], .flash-job[data-state="assigning_id"] { border-color: rgba(77, 169, 255, .55); box-shadow: inset 0 2px 0 rgba(77, 169, 255, .25); }
+.flash-job-head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+.flash-slot { font-size: 18px; font-weight: 700; }
+.flash-board-id { margin-top: 12px; font-size: 22px; font-weight: 700; color: var(--live); }
+.flash-job-message { margin-top: 7px; min-height: 36px; color: var(--muted); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.flash-job-actions { display: flex; gap: 7px; margin-top: 10px; }
+.flash-job-actions input { width: 76px; }
+.flash-job .mono { color: var(--dim); font-size: 10px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .section-head h3 { margin: 0; font-size: 15px; }
 .recovery-section { background: #0d120f; }
@@ -619,6 +640,7 @@ input[type="number"], input[type="time"], input[type="text"], input[type="passwo
   }
   .ops-grid { grid-template-columns: 1fr; }
   .release-grid, .release-history-detail { grid-template-columns: 1fr; }
+  .flash-summary, .flash-controls { grid-template-columns: 1fr; }
   .button-row { display: grid; }
   .group-controls { grid-template-columns: 1fr; }
   .group-name-editor button { padding: 0 10px; }

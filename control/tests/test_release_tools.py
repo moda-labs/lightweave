@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -195,6 +196,31 @@ def autoflash_manifest(bundle_data: bytes) -> dict:
     }
 
 
+def fake_esptool(tmp_path: Path) -> tuple[Path, Path]:
+    package = tmp_path / "fake-tool" / "esptool"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "def _main():\n"
+        "    import sys\n"
+        "    if sys.argv[1:] != ['version']:\n"
+        "        raise SystemExit(2)\n"
+        "    print('esptool test-runtime')\n"
+    )
+    (package / "__main__.py").write_text("from . import _main\n_main()\n")
+    (package / "targets.json").write_text('{"chip": "esp32"}\n')
+    license_path = tmp_path / "fake-tool" / "LICENSE"
+    license_path.write_text("Fake esptool test license\n")
+    return package, license_path
+
+
+def stub_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        autoflash,
+        "extract_bundle",
+        lambda _bundle, _destination: {"segments": []},
+    )
+
+
 def test_serial_flash_bundle_is_deterministic_and_self_verifying(tmp_path: Path) -> None:
     inputs = {}
     for _offset, filename in bundle.SEGMENTS:
@@ -203,12 +229,60 @@ def test_serial_flash_bundle_is_deterministic_and_self_verifying(tmp_path: Path)
         inputs[filename] = path
     first = tmp_path / "first.zip"
     second = tmp_path / "second.zip"
-    bundle.build_bundle(inputs=inputs, output=first)
-    bundle.build_bundle(inputs=inputs, output=second)
+    esptool_dir, esptool_license = fake_esptool(tmp_path)
+    bundle.build_bundle(
+        inputs=inputs,
+        esptool_dir=esptool_dir,
+        esptool_license=esptool_license,
+        output=first,
+    )
+    bundle.build_bundle(
+        inputs=inputs,
+        esptool_dir=esptool_dir,
+        esptool_license=esptool_license,
+        output=second,
+    )
 
     assert first.read_bytes() == second.read_bytes()
     plan = autoflash.extract_bundle(first, tmp_path / "extracted")
     assert {item["offset"] for item in plan["segments"]} == set(autoflash.EXPECTED_SEGMENTS)
+    assert (tmp_path / "extracted" / "esptool.py").is_file()
+    assert (tmp_path / "extracted" / "esptool" / "__main__.py").is_file()
+    bundle.verify_bundle_runtime(first)
+
+
+def test_flashing_tool_has_timeout_and_does_not_inherit_service_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return SimpleNamespace(returncode=0, stdout="ok")
+
+    monkeypatch.setenv("PROVISIONER_TOKEN", "do-not-leak")
+    monkeypatch.setenv("CONTROL_PASSWORD_HASH", "do-not-leak-either")
+    monkeypatch.setenv("PATH", "/safe/bin")
+    monkeypatch.setattr(autoflash.subprocess, "run", fake_run)
+
+    assert autoflash.run_tool(["esptool", "version"], timeout_s=7) == "ok"
+    assert calls[0][1]["timeout"] == 7
+    assert calls[0][1]["env"]["PATH"] == "/safe/bin"
+    assert "PROVISIONER_TOKEN" not in calls[0][1]["env"]
+    assert "CONTROL_PASSWORD_HASH" not in calls[0][1]["env"]
+
+
+def test_flashing_tool_reports_timeout_without_command_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timeout(arguments, **_kwargs):
+        raise subprocess.TimeoutExpired(arguments, 3)
+
+    monkeypatch.setattr(autoflash.subprocess, "run", timeout)
+
+    with pytest.raises(RuntimeError, match="timed out after 3 seconds") as error:
+        autoflash.run_tool(["esptool", "--port", "/dev/private-device"], timeout_s=3)
+    assert "/dev/private-device" not in str(error.value)
 
 
 def test_autoflash_rejects_compressed_serial_bundle(tmp_path: Path) -> None:
@@ -220,6 +294,60 @@ def test_autoflash_rejects_compressed_serial_bundle(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="stored members"):
         autoflash.extract_bundle(archive, tmp_path / "extracted")
+
+
+def test_autoflash_rejects_tampered_bundled_tool(tmp_path: Path) -> None:
+    inputs = {}
+    for _offset, filename in bundle.SEGMENTS:
+        path = tmp_path / filename
+        path.write_bytes(filename.encode())
+        inputs[filename] = path
+    esptool_dir, esptool_license = fake_esptool(tmp_path)
+    original = tmp_path / "original.zip"
+    tampered = tmp_path / "tampered.zip"
+    bundle.build_bundle(
+        inputs=inputs,
+        esptool_dir=esptool_dir,
+        esptool_license=esptool_license,
+        output=original,
+    )
+    with zipfile.ZipFile(original) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    members["esptool.py"] = b"tampered\n"
+    with zipfile.ZipFile(tampered, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+    with pytest.raises(ValueError, match="esptool.py failed integrity verification"):
+        autoflash.extract_bundle(tampered, tmp_path / "extracted")
+
+
+def test_autoflash_rejects_duplicate_tool_manifest_entries(tmp_path: Path) -> None:
+    inputs = {}
+    for _offset, filename in bundle.SEGMENTS:
+        path = tmp_path / filename
+        path.write_bytes(filename.encode())
+        inputs[filename] = path
+    esptool_dir, esptool_license = fake_esptool(tmp_path)
+    original = tmp_path / "original.zip"
+    malformed = tmp_path / "malformed.zip"
+    bundle.build_bundle(
+        inputs=inputs,
+        esptool_dir=esptool_dir,
+        esptool_license=esptool_license,
+        output=original,
+    )
+    with zipfile.ZipFile(original) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    plan = json.loads(members["flash-plan.json"])
+    plan["tool"]["members"].append(dict(plan["tool"]["members"][0]))
+    members["flash-plan.json"] = json.dumps(plan).encode()
+    with zipfile.ZipFile(malformed, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+    with pytest.raises(ValueError, match="tool manifest is invalid"):
+        autoflash.extract_bundle(malformed, tmp_path / "extracted")
 
 
 def test_autoflash_parses_lightweave_identity_and_expected_rom_probe() -> None:
@@ -338,6 +466,7 @@ def test_autoflash_registry_rejects_duplicate_or_changed_ids(tmp_path: Path) -> 
 def test_autoflash_current_board_gets_missing_id_without_reflash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    stub_bundle(monkeypatch)
     mac = "C0:CD:D6:C8:03:E0"
     manifest = {"commit": "a" * 40}
     current = autoflash.DeviceInfo(
@@ -350,7 +479,7 @@ def test_autoflash_current_board_gets_missing_id_without_reflash(
     monkeypatch.setattr(
         autoflash,
         "probe_board",
-        lambda _port: {"mac": mac},
+        lambda *_args: {"mac": mac},
     )
     writes = []
     monkeypatch.setattr(
@@ -380,6 +509,90 @@ def test_autoflash_current_board_gets_missing_id_without_reflash(
     assert any("BOARD #1  NEW ID - LABEL THIS BOARD" in message for message in messages)
 
 
+def test_autoflash_uses_authoritative_id_and_reports_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub_bundle(monkeypatch)
+    mac = "C0:CD:D6:C8:03:E0"
+    manifest = {"commit": "a" * 40}
+    current = autoflash.DeviceInfo(
+        "PERFORMER", 0, mac, 0.0, 0.0, "0.5.1", 8, "a" * 8, False
+    )
+    assigned = autoflash.DeviceInfo(
+        "PERFORMER", 54, mac, 0.0, 0.0, "0.5.1", 8, "a" * 8, False
+    )
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(autoflash, "probe_board", lambda *_args: {"mac": mac})
+    monkeypatch.setattr(autoflash, "write_node_id", lambda _port, _id: assigned)
+    resolver_calls = []
+    progress = []
+
+    result = autoflash.process_port(
+        "/dev/ttyUSB0",
+        manifest,
+        tmp_path / "unused.zip",
+        tmp_path / "work",
+        device_registry=tmp_path / "devices.json",
+        factory_authorized=False,
+        id_resolver=lambda resolved_mac, reported: resolver_calls.append(
+            (resolved_mac, reported)
+        ) or (54, True),
+        progress=lambda stage, message: progress.append((stage, message)),
+    )
+
+    assert resolver_calls == [(mac, 0)]
+    assert autoflash.load_device_registry(tmp_path / "devices.json")[mac].node_id == 54
+    assert [stage for stage, _message in progress] == [
+        "preparing",
+        "probing",
+        "reserving_id",
+        "verifying",
+        "assigning_id",
+        "done",
+    ]
+    assert "permanent ID #54 verified" in result
+
+
+def test_autoflash_refuses_conductor_before_any_flash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub_bundle(monkeypatch)
+    mac = "C0:CD:D6:C8:03:E0"
+    conductor = autoflash.DeviceInfo(
+        "CONDUCTOR", 1, mac, 0.0, 0.0, "0.5.1", 8, "a" * 8, False
+    )
+    monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: conductor)
+    monkeypatch.setattr(autoflash, "probe_board", lambda *_args: {"mac": mac})
+    monkeypatch.setattr(
+        autoflash,
+        "flash_board",
+        lambda *_args: pytest.fail("conductor must not be flashed"),
+    )
+    monkeypatch.setattr(
+        autoflash,
+        "erase_board",
+        lambda *_args: pytest.fail("conductor must not be erased"),
+    )
+    monkeypatch.setattr(
+        autoflash,
+        "write_node_id",
+        lambda *_args: pytest.fail("conductor must not receive a performer ID"),
+    )
+
+    with pytest.raises(RuntimeError, match="refusing to auto-flash a conductor"):
+        autoflash.process_port(
+            "/dev/ttyUSB0",
+            {"commit": "a" * 40},
+            tmp_path / "unused.zip",
+            tmp_path / "work",
+            device_registry=tmp_path / "devices.json",
+            factory_authorized=True,
+            id_resolver=lambda *_args: pytest.fail(
+                "conductor must not reach the ID authority"
+            ),
+        )
+
+
 def test_autoflash_factory_board_is_numbered_after_flash_and_printed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -395,12 +608,12 @@ def test_autoflash_factory_board_is_numbered_after_flash_and_printed(
     monkeypatch.setattr(
         autoflash, "read_info", lambda *_args, **_kwargs: next(responses)
     )
-    monkeypatch.setattr(autoflash, "probe_board", lambda _port: {"mac": mac})
+    monkeypatch.setattr(autoflash, "probe_board", lambda *_args: {"mac": mac})
     monkeypatch.setattr(
         autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []}
     )
     erased = []
-    monkeypatch.setattr(autoflash, "erase_board", lambda _port: erased.append(True))
+    monkeypatch.setattr(autoflash, "erase_board", lambda *_args: erased.append(True))
     monkeypatch.setattr(autoflash, "flash_board", lambda *_args: None)
     writes = []
     monkeypatch.setattr(
@@ -457,10 +670,10 @@ def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
     monkeypatch.setattr(
         autoflash,
         "probe_board",
-        lambda _port: {"mac": "C0:CD:D6:C8:03:E0"},
+        lambda *_args: {"mac": "C0:CD:D6:C8:03:E0"},
     )
     monkeypatch.setattr(autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []})
-    monkeypatch.setattr(autoflash, "erase_board", lambda _port: erase_calls.append(True))
+    monkeypatch.setattr(autoflash, "erase_board", lambda *_args: erase_calls.append(True))
     monkeypatch.setattr(autoflash, "flash_board", lambda _port, _plan, _work: None)
     monkeypatch.setattr(autoflash, "log", messages.append)
     monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
@@ -485,11 +698,12 @@ def test_autoflash_retries_identity_after_rom_reset_before_deciding_to_erase(
 def test_autoflash_unrecognized_board_fails_closed_without_factory_authorization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    stub_bundle(monkeypatch)
     monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         autoflash,
         "probe_board",
-        lambda _port: {"mac": "C0:CD:D6:C8:03:E0"},
+        lambda *_args: {"mac": "C0:CD:D6:C8:03:E0"},
     )
     monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
     flashed = []
@@ -517,7 +731,7 @@ def test_autoflash_does_not_record_factory_device_before_bundle_validation(
     monkeypatch.setattr(
         autoflash,
         "probe_board",
-        lambda _port: {"mac": "C0:CD:D6:C8:03:E0"},
+        lambda *_args: {"mac": "C0:CD:D6:C8:03:E0"},
     )
     monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
@@ -553,14 +767,14 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
     stable_python.symlink_to(versioned_python)
     monkeypatch.setattr(autoflash.sys, "executable", str(versioned_python))
     monkeypatch.setattr(autoflash, "read_info", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(autoflash, "probe_board", lambda _port: {"mac": mac})
+    monkeypatch.setattr(autoflash, "probe_board", lambda *_args: {"mac": mac})
     monkeypatch.setattr(autoflash.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(autoflash, "extract_bundle", lambda _bundle, _work: {"segments": []})
     flash_calls = []
     monkeypatch.setattr(autoflash, "flash_board", lambda *_args: flash_calls.append(True))
     erase_calls = []
 
-    def fail_erase(_port):
+    def fail_erase(*_args):
         erase_calls.append("failed")
         raise RuntimeError("simulated erase failure")
 
@@ -588,6 +802,8 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
             str(Path(autoflash.__file__).resolve()),
             "retry-factory",
             mac,
+            "--state",
+            str(registry.parent),
         ]
     )
     assert f"run: {retry_command}" in str(error.value)
@@ -595,7 +811,9 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
     assert flash_calls == []
 
     autoflash.authorize_factory_retry(registry, mac)
-    monkeypatch.setattr(autoflash, "erase_board", lambda _port: erase_calls.append("succeeded"))
+    monkeypatch.setattr(
+        autoflash, "erase_board", lambda *_args: erase_calls.append("succeeded")
+    )
     monkeypatch.setattr(
         autoflash,
         "flash_board",
@@ -704,6 +922,61 @@ def test_autoflash_uses_stable_homebrew_platformio_interpreter(tmp_path: Path) -
 
     assert autoflash.stable_pio_python(pio) == stable
     assert autoflash.stable_platformio_python(versioned) == stable
+
+
+def test_autoflash_prefers_esptool_from_active_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(autoflash.importlib.util, "find_spec", lambda _name: object())
+
+    assert autoflash.esptool_command() == [autoflash.sys.executable, "-m", "esptool"]
+
+
+def test_autoflash_prefers_hash_verified_bundled_esptool(tmp_path: Path) -> None:
+    wrapper = tmp_path / "esptool.py"
+    wrapper.write_text("pass\n")
+
+    assert autoflash.esptool_command(tmp_path) == [
+        autoflash.sys.executable,
+        str(wrapper),
+    ]
+
+
+def test_autoflash_discovers_wch_performers_on_macos_and_linux(monkeypatch) -> None:
+    from serial.tools import list_ports
+
+    monkeypatch.setattr(
+        list_ports,
+        "comports",
+        lambda: [
+            SimpleNamespace(
+                device="/dev/cu.wchusbserial1",
+                location="1-1.1",
+                hwid="wch mac",
+                vid=autoflash.WCH_VID,
+                pid=autoflash.WCH_PID,
+            ),
+            SimpleNamespace(
+                device="/dev/ttyUSB0",
+                location="1-1.2",
+                hwid="wch linux",
+                vid=autoflash.WCH_VID,
+                pid=autoflash.WCH_PID,
+            ),
+            SimpleNamespace(
+                device="/dev/ttyACM0",
+                location="1-1.3",
+                hwid="different adapter",
+                vid=autoflash.WCH_VID,
+                pid=autoflash.WCH_PID,
+            ),
+        ],
+    )
+
+    assert [item.device for item in autoflash.candidate_port_infos()] == [
+        "/dev/cu.wchusbserial1",
+        "/dev/ttyUSB0",
+    ]
 
 
 def test_autoflash_honors_disabled_production_channel(
@@ -851,12 +1124,16 @@ def test_release_publisher_is_retry_safe_and_verifies_assets_before_publish() ->
     assert publisher.count("cmp \"$firmware\"") == 2
     assert publisher.count("cmp \"$serial_flash\"") == 2
     assert "build_serial_flash_bundle.py" in workflow
+    assert "--esptool-dir" in workflow
+    assert "--esptool-license" in workflow
     assert "gh release edit \"$RELEASE_TAG\" --draft=false" in publisher
 
     ci_workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
     assert "build_serial_flash_bundle.py" in ci_workflow
+    assert "--esptool-dir" in ci_workflow
+    assert "--esptool-license" in ci_workflow
 
 
 @pytest.mark.parametrize(

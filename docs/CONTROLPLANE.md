@@ -63,7 +63,8 @@ these endpoints, so agents can drive the same workflows without a browser.
 - `GET /api/releases` → separate running control-plane, desired/staged firmware,
   and user-facing release-history state.
 - `WS /ws` → pushes `{"type":"state","state":...}` snapshots and `error`
-  events.
+  events. It also pushes `{"type":"provisioning","provisioning":...}` when
+  the local flashing station changes.
 
 Snapshot shape:
 
@@ -236,6 +237,19 @@ The map renders only positioned lanterns.
 - `POST /api/show/restore` -> restore all eight brightness values captured by
   the most recent blackout. Returns an error when no restore point is available.
 - `POST /api/operations/power-policy` with the runtime sleep/check policy.
+- `GET /api/provisioning/status` -> local USB flashing station, approved
+  production artifact, session, connected boards, and the last 100 jobs.
+- `POST /api/provisioning/session` with
+  `{"max_workers":5,"factory":false}` -> arm automatic flashing for connected
+  and newly connected boards. `max_workers` is 1-10. `factory:true` authorizes
+  blank-board erase for 15 minutes.
+- `DELETE /api/provisioning/session` -> stop accepting new flash jobs; already
+  running subprocesses finish independently of the browser request.
+- `PUT /api/provisioning/slots` with `{"port_id":"...","slot":4}` -> bind an
+  opaque USB-topology identity to a physical powered-hub slot. Raw serial device
+  paths are never returned to the browser or stored in job history.
+- `POST /api/provisioning/jobs/{job_id}/retry` -> retry one connected failed
+  job after the operator corrects its cable/board issue.
 - `POST /api/operations/power-monitor` with
   `{"battery_capacity_wh":384.0,"full_voltage":14.4}` -> update the SOC
   estimate capacity and full-charge voltage anchor.
@@ -351,6 +365,7 @@ assign_group(mac, group_id) -> ack
 assign_led_count(mac, led_count) -> ack
 forget(mac) -> ack
 replace(old_mac, new_mac) -> ack
+reserve_id(mac, reported_id=0) -> ack
 update_pattern(pattern, brightness, params, group_id=None) -> ack
 blackout() -> ack
 update_power_policy(policy) -> ack
@@ -384,6 +399,8 @@ Requests are one compact JSON object per line:
 {"id":6,"cmd":"replace","old_mac":"A0:B7:65:11:44:91","new_mac":"8C:94:DF:57:7F:14"}
 {"id":7,"cmd":"pattern","pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300},"group_id":2}
 {"id":8,"cmd":"blackout"}
+{"id":9,"cmd":"restore_blackout"}
+{"id":10,"cmd":"reserve_id","mac":"8C:94:DF:57:7F:14","reported_id":0}
 ```
 
 Responses echo the request id:

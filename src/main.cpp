@@ -306,11 +306,16 @@ static void tableLoad() {
   }
 }
 
-static void tableSave() {
-  g_prefs.begin("node", /*readonly*/ false);
-  g_prefs.putBytes("table", &g_table, sizeof(g_table));
-  g_prefs.putUChar("table_v", 4);
+static bool tableSave(const LayoutTable& table = g_table) {
+  bool opened = g_prefs.begin("node", /*readonly*/ false);
+  size_t written = 0;
+  size_t version_written = 0;
+  if (opened) {
+    written = g_prefs.putBytes("table", &table, sizeof(table));
+    version_written = g_prefs.putUChar("table_v", 4);
+  }
   g_prefs.end();
+  return opened && written == sizeof(table) && version_written == 1;
 }
 
 // ---- Sync state --------------------------------------------------------------
@@ -1058,6 +1063,7 @@ static void printDiag() {
 //   roster               (conductor) list nodes that have registered (MAC/id/fw)
 //   table                (conductor) print permanent IDs + positions + hardware
 //   assign <mac> <x> <y> (conductor) set a node's position by MAC; saved+broadcast
+//   reserve-id <mac>     (conductor JSON RPC) reserve/return permanent ID
 //   forget <mac>         (conductor) clear position; permanent ID remains
 //   group <mac> <1..8>  (conductor) assign any inventoried node to a show group
 //   leds <mac> <16|32|64> (conductor) set a board's active RGBW emitter count
@@ -1202,6 +1208,16 @@ static void jsonOk(uint32_t id, const char* message) {
 static void jsonError(uint32_t id, const char* error) {
   Serial.printf("{\"id\":%lu,\"ok\":false,\"error\":\"%s\"}\n",
                 (unsigned long)id, error);
+}
+
+static void jsonReservedId(uint32_t request_id, uint16_t node_id,
+                           bool created) {
+  Serial.printf(
+      "{\"id\":%lu,\"ok\":true,\"message\":\"%s\",\"node_id\":%u,"
+      "\"created\":%s}\n",
+      (unsigned long)request_id,
+      created ? "permanent ID reserved" : "permanent ID already reserved",
+      node_id, created ? "true" : "false");
 }
 
 static void saveBeaconSnapshot() {
@@ -1932,6 +1948,29 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       tableSave();
       broadcastTable();
       jsonOk(cmd.id, "replaced");
+    }
+  } else if (cmd.kind == SJ_RESERVE_ID) {
+    if (!isConductor()) {
+      jsonError(cmd.id, "reserve_id is conductor-only");
+    } else {
+      TableReserveResult reserved = tableReserveDurably(
+          g_table, cmd.mac, cmd.reported_id,
+          [](const LayoutTable& table) { return tableSave(table); });
+      if (reserved.status == TABLE_RESERVE_CONFLICT) {
+        jsonError(cmd.id, "permanent ID conflict");
+        return;
+      }
+      if (reserved.status == TABLE_RESERVE_FULL) {
+        jsonError(cmd.id, "table full");
+        return;
+      }
+      if (reserved.status == TABLE_RESERVE_SAVE_FAILED) {
+        jsonError(cmd.id, "failed to persist permanent ID");
+        return;
+      }
+      bool created = reserved.status == TABLE_RESERVE_CREATED;
+      if (created) broadcastTable();
+      jsonReservedId(cmd.id, reserved.id, created);
     }
   } else if (cmd.kind == SJ_PATTERN) {
     portENTER_CRITICAL(&g_sync_mux);

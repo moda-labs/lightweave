@@ -58,6 +58,8 @@ jobs:
             --partitions .pio/build/field/partitions.bin \
             --boot-app "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
             --firmware .pio/build/field/firmware.bin \
+            --esptool-dir "$HOME/.platformio/packages/tool-esptoolpy/esptool" \
+            --esptool-license "$HOME/.platformio/packages/tool-esptoolpy/LICENSE" \
             --output "dist/lightweave-serial-flash-${RELEASE_TAG}.zip"
           python scripts/build_release_manifest.py \
             --firmware "dist/lightweave-field-${RELEASE_TAG}.bin" \

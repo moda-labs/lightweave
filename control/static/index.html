@@ -27,6 +27,7 @@
       <button class="active" data-view="map">Map</button>
       <button data-view="table">Node List</button>
       <button data-view="show">Patterns</button>
+      <button data-view="flash">Flashing</button>
       <button data-view="ops">Operations</button>
     </nav>
 
@@ -157,6 +158,44 @@
             </div>
             <div class="saved-pattern-list" id="saved-pattern-list"></div>
           </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-flash">
+        <div class="panel flash-station">
+          <div class="section-head">
+            <div>
+              <h2>Flashing Station</h2>
+              <p>Plug performers into a calibrated powered USB hub. Each physical slot keeps its identity while up to ten boards flash in parallel.</p>
+            </div>
+            <div class="chip" id="provisioning-status">checking</div>
+          </div>
+
+          <div class="flash-summary">
+            <div><div class="label">Production target</div><div class="ops-value" id="provisioning-release">--</div></div>
+            <div><div class="label">Connected</div><div class="ops-value" id="provisioning-connected">0 boards</div></div>
+            <div><div class="label">Active jobs</div><div class="ops-value" id="provisioning-running">0</div></div>
+          </div>
+
+          <div class="flash-controls">
+            <label class="control-label" for="provisioning-workers">Parallel boards
+              <select id="provisioning-workers">
+                <option value="1">1</option>
+                <option value="3">3</option>
+                <option value="5" selected>5</option>
+                <option value="8">8</option>
+                <option value="10">10</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button class="primary" data-action="start-provisioning">Arm registered performers</button>
+              <button class="danger" data-action="start-factory-provisioning">Arm new boards for 15 minutes</button>
+              <button data-action="stop-provisioning">Stop accepting boards</button>
+            </div>
+          </div>
+
+          <div class="flash-notice" id="provisioning-notice">The local USB provisioner is connecting.</div>
+          <div class="flash-jobs" id="provisioning-jobs"></div>
         </div>
       </section>
 

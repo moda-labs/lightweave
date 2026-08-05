@@ -24,6 +24,7 @@ let calibrationCodePlan = null;
 let calibrationSaveStatus = "";
 let wifiStatus = null;
 let releaseInfo = null;
+let provisioning = null;
 
 const MAP_PADDING = 0.08;
 const GROUP_COUNT = 8;
@@ -319,8 +320,72 @@ function render() {
   renderCalibration();
   renderPowerPolicy();
   renderOta();
+  renderProvisioning();
   renderEvents();
   renderDetailVisibility();
+}
+
+function provisioningStateLabel(stateName) {
+  return String(stateName || "unknown").replaceAll("_", " ");
+}
+
+function renderProvisioning() {
+  if (!provisioning) return;
+  const available = provisioning.available === true;
+  const session = provisioning.session || {};
+  const artifact = provisioning.artifact;
+  const jobs = Array.isArray(provisioning.jobs) ? provisioning.jobs : [];
+  const status = $("#provisioning-status");
+  status.textContent = !available ? "unavailable" : session.active ? "armed" : "idle";
+  status.className = `chip ${available && session.active ? "sync" : !available ? "active" : ""}`;
+  $("#provisioning-release").textContent = artifact
+    ? `${artifact.release} · ${artifact.build}`
+    : "No approved artifact";
+  $("#provisioning-connected").textContent = `${Number(provisioning.connected || 0)} boards`;
+  $("#provisioning-running").textContent = String(Number(provisioning.running || 0));
+  if (!session.active) $("#provisioning-workers").value = String(session.max_workers || 5);
+
+  const factoryUntil = Number(session.factory_expires_at || 0);
+  const factoryRemaining = Math.max(0, Math.round(factoryUntil - Date.now() / 1000));
+  const notice = $("#provisioning-notice");
+  notice.className = `flash-notice ${!available || provisioning.artifact_error || session.factory_armed ? "warn" : ""}`;
+  notice.textContent = !available
+    ? (provisioning.artifact_error || "Install and start the local USB provisioner on this host.")
+    : provisioning.artifact_error
+      ? `Artifact warning: ${provisioning.artifact_error}`
+      : session.factory_armed
+        ? `Factory provisioning armed for ${formatDuration(factoryRemaining)}. Blank boards may be erased.`
+        : session.active
+          ? "Station armed for registered performers. New blank boards will fail closed."
+          : "Map each physical hub port to a numbered slot, then arm the station.";
+
+  $('[data-action="start-provisioning"]').disabled = !available || !artifact || session.active;
+  $('[data-action="start-factory-provisioning"]').disabled = !available || !artifact || session.active;
+  $('[data-action="stop-provisioning"]').disabled = !session.active;
+  $("#provisioning-workers").disabled = session.active;
+
+  $("#provisioning-jobs").innerHTML = jobs.length ? jobs.map((job) => {
+    const slot = job.slot ? `Slot ${escapeHtml(job.slot)}` : "Unmapped port";
+    const board = job.node_id ? `BOARD #${escapeHtml(job.node_id)}` : provisioningStateLabel(job.state).toUpperCase();
+    const mapControls = job.state === "unmapped" && job.connected ? `
+      <div class="flash-job-actions">
+        <input type="number" min="1" max="32" placeholder="Slot #" data-slot-input="${escapeHtml(job.id)}" aria-label="Physical hub slot">
+        <button type="button" data-provision-action="map-slot" data-job-id="${escapeHtml(job.id)}" data-port-id="${escapeHtml(job.port_id)}">Assign slot</button>
+      </div>` : "";
+    const retry = job.state === "failed" && job.connected
+      ? `<div class="flash-job-actions"><button type="button" data-provision-action="retry" data-job-id="${escapeHtml(job.id)}">Retry this board</button></div>`
+      : "";
+    return `<article class="flash-job" data-state="${escapeHtml(job.state)}">
+      <div class="flash-job-head">
+        <div class="flash-slot">${slot}</div>
+        <div class="chip">${escapeHtml(provisioningStateLabel(job.state))}</div>
+      </div>
+      <div class="flash-board-id">${board}</div>
+      <div class="flash-job-message">${escapeHtml(job.message || "")}</div>
+      ${job.mac ? `<div class="mono">${escapeHtml(job.mac)}</div>` : ""}
+      ${mapControls}${retry}
+    </article>`;
+  }).join("") : '<div class="empty-state">No FireBeetles detected. Plug boards into the powered hub.</div>';
 }
 
 function patternHueFromState() {
@@ -2050,6 +2115,16 @@ async function refresh() {
   otaArtifact = (await api("/api/operations/ota-artifact")).artifact;
   calibrationFrames = (await api("/api/calibration/frames")).frames || [];
   await refreshWifiStatus({ quiet: true });
+  try {
+    provisioning = await api("/api/provisioning/status");
+  } catch (error) {
+    provisioning = {
+      available: false,
+      artifact_error: error.message,
+      session: { active: false, max_workers: 5, factory_armed: false },
+      jobs: [],
+    };
+  }
   render();
 }
 
@@ -2297,6 +2372,26 @@ async function runAction(action) {
       toast(ack.message);
       return;
     }
+    if (action === "start-provisioning" || action === "start-factory-provisioning") {
+      const factory = action === "start-factory-provisioning";
+      if (factory && !confirm("Arm factory provisioning for 15 minutes? Blank boards may be erased before flashing.")) return;
+      provisioning = await api("/api/provisioning/session", {
+        method: "POST",
+        body: JSON.stringify({
+          max_workers: Number($("#provisioning-workers").value || 5),
+          factory,
+        }),
+      });
+      renderProvisioning();
+      toast(factory ? "factory provisioning armed" : "flashing station armed");
+      return;
+    }
+    if (action === "stop-provisioning") {
+      provisioning = await api("/api/provisioning/session", { method: "DELETE" });
+      renderProvisioning();
+      toast("station stopped accepting new boards");
+      return;
+    }
     if (action === "enter-ota" || action === "exit-ota") {
       const enabled = action === "enter-ota";
       if (enabled && !confirm("Enter maintenance mode for a field-wide firmware update?")) return;
@@ -2393,6 +2488,10 @@ function connectWebSocket() {
     if (data.state) {
       await applyLiveState(data.state);
     }
+    if (data.provisioning) {
+      provisioning = data.provisioning;
+      renderProvisioning();
+    }
   });
   ws.addEventListener("close", (event) => {
     if (event.code === 4401) {
@@ -2483,6 +2582,38 @@ document.addEventListener("click", (event) => {
         toast("pattern deleted");
       })
       .catch((error) => toast(error.message, true));
+  }
+});
+
+document.addEventListener("click", async (event) => {
+  const target = event.target.closest("[data-provision-action]");
+  if (!target) return;
+  try {
+    if (target.dataset.provisionAction === "retry") {
+      provisioning = await api(
+        `/api/provisioning/jobs/${encodeURIComponent(target.dataset.jobId)}/retry`,
+        { method: "POST" },
+      );
+      renderProvisioning();
+      toast("board queued for retry");
+      return;
+    }
+    if (target.dataset.provisionAction === "map-slot") {
+      const input = $(`[data-slot-input="${target.dataset.jobId}"]`);
+      const slot = Number(input?.value || 0);
+      if (!Number.isInteger(slot) || slot < 1 || slot > 32) {
+        toast("enter a physical slot from 1 to 32", true);
+        return;
+      }
+      provisioning = await api("/api/provisioning/slots", {
+        method: "PUT",
+        body: JSON.stringify({ port_id: target.dataset.portId, slot }),
+      });
+      renderProvisioning();
+      toast(`hub port assigned to slot ${slot}`);
+    }
+  } catch (error) {
+    toast(error.message, true);
   }
 });
 
@@ -2797,5 +2928,9 @@ window.addEventListener("mouseup", (event) => {
   if (!movingLanternMac || !movingDrag) return;
   finishLanternMove(event.clientX, event.clientY);
 });
+
+window.setInterval(() => {
+  if (provisioning?.session?.factory_armed) renderProvisioning();
+}, 1000);
 
 refresh().then(connectWebSocket).catch((error) => toast(error.message, true));

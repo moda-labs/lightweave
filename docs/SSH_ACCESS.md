@@ -108,9 +108,9 @@ Once connected, these read-only checks cover the common failure boundaries:
 hostname
 uptime
 nmcli connection show --active
-systemctl is-active lightweave-control cloudflared lightweave-gitops.timer
+systemctl is-active lightweave-control lightweave-provisioner cloudflared lightweave-gitops.timer
 curl -fsS http://127.0.0.1:8000/api/health
-sudo journalctl -u lightweave-control -u cloudflared \
+sudo journalctl -u lightweave-control -u lightweave-provisioner -u cloudflared \
   -u lightweave-gitops.service -n 100 --no-pager
 ```
 

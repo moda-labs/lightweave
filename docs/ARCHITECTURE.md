@@ -49,13 +49,15 @@ two conductors at once). One image + NVS role removes that entirely.
   (`esp_read_mac`/`ESP_MAC_WIFI_STA`), shown in `info`, and reported in REGISTER so
   the conductor's roster is MAC-keyed. Globally unique, burned in, zero
   provisioning, no collisions. The MAC remains authoritative for routing.
-- **Board number = permanent human identity.** **[done; hardware rollout pending]**
+- **Board number = permanent human identity.** **[done; 53-board inventory complete]**
   Each MAC receives one unique positive `id` that is printed on and follows the
   physical board, independent of field placement. The conductor retains the
   MAC-to-ID inventory while a board is offline and rehydrates erased performer
   NVS from the next registration. The factory watcher adopts an existing ID or
   atomically allocates the lowest unused number, verifies it on the board, and
-  prints a prominent label prompt.
+  prints a prominent label prompt. Multi-board stations reserve IDs through the
+  conductor before writing performer NVS, so two flashing hosts cannot allocate
+  the same number from divergent local registries.
 - **Position = `(x, y)`.** **[done, manual]** Per-deployment, changes whenever the
   field is re-laid. **Relative geometry only — no GPS / metric coords needed**;
   patterns (waves, ripples) care about relative positions, so normalized image
@@ -309,6 +311,21 @@ Starlink, Cloudflare, or the browser.
 ```
 browser --HTTPS/tunnel--> Pi (web UI + CV + serial bridge) --USB--> conductor --ESP-NOW--> field
 ```
+
+**[done; hardware throughput proof pending] USB flashing station:** a separate
+same-host provisioner daemon discovers FireBeetles, maps USB topology to numbered
+physical hub slots, and runs a bounded pool of checksum-pinned serial flashes
+(five by default, configurable to ten). The control plane proxies a narrow API
+over a private Unix socket and publishes progress on its existing WebSocket; the
+daemon owns jobs, so browser refreshes and control-plane request lifetimes do not
+own flash subprocesses. Job history and slot configuration persist locally.
+Factory erase is a distinct 15-minute session, the configured conductor path is
+excluded before probing, and firmware role verification refuses any conductor.
+Permanent-ID reservation crosses a scoped credential to the control plane and
+then the conductor's NVS inventory. Pi packaging uses a hardened systemd unit;
+macOS uses a per-user LaunchAgent. A laptop station can point that reservation
+call at the Pi's HTTPS authority while all flash bytes remain local to the USB
+host.
 
 An internet-connected deployment variant using Starlink Wi-Fi, a named
 Cloudflare Tunnel, and application-authenticated browser sessions is specified

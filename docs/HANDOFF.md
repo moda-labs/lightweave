@@ -8,10 +8,36 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-and the control tests are green; all three device envs (`devkitc` /
-`firebeetle` / canonical `field`) build clean.
+(**158 pass**) is green; control tests (**369 pass**) are green; all three
+device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest locally (2026-08-04): **groups have persistent operator-facing names, and
+Latest on this branch (2026-08-04): **the multi-board USB flashing station is built on
+`feat/flashing-station`.** The control plane now has a Flashing screen backed by
+a separate same-host provisioner daemon. It detects FireBeetles on macOS and
+Linux, binds USB topology to numbered powered-hub slots, flashes five boards in
+parallel by default (configurable to ten), streams per-board stages over the
+existing WebSocket, supports retry, and persists slot configuration plus the
+last 100 jobs. Factory erase requires an explicit 15-minute session. Production
+mode fails closed on blank boards, the configured conductor path is excluded
+before probing, and role verification refuses any conductor. Permanent-ID
+reservation now goes through the conductor's canonical NVS inventory before the
+performer is written and read back. Packaging includes a hardened Pi systemd
+unit, GitOps deployment integration, a macOS LaunchAgent installer, and a pinned
+flash runtime bundled inside the checksum-pinned serial artifact. The browser
+workflow was exercised at desktop and 375 px mobile widths without
+console/network errors. Hardware throughput proof with a real powered hub and
+5-10 simultaneous FireBeetles remains the next gate.
+The Pi workflow also requires promotion of a new release whose serial ZIP uses
+flash-plan schema 2; the current v0.6.0 artifact fails preflight clearly rather
+than starting board jobs without a usable local flash runtime.
+The schema-2 build gate now executes the bundled flashing runtime, the station and GitOps deployment share an operation lock, USB path reuse fails closed, production health includes the daemon, and conductor ID reservations roll back unless NVS persistence succeeds.
+
+The one-time inventory/tagging pass is complete: **53 boards are registered**.
+No performer firmware migration is required for the station itself; only the
+conductor needs the new `reserve_id` serial RPC before a station may allocate a
+new permanent number.
+
+Also landed on main (2026-08-04): **groups have persistent operator-facing names, and
 the failed USB battery keepalive experiment is removed.** The Patterns screen
 can name any fixed group slot (for example, `Box lanterns`, `Lotus lanterns`, or
 `Bikes`); the resulting `Group N · Name` label appears in pattern controls, node

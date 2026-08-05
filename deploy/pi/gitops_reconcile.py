@@ -406,6 +406,14 @@ class GitOpsReconciler:
             (self.config.repo / "deploy" / "pi" / "lightweave-control.service").read_bytes(),
             mode=0o644,
         )
+        provisioner_source = (
+            self.config.repo / "deploy" / "pi" / "lightweave-provisioner.service"
+        )
+        provisioner_target = self.config.systemd_dir / "lightweave-provisioner.service"
+        if provisioner_source.is_file():
+            _atomic_write(provisioner_target, provisioner_source.read_bytes(), mode=0o644)
+        else:
+            _durable_unlink(provisioner_target)
 
     def _install_gitops_runtime(self) -> None:
         _atomic_write(
