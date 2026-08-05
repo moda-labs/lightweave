@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import hmac
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,6 +33,12 @@ from .mock_conductor import MockConductor
 from .ota_store import OtaArtifactError, OtaArtifactStore
 from .pattern_store import PatternStore, PatternStoreError
 from .preview import parse_params, render_preview_data, render_preview_frames, render_preview_png, review_preview
+from .provisioning_client import (
+    ProvisioningClient,
+    ProvisioningClientError,
+    UnavailableProvisioningClient,
+    UnixProvisioningClient,
+)
 from .remote_config import (
     RemoteSettings,
     load_remote_settings,
@@ -64,6 +73,7 @@ PUBLIC_HTTP_ROUTES = {
     ("GET", "/api/auth/session"),
     ("GET", "/api/health"),
     ("POST", "/api/auth/login"),
+    ("POST", "/api/internal/provisioning/reserve-id"),
 }
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OTA_CHUNK_RETRYABLE_ERRORS = {
@@ -212,6 +222,21 @@ class WifiJoinRequest(BaseModel):
     password: str = Field(default="", max_length=128)
 
 
+class ProvisioningSessionRequest(BaseModel):
+    max_workers: int = Field(default=5, ge=1, le=10)
+    factory: bool = False
+
+
+class ProvisioningSlotRequest(BaseModel):
+    port_id: str = Field(min_length=8, max_length=32)
+    slot: int = Field(ge=1, le=32)
+
+
+class ProvisioningIdRequest(BaseModel):
+    mac: str = Field(pattern=r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
+    reported_id: int = Field(default=0, ge=0, le=65535)
+
+
 def create_default_conductor() -> ConductorAdapter:
     mode = os.getenv("CONTROL_CONDUCTOR", "mock").strip().lower()
     if mode in {"mock", ""}:
@@ -240,6 +265,7 @@ def create_app(
     calibration_store: CalibrationStore | None = None,
     auth_manager: AuthManager | None = None,
     settings: RemoteSettings | None = None,
+    provisioning_client: ProvisioningClient | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_remote_settings(os.environ)
     resolved_auth = auth_manager
@@ -274,10 +300,38 @@ def create_app(
                 if expired:
                     await close_session_websockets(expired)
 
+        async def provisioning_ticker() -> None:
+            last_revision: int | None = None
+            last_available: bool | None = None
+            while True:
+                await asyncio.sleep(1)
+                try:
+                    status = await app.state.provisioning_client.status()
+                except ProvisioningClientError as error:
+                    status = {
+                        "available": False,
+                        "revision": 0,
+                        "session": {"active": False, "max_workers": 5, "factory_armed": False},
+                        "artifact": None,
+                        "artifact_error": str(error),
+                        "connected": 0,
+                        "running": 0,
+                        "jobs": [],
+                    }
+                revision = int(status.get("revision") or 0)
+                available = bool(status.get("available"))
+                app.state.provisioning_snapshot = status
+                if revision != last_revision or available != last_available:
+                    await publish({"type": "provisioning", "provisioning": status})
+                    last_revision = revision
+                    last_available = available
+
         ticker_task = asyncio.create_task(ticker())
         reaper_task = asyncio.create_task(session_reaper())
+        provisioning_task = asyncio.create_task(provisioning_ticker())
         app.state.ticker_task = ticker_task
         app.state.session_reaper_task = reaper_task
+        app.state.provisioning_task = provisioning_task
         try:
             yield
         finally:
@@ -295,10 +349,13 @@ def create_app(
                 app.state.ota_reserved = False
             ticker_task.cancel()
             reaper_task.cancel()
+            provisioning_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await ticker_task
             with contextlib.suppress(asyncio.CancelledError):
                 await reaper_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await provisioning_task
             revoked = set(app.state.auth_manager.revoke_all_sessions())
             if revoked:
                 await close_session_websockets(revoked)
@@ -308,6 +365,34 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.auth_manager = resolved_auth
     app.state.conductor = conductor or create_default_conductor()
+    if provisioning_client is not None:
+        app.state.provisioning_client = provisioning_client
+    else:
+        socket_value = os.getenv("CONTROL_PROVISIONER_SOCKET")
+        if socket_value:
+            app.state.provisioning_client = UnixProvisioningClient(Path(socket_value).expanduser())
+        elif resolved_settings.serial_mode:
+            app.state.provisioning_client = UnixProvisioningClient(
+                Path("/run/lightweave-provisioner/provisioner.sock")
+            )
+        elif sys.platform == "darwin":
+            app.state.provisioning_client = UnixProvisioningClient(
+                Path.home() / "Library/Application Support/Lightweave/provisioner/provisioner.sock"
+            )
+        else:
+            app.state.provisioning_client = UnavailableProvisioningClient()
+    app.state.provisioning_snapshot = None
+    app.state.provisioner_token = os.getenv("CONTROL_PROVISIONER_TOKEN") or os.getenv(
+        "PROVISIONER_TOKEN"
+    )
+    if not app.state.provisioner_token and sys.platform == "darwin":
+        token_path = (
+            Path.home() / "Library/Application Support/Lightweave/provisioner/token"
+        )
+        try:
+            app.state.provisioner_token = token_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
     data_dir = resolved_settings.data_dir
     app.state.ota_store = ota_store or OtaArtifactStore(data_dir / "ota" if data_dir else ".control_ota")
     default_deployment_record = (
@@ -716,6 +801,14 @@ def create_app(
             return
         await publish({"type": "state", "action": action, "state": state})
 
+    async def provisioning_call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        try:
+            result = await getattr(app.state.provisioning_client, method)(*args, **kwargs)
+        except ProvisioningClientError as error:
+            raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+        app.state.provisioning_snapshot = result
+        return result
+
     def calibration_mode_plan(state: dict[str, Any]) -> dict[str, Any]:
         return calibration_code_plan(
             calibration_roster_macs(state),
@@ -1015,6 +1108,33 @@ def create_app(
             "commit": app.state.running_commit,
         }
 
+    @app.post("/api/internal/provisioning/reserve-id")
+    async def reserve_provisioning_id(
+        payload: ProvisioningIdRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        expected = app.state.provisioner_token
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+        if not expected:
+            raise HTTPException(status_code=503, detail="provisioner ID authority is disabled")
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=401, detail="invalid provisioner credential")
+        try:
+            ack = await conductor_call("reserve_id", payload.mac.upper(), payload.reported_id)
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        if ack.get("ok") is not True:
+            raise HTTPException(status_code=409, detail=str(ack.get("error") or "ID reservation failed"))
+        node_id = ack.get("node_id")
+        created = ack.get("created")
+        if not isinstance(node_id, int) or isinstance(node_id, bool) or not 1 <= node_id <= 65535:
+            raise HTTPException(status_code=502, detail="conductor returned an invalid permanent ID")
+        if not isinstance(created, bool):
+            raise HTTPException(status_code=502, detail="conductor returned an invalid reservation result")
+        asyncio.create_task(publish_state("reserve_id"))
+        return {"mac": payload.mac.upper(), "node_id": node_id, "created": created}
+
     @app.post("/api/auth/login")
     async def auth_login(request: Request) -> Response:
         client_ip = request_client_ip(request)
@@ -1091,6 +1211,44 @@ def create_app(
             return await conductor_call("snapshot")
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.get("/api/provisioning/status")
+    async def get_provisioning_status() -> dict[str, Any]:
+        return await provisioning_call("status")
+
+    @app.post("/api/provisioning/session")
+    async def start_provisioning_session(payload: ProvisioningSessionRequest) -> dict[str, Any]:
+        result = await provisioning_call(
+            "start_session",
+            max_workers=payload.max_workers,
+            factory=payload.factory,
+        )
+        await publish({"type": "provisioning", "provisioning": result})
+        return result
+
+    @app.delete("/api/provisioning/session")
+    async def stop_provisioning_session() -> dict[str, Any]:
+        result = await provisioning_call("stop_session")
+        await publish({"type": "provisioning", "provisioning": result})
+        return result
+
+    @app.put("/api/provisioning/slots")
+    async def map_provisioning_slot(payload: ProvisioningSlotRequest) -> dict[str, Any]:
+        result = await provisioning_call(
+            "map_slot",
+            port_id=payload.port_id,
+            slot=payload.slot,
+        )
+        await publish({"type": "provisioning", "provisioning": result})
+        return result
+
+    @app.post("/api/provisioning/jobs/{job_id}/retry")
+    async def retry_provisioning_job(job_id: str) -> dict[str, Any]:
+        if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise HTTPException(status_code=404, detail="provisioning job not found")
+        result = await provisioning_call("retry", job_id)
+        await publish({"type": "provisioning", "provisioning": result})
+        return result
 
     @app.get("/api/releases")
     async def get_releases() -> dict[str, Any]:
