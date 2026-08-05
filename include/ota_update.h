@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "roster.h"
+
 static constexpr uint16_t OTA_SERIAL_CHUNK_MAX = 128;
 static constexpr uint8_t OTA_STATUS_MAX = 64;
 // ESP-NOW broadcast has no per-recipient acknowledgement. Spread redundant
@@ -13,6 +15,7 @@ static constexpr uint8_t OTA_RADIO_SEND_MAX_ATTEMPTS = 24;
 static constexpr uint8_t OTA_RADIO_SEND_DELAY_MS = 4;
 static constexpr uint8_t OTA_RADIO_REPAIR_COPIES = 4;
 static constexpr uint8_t OTA_RADIO_REPAIR_MAX_ATTEMPTS = 12;
+static constexpr uint16_t OTA_RADIO_UNICAST_ACK_TIMEOUT_MS = 100;
 // Performer status reports are deterministically spread across this many
 // millisecond slots. IDs are unique across the inventoried field, so the
 // checkpoint query does not make every performer answer at once.
@@ -97,7 +100,60 @@ struct OtaCohort {
   uint8_t count;
 };
 
+struct OtaPeerLease {
+  uint8_t mac[6];
+  bool active;
+};
+
+enum OtaSendAckState : uint8_t {
+  OTA_SEND_ACK_IDLE = 0,
+  OTA_SEND_ACK_PENDING = 1,
+  OTA_SEND_ACK_SUCCESS = 2,
+  OTA_SEND_ACK_FAILED = 3,
+};
+
+struct OtaSendAck {
+  uint8_t mac[6];
+  uint8_t state;
+};
+
+static_assert(sizeof(OtaCohort) <= 512,
+              "OTA cohort must remain safe for the ESP32 loop-task stack");
+
 inline void otaCohortInit(OtaCohort& c) { c.count = 0; }
+
+inline void otaPeerLeaseInit(OtaPeerLease& lease) {
+  memset(lease.mac, 0, sizeof(lease.mac));
+  lease.active = false;
+}
+
+inline bool otaPeerLeaseMatches(const OtaPeerLease& lease,
+                                const uint8_t mac[6]) {
+  return lease.active && memcmp(lease.mac, mac, 6) == 0;
+}
+
+inline void otaPeerLeaseSet(OtaPeerLease& lease, const uint8_t mac[6]) {
+  memcpy(lease.mac, mac, 6);
+  lease.active = true;
+}
+
+inline void otaSendAckInit(OtaSendAck& ack) {
+  memset(ack.mac, 0, sizeof(ack.mac));
+  ack.state = OTA_SEND_ACK_IDLE;
+}
+
+inline void otaSendAckBegin(OtaSendAck& ack, const uint8_t mac[6]) {
+  memcpy(ack.mac, mac, 6);
+  ack.state = OTA_SEND_ACK_PENDING;
+}
+
+inline bool otaSendAckComplete(OtaSendAck& ack, const uint8_t mac[6],
+                               bool success) {
+  if (ack.state != OTA_SEND_ACK_PENDING || memcmp(ack.mac, mac, 6) != 0)
+    return false;
+  ack.state = success ? OTA_SEND_ACK_SUCCESS : OTA_SEND_ACK_FAILED;
+  return true;
+}
 
 inline int otaCohortFind(const OtaCohort& c, const uint8_t mac[6]) {
   for (int i = 0; i < c.count; i++) {
@@ -129,6 +185,19 @@ inline bool otaSeenRecently(int64_t last_us, int64_t now_us,
                             int64_t max_age_us) {
   if (last_us <= 0 || now_us < last_us || max_age_us < 0) return false;
   return now_us - last_us <= max_age_us;
+}
+
+inline void otaCohortSelectFresh(OtaCohort& cohort, const Roster& roster,
+                                 const uint8_t self_mac[6], int64_t now_us,
+                                 int64_t max_age_us) {
+  otaCohortInit(cohort);
+  for (uint8_t i = 0; i < roster.count; i++) {
+    const RosterEntry& entry = roster.entries[i];
+    if (memcmp(entry.mac, self_mac, 6) != 0 &&
+        otaSeenRecently(entry.last_us, now_us, max_age_us)) {
+      otaCohortAdd(cohort, entry.mac);
+    }
+  }
 }
 
 inline void otaStatusInit(OtaStatusTable& t) { t.count = 0; }

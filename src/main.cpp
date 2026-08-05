@@ -129,7 +129,10 @@ static bool        g_ota_local_staged = false;
 static bool        g_ota_reboot_pending = false;
 static OtaStatusTable g_ota_status;
 static OtaCohort      g_ota_cohort;
+static OtaPeerLease   g_ota_unicast_peer = {{0}, false};
+static OtaSendAck     g_ota_send_ack = {{0}, OTA_SEND_ACK_IDLE};
 static portMUX_TYPE   g_ota_status_mux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE   g_ota_send_ack_mux = portMUX_INITIALIZER_UNLOCKED;
 static OtaStatusMsg   g_ota_status_pending = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_STATUS},
                                                {0}, OTA_PHASE_IDLE, OTA_ERR_NONE, 0, 0};
 static bool           g_ota_status_pending_dirty = false;
@@ -143,6 +146,7 @@ static OtaStatusTable g_state_ota_status_snapshot;
 
 static bool otaMaintenanceActive(int64_t t);
 static void otaWriteAbort();
+static void otaUnicastPeerRelease();
 static void otaSetLocalStatus(uint8_t phase, uint8_t error, uint32_t offset,
                               uint32_t crc32);
 static void maybeOtaStatusReport();
@@ -158,6 +162,12 @@ static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
 static bool otaUnicastBegin(const uint8_t mac[6], uint32_t size,
                             uint32_t crc32);
 static bool otaUnicastActivate(const uint8_t mac[6]);
+
+static void onSend(const uint8_t* mac, esp_now_send_status_t status) {
+  portENTER_CRITICAL(&g_ota_send_ack_mux);
+  otaSendAckComplete(g_ota_send_ack, mac, status == ESP_NOW_SEND_SUCCESS);
+  portEXIT_CRITICAL(&g_ota_send_ack_mux);
+}
 
 // INA228 power telemetry (powermon.h logic, host-tested; ARCHITECTURE §4.2).
 // Probed over I2C at boot: 1–2 reference nodes carry the breakout in series
@@ -768,6 +778,7 @@ static void espnowStart() {
   esp_now_add_peer(&peer);
 
   esp_now_register_recv_cb(onRecv);  // every node; dispatches on message type
+  esp_now_register_send_cb(onSend);  // repair traffic waits for radio delivery
 }
 
 static void radioBegin() {
@@ -1374,8 +1385,19 @@ static void printOtaJson(uint8_t expected, uint8_t online, bool firmware_mixed,
   Serial.print("}");
 }
 
+static void otaUnicastPeerRelease() {
+  if (!g_ota_unicast_peer.active) return;
+  // ESP-NOW sends complete asynchronously. Keep the peer through the complete
+  // repair stream and drain the final queued copies before reclaiming the one
+  // temporary slot for another performer.
+  delay(OTA_RADIO_SEND_DELAY_MS * 2);
+  esp_now_del_peer(g_ota_unicast_peer.mac);
+  otaPeerLeaseInit(g_ota_unicast_peer);
+}
+
 static void otaWriteAbort() {
   if (g_ota_write_active) Update.abort();
+  otaUnicastPeerRelease();
   g_ota_write_active = false;
   g_ota_local_staged = false;
   g_ota_write_size = 0;
@@ -1547,7 +1569,10 @@ static void otaBroadcastEnd() {
 
 static bool otaUnicastRepeated(const uint8_t mac[6], const uint8_t* data,
                                size_t len) {
-  bool added = false;
+  if (g_ota_unicast_peer.active &&
+      !otaPeerLeaseMatches(g_ota_unicast_peer, mac)) {
+    otaUnicastPeerRelease();
+  }
   if (!esp_now_is_peer_exist(mac)) {
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, mac, 6);
@@ -1555,20 +1580,39 @@ static bool otaUnicastRepeated(const uint8_t mac[6], const uint8_t* data,
     peer.encrypt = false;
     esp_err_t add_error = esp_now_add_peer(&peer);
     if (add_error != ESP_OK && add_error != ESP_ERR_ESPNOW_EXIST) return false;
-    added = add_error == ESP_OK;
+    if (add_error == ESP_OK) otaPeerLeaseSet(g_ota_unicast_peer, mac);
   }
   uint8_t accepted = 0;
   for (uint8_t attempt = 0;
        accepted < OTA_RADIO_REPAIR_COPIES &&
        attempt < OTA_RADIO_REPAIR_MAX_ATTEMPTS;
        attempt++) {
-    if (esp_now_send(mac, data, len) == ESP_OK) accepted++;
+    portENTER_CRITICAL(&g_ota_send_ack_mux);
+    otaSendAckBegin(g_ota_send_ack, mac);
+    portEXIT_CRITICAL(&g_ota_send_ack_mux);
+    if (esp_now_send(mac, data, len) != ESP_OK) {
+      portENTER_CRITICAL(&g_ota_send_ack_mux);
+      otaSendAckInit(g_ota_send_ack);
+      portEXIT_CRITICAL(&g_ota_send_ack_mux);
+      delay(OTA_RADIO_SEND_DELAY_MS);
+      continue;
+    }
+
+    int64_t deadline = now_us() +
+        (int64_t)OTA_RADIO_UNICAST_ACK_TIMEOUT_MS * 1000LL;
+    uint8_t state = OTA_SEND_ACK_PENDING;
+    while (state == OTA_SEND_ACK_PENDING && now_us() < deadline) {
+      delay(1);
+      portENTER_CRITICAL(&g_ota_send_ack_mux);
+      state = g_ota_send_ack.state;
+      portEXIT_CRITICAL(&g_ota_send_ack_mux);
+    }
+    portENTER_CRITICAL(&g_ota_send_ack_mux);
+    if (g_ota_send_ack.state == OTA_SEND_ACK_SUCCESS) accepted++;
+    otaSendAckInit(g_ota_send_ack);
+    portEXIT_CRITICAL(&g_ota_send_ack_mux);
     delay(OTA_RADIO_SEND_DELAY_MS);
   }
-  // Sends are asynchronous. Leave a bounded drain interval before reclaiming
-  // the temporary peer slot; a 53-node field cannot retain every unicast peer.
-  delay(OTA_RADIO_SEND_DELAY_MS * 2);
-  if (added) esp_now_del_peer(mac);
   return accepted == OTA_RADIO_REPAIR_COPIES;
 }
 
@@ -1598,18 +1642,12 @@ static void handleOtaBegin(const SerialJsonCommand& cmd) {
     return;
   }
   otaWriteAbort();
-  Roster roster;
-  portENTER_CRITICAL(&g_roster_mux);
-  roster = g_roster;
-  portEXIT_CRITICAL(&g_roster_mux);
+  OtaCohort cohort;
   int64_t t = now_us();
-  for (uint8_t i = 0; i < roster.count; i++) {
-    const uint8_t* mac = roster.entries[i].mac;
-    if (memcmp(mac, g_mac, 6) != 0 &&
-        otaSeenRecently(roster.entries[i].last_us, t, OTA_COHORT_FRESH_US)) {
-      otaCohortAdd(g_ota_cohort, mac);
-    }
-  }
+  portENTER_CRITICAL(&g_roster_mux);
+  otaCohortSelectFresh(cohort, g_roster, g_mac, t, OTA_COHORT_FRESH_US);
+  portEXIT_CRITICAL(&g_roster_mux);
+  g_ota_cohort = cohort;
   if (g_ota_cohort.count == 0) {
     jsonError(cmd.id, "no performers online");
     return;

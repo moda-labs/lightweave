@@ -923,6 +923,61 @@ void test_ota_cohort_freezes_online_targets_and_ignores_offline_rows() {
   TEST_ASSERT_TRUE(otaCohortComplete(status, cohort, 1000, 42, 1000, 200));
 }
 
+void test_ota_cohort_selects_fresh_non_conductor_roster_entries() {
+  Roster roster;
+  rosterInit(roster);
+  const uint8_t conductor[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t fresh[6] = {10, 11, 12, 13, 14, 15};
+  const uint8_t stale[6] = {20, 21, 22, 23, 24, 25};
+  rosterUpsert(roster, conductor, 1, 10, 1, 0, "0.7.1", 990);
+  rosterUpsert(roster, fresh, 23, 10, 2, 0, "0.5.1", 980);
+  rosterUpsert(roster, stale, 24, 10, 3, 0, "0.5.1", 800);
+
+  OtaCohort cohort;
+  otaCohortSelectFresh(cohort, roster, conductor, 1000, 100);
+
+  TEST_ASSERT_EQUAL_UINT8(1, cohort.count);
+  TEST_ASSERT_TRUE(otaCohortContains(cohort, fresh));
+  TEST_ASSERT_FALSE(otaCohortContains(cohort, conductor));
+  TEST_ASSERT_FALSE(otaCohortContains(cohort, stale));
+}
+
+void test_ota_peer_lease_reuses_one_target_and_resets_cleanly() {
+  const uint8_t first[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t second[6] = {1, 2, 3, 4, 5, 7};
+  OtaPeerLease lease;
+  otaPeerLeaseInit(lease);
+
+  TEST_ASSERT_FALSE(otaPeerLeaseMatches(lease, first));
+  otaPeerLeaseSet(lease, first);
+  TEST_ASSERT_TRUE(otaPeerLeaseMatches(lease, first));
+  TEST_ASSERT_FALSE(otaPeerLeaseMatches(lease, second));
+
+  otaPeerLeaseInit(lease);
+  TEST_ASSERT_FALSE(lease.active);
+  TEST_ASSERT_FALSE(otaPeerLeaseMatches(lease, first));
+}
+
+void test_ota_send_ack_only_completes_the_pending_target() {
+  const uint8_t target[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t unrelated[6] = {1, 2, 3, 4, 5, 7};
+  OtaSendAck ack;
+  otaSendAckInit(ack);
+
+  TEST_ASSERT_FALSE(otaSendAckComplete(ack, target, true));
+  otaSendAckBegin(ack, target);
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_PENDING, ack.state);
+  TEST_ASSERT_FALSE(otaSendAckComplete(ack, unrelated, true));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_PENDING, ack.state);
+  TEST_ASSERT_TRUE(otaSendAckComplete(ack, target, false));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_FAILED, ack.state);
+
+  otaSendAckBegin(ack, target);
+  TEST_ASSERT_TRUE(otaSendAckComplete(ack, target, true));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_SUCCESS, ack.state);
+  TEST_ASSERT_FALSE(otaSendAckComplete(ack, target, false));
+}
+
 void test_ota_cohort_requires_every_frozen_target_to_complete() {
   OtaCohort cohort;
   otaCohortInit(cohort);
@@ -2480,6 +2535,9 @@ int main(int, char**) {
   RUN_TEST(test_ota_status_slots_spread_inventory_ids_and_hash_unknown_nodes);
   RUN_TEST(test_ota_staged_and_checkpoint_status_require_exact_crc_and_freshness);
   RUN_TEST(test_ota_cohort_freezes_online_targets_and_ignores_offline_rows);
+  RUN_TEST(test_ota_cohort_selects_fresh_non_conductor_roster_entries);
+  RUN_TEST(test_ota_peer_lease_reuses_one_target_and_resets_cleanly);
+  RUN_TEST(test_ota_send_ack_only_completes_the_pending_target);
   RUN_TEST(test_ota_cohort_requires_every_frozen_target_to_complete);
   RUN_TEST(test_ota_online_freshness_has_explicit_boundary);
   RUN_TEST(test_table_set_and_lookup);
