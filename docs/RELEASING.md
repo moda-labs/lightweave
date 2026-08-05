@@ -2,25 +2,52 @@
 
 Lightweave uses a small pull-based GitOps workflow. GitHub stores immutable
 release assets, `main` stores the reviewed production pointer, and each Pi polls
-that pointer outbound. A release and a deployment are deliberately separate
-actions.
+that pointer outbound. Publishing immutable assets and promoting the production
+pointer remain separate reviewed GitOps stages internally, but **cutting a
+release is one operator action that includes both stages**.
 
 ```text
-merge release code -> tag vX.Y.Z -> CI publishes immutable assets
-                                      |
-                                      v
-review production.json promotion -> merge to main
-                                      |
-                                      v
-Pi polls, verifies, deploys control plane, stages firmware
-                                      |
-                                      v
-operator starts field OTA when the reachable cohort is ready
+cut release
+    |
+    v
+merge release metadata -> tag vX.Y.Z -> CI publishes + verifies immutable assets
+                                                |
+                                                v
+                         promote exact manifest -> merge production pointer
+                                                |
+                                                v
+                         Pi polls, verifies, deploys control, stages firmware
+                                                |
+                                                v
+                         operator separately starts field OTA when ready
 ```
 
 This is GitOps for the Pi software and desired firmware artifact. It is not
 unattended firmware rollout: broadcasting firmware to lanterns remains a manual,
 authenticated maintenance operation.
+
+## One-action release contract
+
+A request to **cut**, **publish**, or **create** a release means run sections
+1–4 end to end without pausing for a second promotion request:
+
+1. Prepare, review, and merge the release metadata.
+2. Tag the exact merge commit and wait for all immutable assets to publish and
+   verify.
+3. Promote that exact manifest and hash through a second reviewed PR, then merge
+   it after its checks pass.
+4. Verify `origin/main` exposes the promoted production pointer and, when Pi
+   access is available, observe the automatic deployment.
+
+Do not report the release complete merely because the GitHub tag or release
+exists. The initial release request authorizes both PRs and their merges once
+required review and CI gates pass. Stop only for a failed gate, an ambiguous
+release decision, or a repository policy that requires another human action.
+If the user asks only to “prepare the release PR,” honor that narrower scope.
+
+Field OTA is intentionally outside this contract. Promotion makes the Pi deploy
+the control plane and stage the matching firmware, but never broadcasts firmware
+to lanterns automatically.
 
 ## Release contents
 
@@ -97,9 +124,13 @@ python scripts/promote_release.py --help
 ```
 
 Do not replace assets on an existing release. Correct a bad release with a new
-version and tag.
+version and tag. After the assets verify, continue directly to production
+promotion as part of the same release action.
 
 ## 3. Promote to production
+
+This is a mandatory completion stage of a release request, not a separate
+operator request. Use the exact manifest published in section 2.
 
 Start a new branch from the latest `main`, then generate the production-channel
 change from the immutable release URL:
@@ -117,6 +148,9 @@ gh pr create --fill
 
 Review the manifest URL and hash in that PR. Merging it authorizes every enrolled
 Pi to deploy the release on its next poll, normally within about six minutes.
+Once its checks pass, merge the promotion under the authorization of the original
+release request and verify that `origin/main:deploy/channels/production.json`
+names the new immutable manifest and hash.
 
 To freeze reconciliation, replace the channel with the disabled shape and merge
 that change:
