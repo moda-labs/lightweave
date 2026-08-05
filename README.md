@@ -93,6 +93,12 @@ mock conductor.
 
 ![Control UI operations screen with firmware consistency, recovery, OTA, and sleep policy controls](docs/screenshots/control-operations.png)
 
+### Multi-board flashing station
+
+![Control UI flashing station showing seven USB slots across active, complete, queued, unmapped, and failed states](docs/screenshots/control-flashing.png)
+
+![Mobile control UI flashing station at 375 pixels wide](docs/screenshots/control-flashing-mobile.png)
+
 ## Hardware
 
 Each performer is an ESP32, one 16-pixel SK6812 RGBW ring, a 12 V LiFePO4 battery,

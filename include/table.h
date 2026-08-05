@@ -53,8 +53,9 @@ enum TableIdentityResult : uint8_t {
 enum TableReserveStatus : uint8_t {
   TABLE_RESERVE_EXISTING = 0,
   TABLE_RESERVE_CREATED,
+  TABLE_RESERVE_CONFLICT,
   TABLE_RESERVE_FULL,
-  TABLE_RESERVE_EXHAUSTED,
+  TABLE_RESERVE_SAVE_FAILED,
 };
 
 struct TableReserveResult {
@@ -140,8 +141,7 @@ inline TableReserveResult tableReserveIdentity(LayoutTable& t,
     return {TABLE_RESERVE_EXISTING, t.entries[own].id};
 
   uint16_t id = 1;
-  while (id != 0 && tableFindId(t, id) >= 0) id++;
-  if (id == 0) return {TABLE_RESERVE_EXHAUSTED, 0};
+  while (tableFindId(t, id) >= 0) id++;
 
   if (own < 0) {
     own = tableEnsure(t, mac);
@@ -214,4 +214,36 @@ inline bool tableRemove(LayoutTable& t, const uint8_t mac[6]) {
   t.entries[i] = t.entries[--t.count];
   memset(&t.entries[t.count], 0, sizeof(t.entries[t.count]));
   return true;
+}
+
+// Apply the complete reserve-id command and acknowledge a new identity only
+// after its durable save succeeds. A failed save rolls the in-memory mutation
+// back so the next request cannot mistake a volatile assignment for a durable
+// one. The callback keeps persistence hardware out of this testable module.
+template <typename SaveTable>
+inline TableReserveResult tableReserveDurably(LayoutTable& t,
+                                              const uint8_t mac[6],
+                                              uint16_t reported_id,
+                                              SaveTable save) {
+  int own_before = tableFind(t, mac);
+  TableReserveResult result = {TABLE_RESERVE_EXISTING, 0};
+  if (reported_id != 0) {
+    TableIdentityResult adopted = tableAdoptIdentity(t, mac, reported_id);
+    if (adopted == TABLE_ID_CONFLICT)
+      return {TABLE_RESERVE_CONFLICT, 0};
+    if (adopted == TABLE_ID_FULL) return {TABLE_RESERVE_FULL, 0};
+    int own = tableFind(t, mac);
+    result = {adopted == TABLE_ID_ADOPTED ? TABLE_RESERVE_CREATED
+                                         : TABLE_RESERVE_EXISTING,
+              static_cast<uint16_t>(own >= 0 ? t.entries[own].id : 0)};
+  } else {
+    result = tableReserveIdentity(t, mac);
+  }
+  if (result.status != TABLE_RESERVE_CREATED || save(t)) return result;
+  if (own_before >= 0) {
+    t.entries[own_before].id = 0;
+  } else {
+    tableRemove(t, mac);
+  }
+  return {TABLE_RESERVE_SAVE_FAILED, 0};
 }

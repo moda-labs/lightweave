@@ -39,13 +39,9 @@ def build_plist(
         "ProgramArguments": [
             str(python),
             "-m",
-            "uvicorn",
-            "control.provisioner:app",
-            "--uds",
+            "control.provisioner",
+            "--socket",
             str(state_dir / "provisioner.sock"),
-            "--workers",
-            "1",
-            "--no-proxy-headers",
         ],
         "WorkingDirectory": str(repository),
         "EnvironmentVariables": environment,
@@ -61,11 +57,27 @@ def _run_launchctl(*arguments: str, check: bool = True) -> None:
     subprocess.run(["launchctl", *arguments], check=check)
 
 
+def _launchctl_loaded(service_target: str) -> bool:
+    result = subprocess.run(
+        ["launchctl", "print", service_target],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def _stop_agent(domain: str, label: str, plist: Path) -> None:
+    _run_launchctl("bootout", domain, str(plist), check=False)
+    if _launchctl_loaded(f"{domain}/{label}"):
+        raise RuntimeError(f"could not stop existing {label} LaunchAgent")
+
+
 def retire_legacy_agent(home: Path, *, uid: int) -> bool:
     plist = home / "Library/LaunchAgents" / f"{LEGACY_LABEL}.plist"
     if not plist.exists():
         return False
-    _run_launchctl("bootout", f"gui/{uid}", str(plist), check=False)
+    _stop_agent(f"gui/{uid}", LEGACY_LABEL, plist)
     plist.unlink()
     return True
 
@@ -85,7 +97,7 @@ def install(*, conductor_port: str, authority_url: str) -> None:
         token_path.write_text(secrets.token_hex(32) + "\n", encoding="utf-8")
     os.chmod(token_path, 0o600)
     document = build_plist(
-        python=Path(sys.executable).resolve(),
+        python=Path(sys.executable).absolute(),
         repository=repository,
         state_dir=state_dir,
         conductor_port=conductor_port,
@@ -98,7 +110,7 @@ def install(*, conductor_port: str, authority_url: str) -> None:
     domain = f"gui/{os.getuid()}"
     if retire_legacy_agent(Path.home(), uid=os.getuid()):
         print(f"Removed the conflicting legacy {LEGACY_LABEL} LaunchAgent")
-    _run_launchctl("bootout", domain, str(plist_path), check=False)
+    _stop_agent(domain, LABEL, plist_path)
     _run_launchctl("bootstrap", domain, str(plist_path))
     _run_launchctl("enable", f"{domain}/{LABEL}")
     print(f"Installed {LABEL}; socket and logs: {state_dir}")

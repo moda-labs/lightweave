@@ -1030,6 +1030,56 @@ void test_table_reservation_preserves_unpositioned_row() {
   TEST_ASSERT_FALSE(tableHasPosition(t.entries[tableFind(t, mac)]));
 }
 
+void test_table_reserve_command_handles_existing_reported_conflict_and_full() {
+  LayoutTable t;
+  tableInit(t);
+  uint8_t a[6], b[6], c[6];
+  macN(a, 1);
+  macN(b, 2);
+  macN(c, 3);
+  TEST_ASSERT_EQUAL(TABLE_ID_ADOPTED, tableAdoptIdentity(t, a, 7));
+  auto saved = [](const LayoutTable&) { return true; };
+
+  TableReserveResult existing = tableReserveDurably(t, a, 7, saved);
+  TEST_ASSERT_EQUAL(TABLE_RESERVE_EXISTING, existing.status);
+  TEST_ASSERT_EQUAL_UINT16(7, existing.id);
+  TEST_ASSERT_EQUAL(TABLE_RESERVE_CONFLICT,
+                    tableReserveDurably(t, b, 7, saved).status);
+  TEST_ASSERT_EQUAL(TABLE_RESERVE_CREATED,
+                    tableReserveDurably(t, b, 8, saved).status);
+
+  LayoutTable full;
+  tableInit(full);
+  for (uint16_t i = 0; i < TABLE_MAX; i++) {
+    uint8_t mac[6];
+    macN(mac, i);
+    TEST_ASSERT_TRUE(tableEnsure(full, mac) >= 0);
+  }
+  macN(c, 250);
+  TEST_ASSERT_EQUAL(TABLE_RESERVE_FULL,
+                    tableReserveDurably(full, c, 0, saved).status);
+}
+
+void test_table_reserve_rolls_back_when_durable_save_fails() {
+  LayoutTable t;
+  tableInit(t);
+  uint8_t existing[6], added[6];
+  macN(existing, 1);
+  macN(added, 2);
+  TEST_ASSERT_TRUE(tableEnsure(t, existing) >= 0);
+  auto fail_save = [](const LayoutTable&) { return false; };
+
+  TEST_ASSERT_EQUAL(
+      TABLE_RESERVE_SAVE_FAILED,
+      tableReserveDurably(t, existing, 9, fail_save).status);
+  TEST_ASSERT_EQUAL_UINT16(0, t.entries[tableFind(t, existing)].id);
+  TEST_ASSERT_EQUAL(
+      TABLE_RESERVE_SAVE_FAILED,
+      tableReserveDurably(t, added, 0, fail_save).status);
+  TEST_ASSERT_EQUAL(-1, tableFind(t, added));
+  TEST_ASSERT_EQUAL_UINT8(1, t.count);
+}
+
 void test_table_reports_live_identity_conflicts() {
   LayoutTable t;
   tableInit(t);
@@ -2267,6 +2317,8 @@ int main(int, char**) {
   RUN_TEST(test_table_permanent_ids_are_unique_and_survive_position_changes);
   RUN_TEST(test_table_reserves_lowest_unused_identity_once);
   RUN_TEST(test_table_reservation_preserves_unpositioned_row);
+  RUN_TEST(test_table_reserve_command_handles_existing_reported_conflict_and_full);
+  RUN_TEST(test_table_reserve_rolls_back_when_durable_save_fails);
   RUN_TEST(test_table_reports_live_identity_conflicts);
   RUN_TEST(test_table_migrates_legacy_positions_without_inventing_ids);
   RUN_TEST(test_table_remove);

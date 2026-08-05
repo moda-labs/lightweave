@@ -199,7 +199,13 @@ def autoflash_manifest(bundle_data: bytes) -> dict:
 def fake_esptool(tmp_path: Path) -> tuple[Path, Path]:
     package = tmp_path / "fake-tool" / "esptool"
     package.mkdir(parents=True)
-    (package / "__init__.py").write_text("def _main(): pass\n")
+    (package / "__init__.py").write_text(
+        "def _main():\n"
+        "    import sys\n"
+        "    if sys.argv[1:] != ['version']:\n"
+        "        raise SystemExit(2)\n"
+        "    print('esptool test-runtime')\n"
+    )
     (package / "__main__.py").write_text("from . import _main\n_main()\n")
     (package / "targets.json").write_text('{"chip": "esp32"}\n')
     license_path = tmp_path / "fake-tool" / "LICENSE"
@@ -242,6 +248,41 @@ def test_serial_flash_bundle_is_deterministic_and_self_verifying(tmp_path: Path)
     assert {item["offset"] for item in plan["segments"]} == set(autoflash.EXPECTED_SEGMENTS)
     assert (tmp_path / "extracted" / "esptool.py").is_file()
     assert (tmp_path / "extracted" / "esptool" / "__main__.py").is_file()
+    bundle.verify_bundle_runtime(first)
+
+
+def test_flashing_tool_has_timeout_and_does_not_inherit_service_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return SimpleNamespace(returncode=0, stdout="ok")
+
+    monkeypatch.setenv("PROVISIONER_TOKEN", "do-not-leak")
+    monkeypatch.setenv("CONTROL_PASSWORD_HASH", "do-not-leak-either")
+    monkeypatch.setenv("PATH", "/safe/bin")
+    monkeypatch.setattr(autoflash.subprocess, "run", fake_run)
+
+    assert autoflash.run_tool(["esptool", "version"], timeout_s=7) == "ok"
+    assert calls[0][1]["timeout"] == 7
+    assert calls[0][1]["env"]["PATH"] == "/safe/bin"
+    assert "PROVISIONER_TOKEN" not in calls[0][1]["env"]
+    assert "CONTROL_PASSWORD_HASH" not in calls[0][1]["env"]
+
+
+def test_flashing_tool_reports_timeout_without_command_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timeout(arguments, **_kwargs):
+        raise subprocess.TimeoutExpired(arguments, 3)
+
+    monkeypatch.setattr(autoflash.subprocess, "run", timeout)
+
+    with pytest.raises(RuntimeError, match="timed out after 3 seconds") as error:
+        autoflash.run_tool(["esptool", "--port", "/dev/private-device"], timeout_s=3)
+    assert "/dev/private-device" not in str(error.value)
 
 
 def test_autoflash_rejects_compressed_serial_bundle(tmp_path: Path) -> None:
@@ -527,6 +568,16 @@ def test_autoflash_refuses_conductor_before_any_flash(
         "flash_board",
         lambda *_args: pytest.fail("conductor must not be flashed"),
     )
+    monkeypatch.setattr(
+        autoflash,
+        "erase_board",
+        lambda *_args: pytest.fail("conductor must not be erased"),
+    )
+    monkeypatch.setattr(
+        autoflash,
+        "write_node_id",
+        lambda *_args: pytest.fail("conductor must not receive a performer ID"),
+    )
 
     with pytest.raises(RuntimeError, match="refusing to auto-flash a conductor"):
         autoflash.process_port(
@@ -535,7 +586,10 @@ def test_autoflash_refuses_conductor_before_any_flash(
             tmp_path / "unused.zip",
             tmp_path / "work",
             device_registry=tmp_path / "devices.json",
-            factory_authorized=False,
+            factory_authorized=True,
+            id_resolver=lambda *_args: pytest.fail(
+                "conductor must not reach the ID authority"
+            ),
         )
 
 
@@ -748,6 +802,8 @@ def test_autoflash_ambiguous_factory_erase_fails_closed_until_per_mac_retry(
             str(Path(autoflash.__file__).resolve()),
             "retry-factory",
             mac,
+            "--state",
+            str(registry.parent),
         ]
     )
     assert f"run: {retry_command}" in str(error.value)

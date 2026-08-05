@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -150,6 +153,7 @@ class ProvisioningManager:
         clock: Callable[[], float] = time.time,
         poll_interval_s: float = 1.0,
         refresh_interval_s: float = 300.0,
+        operation_lock_path: Path | None = None,
     ):
         self.state_dir = state_dir
         self.channel = channel
@@ -162,9 +166,11 @@ class ProvisioningManager:
         self.clock = clock
         self.poll_interval_s = poll_interval_s
         self.refresh_interval_s = refresh_interval_s
+        self.operation_lock_path = operation_lock_path
         self._lock = threading.RLock()
         self._runner: asyncio.Task[None] | None = None
         self._job_tasks: dict[str, asyncio.Task[None]] = {}
+        self._job_devices: dict[str, str] = {}
         self._ports: dict[str, PortCandidate] = {}
         self._jobs: dict[str, ProvisioningJob] = {}
         self._port_job: dict[str, str] = {}
@@ -180,10 +186,13 @@ class ProvisioningManager:
         self._load_jobs()
 
     def _identity_key(self, port: PortCandidate) -> str:
-        return port.location or f"device:{port.device}"
+        if not port.location:
+            raise ValueError("USB topology is unavailable for this port")
+        return port.location
 
     def _port_id(self, port: PortCandidate) -> str:
-        return hashlib.sha256(self._identity_key(port).encode()).hexdigest()[:16]
+        identity = port.location or f"unsupported:{port.hardware_id}"
+        return hashlib.sha256(identity.encode()).hexdigest()[:16]
 
     def _load_config(self) -> None:
         path = self.state_dir / "station.json"
@@ -331,24 +340,46 @@ class ProvisioningManager:
                 self._port_job.pop(device, None)
 
             for device, port in current.items():
-                if device in self._ports:
+                if device in self._ports and port == self._ports[device]:
                     continue
+                prior_job_id = self._port_job.pop(device, None)
+                if prior_job_id and prior_job_id in self._jobs:
+                    prior = self._jobs[prior_job_id]
+                    prior.connected = False
+                    prior.updated_at = self.clock()
+                    if prior.state in {"queued", "unmapped"}:
+                        prior.state = "disconnected"
+                        prior.message = "Board disconnected before flashing"
                 now = self.clock()
-                key = self._identity_key(port)
-                slot = self._slot_map.get(key)
+                try:
+                    key = self._identity_key(port)
+                    slot = self._slot_map.get(key)
+                    state = "queued" if slot is not None else "unmapped"
+                    message = (
+                        "Waiting to flash"
+                        if slot is not None
+                        else "Assign this hub port to a slot"
+                    )
+                    error = None
+                except ValueError as failure:
+                    slot = None
+                    state = "failed"
+                    message = str(failure)
+                    error = str(failure)
                 job = ProvisioningJob(
                     id=uuid4().hex,
                     port_id=self._port_id(port),
                     slot=slot,
-                    state="queued" if slot is not None else "unmapped",
-                    message="Waiting to flash" if slot is not None else "Assign this hub port to a slot",
+                    state=state,
+                    message=message,
                     connected=True,
                     created_at=now,
                     updated_at=now,
+                    error=error,
                 )
                 self._jobs[job.id] = job
                 self._port_job[device] = job.id
-            if removed or set(current) != set(self._ports):
+            if removed or current != self._ports:
                 self._revision += 1
                 self._save_jobs()
             self._ports = current
@@ -366,18 +397,25 @@ class ProvisioningManager:
                 if job.state == "queued" and job.connected and job.id not in self._job_tasks
             ]
             queued.sort(key=lambda item: (item.slot or 999, item.created_at))
-            for job in queued[:available]:
+            scheduled = 0
+            busy_devices = set(self._job_devices.values())
+            for job in queued:
+                if scheduled >= available:
+                    break
                 device = next(
                     (name for name, job_id in self._port_job.items() if job_id == job.id),
                     None,
                 )
-                if device is None:
+                if device is None or device in busy_devices:
                     continue
                 job.state = "probing"
                 job.message = "Starting board probe"
                 job.updated_at = self.clock()
                 task = asyncio.create_task(self._run_job(job.id, device))
                 self._job_tasks[job.id] = task
+                self._job_devices[job.id] = device
+                busy_devices.add(device)
+                scheduled += 1
                 self._revision += 1
                 self._save_jobs()
 
@@ -395,6 +433,8 @@ class ProvisioningManager:
         def progress(stage: str, message: str) -> None:
             with self._lock:
                 job = self._jobs[job_id]
+                if not job.connected or self._port_job.get(device) != job_id:
+                    raise RuntimeError("board disconnected or USB path was reused")
                 job.state = stage
                 job.message = message
                 job.updated_at = self.clock()
@@ -403,19 +443,17 @@ class ProvisioningManager:
 
         try:
             result = await asyncio.to_thread(
-                self.processor,
+                self._process_locked,
                 device,
-                approved[0],
-                approved[1],
-                self.state_dir / "work",
-                device_registry=self.state_dir / "devices.json",
-                factory_authorized=factory,
-                progress=progress,
-                id_resolver=self.id_resolver,
+                approved,
+                factory,
+                progress,
             )
             match = ID_RE.search(result)
             with self._lock:
                 job = self._jobs[job_id]
+                if not job.connected or self._port_job.get(device) != job_id:
+                    raise RuntimeError("board disconnected or USB path was reused")
                 job.state = "done"
                 job.message = match.group(0).upper() + " ready to label" if match else result
                 job.node_id = int(match.group(1)) if match else None
@@ -425,10 +463,49 @@ class ProvisioningManager:
                 self._revision += 1
                 self._save_jobs()
         except Exception as error:
-            self._fail_job(job_id, str(error))
+            self._fail_job(job_id, str(error).replace(device, "USB device"))
         finally:
             with self._lock:
                 self._job_tasks.pop(job_id, None)
+                self._job_devices.pop(job_id, None)
+
+    @contextmanager
+    def _operation_lock(self):
+        if self.operation_lock_path is None:
+            yield
+            return
+        try:
+            lock = self.operation_lock_path.open("rb")
+        except OSError as error:
+            raise RuntimeError("provisioning operation lock is unavailable") from error
+        with lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError("deployment or firmware update is in progress") from error
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _process_locked(
+        self,
+        device: str,
+        approved: tuple[dict[str, Any], Path],
+        factory: bool,
+        progress: Callable[[str, str], None],
+    ) -> str:
+        with self._operation_lock():
+            return self.processor(
+                device,
+                approved[0],
+                approved[1],
+                self.state_dir / "work",
+                device_registry=self.state_dir / "devices.json",
+                factory_authorized=factory,
+                progress=progress,
+                id_resolver=self.id_resolver,
+            )
 
     def _fail_job(self, job_id: str, error: str) -> None:
         with self._lock:
@@ -582,6 +659,11 @@ def create_default_manager() -> ProvisioningManager:
         channel=os.getenv("PROVISIONER_CHANNEL", DEFAULT_CHANNEL),
         discover=_default_discover,
         id_resolver=resolver,
+        operation_lock_path=(
+            Path(value).expanduser()
+            if (value := os.getenv("PROVISIONER_OPERATION_LOCK"))
+            else None
+        ),
     )
 
 
@@ -639,3 +721,34 @@ def create_provisioner_app(manager: ProvisioningManager | None = None) -> FastAP
 
 
 app = create_provisioner_app()
+
+
+def prepare_socket_path(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(mode):
+        raise RuntimeError(f"refusing to replace non-socket path: {path}")
+    path.unlink()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the Lightweave USB provisioner")
+    parser.add_argument(
+        "--socket",
+        type=Path,
+        default=_default_state_dir() / "provisioner.sock",
+    )
+    args = parser.parse_args()
+    socket_path = args.socket.expanduser()
+    prepare_socket_path(socket_path)
+    import uvicorn
+
+    uvicorn.run(app, uds=str(socket_path), workers=1, proxy_headers=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

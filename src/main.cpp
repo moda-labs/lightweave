@@ -302,10 +302,12 @@ static void tableLoad() {
   }
 }
 
-static void tableSave() {
-  g_prefs.begin("node", /*readonly*/ false);
-  g_prefs.putBytes("table", &g_table, sizeof(g_table));
+static bool tableSave(const LayoutTable& table = g_table) {
+  bool opened = g_prefs.begin("node", /*readonly*/ false);
+  size_t written =
+      opened ? g_prefs.putBytes("table", &table, sizeof(table)) : 0;
   g_prefs.end();
+  return opened && written == sizeof(table);
 }
 
 // ---- Sync state --------------------------------------------------------------
@@ -1874,38 +1876,23 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     if (!isConductor()) {
       jsonError(cmd.id, "reserve_id is conductor-only");
     } else {
-      TableReserveResult reserved = {TABLE_RESERVE_EXISTING, 0};
-      bool created = false;
-      if (cmd.reported_id) {
-        TableIdentityResult adopted =
-            tableAdoptIdentity(g_table, cmd.mac, cmd.reported_id);
-        if (adopted == TABLE_ID_CONFLICT) {
-          jsonError(cmd.id, "permanent ID conflict");
-          return;
-        }
-        if (adopted == TABLE_ID_FULL) {
-          jsonError(cmd.id, "table full");
-          return;
-        }
-        created = adopted == TABLE_ID_ADOPTED;
-        int own = tableFind(g_table, cmd.mac);
-        reserved.id = own >= 0 ? g_table.entries[own].id : 0;
-      } else {
-        reserved = tableReserveIdentity(g_table, cmd.mac);
-        if (reserved.status == TABLE_RESERVE_FULL) {
-          jsonError(cmd.id, "table full");
-          return;
-        }
-        if (reserved.status == TABLE_RESERVE_EXHAUSTED) {
-          jsonError(cmd.id, "no permanent IDs remain");
-          return;
-        }
-        created = reserved.status == TABLE_RESERVE_CREATED;
+      TableReserveResult reserved = tableReserveDurably(
+          g_table, cmd.mac, cmd.reported_id,
+          [](const LayoutTable& table) { return tableSave(table); });
+      if (reserved.status == TABLE_RESERVE_CONFLICT) {
+        jsonError(cmd.id, "permanent ID conflict");
+        return;
       }
-      if (created) {
-        tableSave();
-        broadcastTable();
+      if (reserved.status == TABLE_RESERVE_FULL) {
+        jsonError(cmd.id, "table full");
+        return;
       }
+      if (reserved.status == TABLE_RESERVE_SAVE_FAILED) {
+        jsonError(cmd.id, "failed to persist permanent ID");
+        return;
+      }
+      bool created = reserved.status == TABLE_RESERVE_CREATED;
+      if (created) broadcastTable();
       jsonReservedId(cmd.id, reserved.id, created);
     }
   } else if (cmd.kind == SJ_PATTERN) {

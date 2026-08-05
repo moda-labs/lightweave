@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/underminedsk/lightweave · `pio test -e native`
-(**152 pass**) is green; control tests (**332 pass**) are green; all three
+(**154 pass**) is green; control tests (**351 pass**) are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest locally (2026-08-04): **the multi-board USB flashing station is built on
@@ -30,6 +30,7 @@ console/network errors. Hardware throughput proof with a real powered hub and
 The Pi workflow also requires promotion of a new release whose serial ZIP uses
 flash-plan schema 2; the current v0.5.1 artifact fails preflight clearly rather
 than starting board jobs without a usable local flash runtime.
+The schema-2 build gate now executes the bundled flashing runtime, the station and GitOps deployment share an operation lock, USB path reuse fails closed, production health includes the daemon, and conductor ID reservations roll back unless NVS persistence succeeds.
 
 The one-time inventory/tagging pass is complete: **53 boards are registered**.
 No performer firmware migration is required for the station itself; only the

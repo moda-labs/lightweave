@@ -19,7 +19,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response, We
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .adapters import (
     DEFAULT_SERIAL_REQUEST_TIMEOUT_S,
@@ -66,6 +66,7 @@ DEFAULT_BATTERY_CAPACITY_WH = 384.0
 DEFAULT_FULL_VOLTAGE = 14.4
 SESSION_COOKIE = "__Host-lightweave_session"
 LOGIN_BODY_LIMIT = 2 * 1024
+PROVISIONING_ID_BODY_LIMIT = 1024
 PUBLIC_HTTP_ROUTES = {
     ("GET", "/login"),
     ("GET", "/static/login.js"),
@@ -303,6 +304,7 @@ def create_app(
         async def provisioning_ticker() -> None:
             last_revision: int | None = None
             last_available: bool | None = None
+            last_factory_armed: bool | None = None
             while True:
                 await asyncio.sleep(1)
                 try:
@@ -320,11 +322,17 @@ def create_app(
                     }
                 revision = int(status.get("revision") or 0)
                 available = bool(status.get("available"))
+                factory_armed = bool((status.get("session") or {}).get("factory_armed"))
                 app.state.provisioning_snapshot = status
-                if revision != last_revision or available != last_available:
+                if (
+                    revision != last_revision
+                    or available != last_available
+                    or factory_armed != last_factory_armed
+                ):
                     await publish({"type": "provisioning", "provisioning": status})
                     last_revision = revision
                     last_available = available
+                    last_factory_armed = factory_armed
 
         ticker_task = asyncio.create_task(ticker())
         reaper_task = asyncio.create_task(session_reaper())
@@ -1101,16 +1109,30 @@ def create_app(
         return {"authenticated": live_session(token) is not None}
 
     @app.get("/api/health")
-    async def health() -> dict[str, Any]:
-        return {
+    async def health():
+        result = {
             "ok": True,
             "version": app.state.running_version,
             "commit": app.state.running_commit,
         }
+        if not app.state.settings.serial_mode:
+            return result
+        try:
+            provisioner = await app.state.provisioning_client.status()
+        except ProvisioningClientError as error:
+            return JSONResponse(
+                {**result, "ok": False, "provisioner": {"available": False, "error": str(error)}},
+                status_code=503,
+            )
+        if provisioner.get("available") is not True:
+            return JSONResponse(
+                {**result, "ok": False, "provisioner": provisioner},
+                status_code=503,
+            )
+        return {**result, "provisioner": {"available": True}}
 
     @app.post("/api/internal/provisioning/reserve-id")
     async def reserve_provisioning_id(
-        payload: ProvisioningIdRequest,
         request: Request,
     ) -> dict[str, Any]:
         expected = app.state.provisioner_token
@@ -1118,8 +1140,26 @@ def create_app(
         supplied = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
         if not expected:
             raise HTTPException(status_code=503, detail="provisioner ID authority is disabled")
+        if not app.state.settings.serial_mode:
+            raise HTTPException(status_code=503, detail="provisioner ID authority requires serial mode")
         if not supplied or not hmac.compare_digest(supplied, expected):
             raise HTTPException(status_code=401, detail="invalid provisioner credential")
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > PROVISIONING_ID_BODY_LIMIT:
+                    raise HTTPException(status_code=413, detail="request body too large")
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail="invalid content length") from error
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > PROVISIONING_ID_BODY_LIMIT:
+                raise HTTPException(status_code=413, detail="request body too large")
+        try:
+            payload = ProvisioningIdRequest.model_validate_json(body)
+        except ValidationError as error:
+            raise HTTPException(status_code=422, detail="invalid ID reservation request") from error
         try:
             ack = await conductor_call("reserve_id", payload.mac.upper(), payload.reported_id)
         except SerialProtocolError as error:
@@ -1132,7 +1172,6 @@ def create_app(
             raise HTTPException(status_code=502, detail="conductor returned an invalid permanent ID")
         if not isinstance(created, bool):
             raise HTTPException(status_code=502, detail="conductor returned an invalid reservation result")
-        asyncio.create_task(publish_state("reserve_id"))
         return {"mac": payload.mac.upper(), "node_id": node_id, "created": created}
 
     @app.post("/api/auth/login")

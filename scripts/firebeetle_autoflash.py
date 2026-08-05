@@ -85,6 +85,7 @@ class PortCandidate:
     device: str
     location: str | None
     hardware_id: str
+    instance_id: str | None = None
 
 
 ProgressCallback = Callable[[str, str], None]
@@ -618,15 +619,36 @@ def esptool_command(directory: Path | None = None) -> list[str]:
     return [str(stable_platformio_python(Path(sys.executable))), str(tool)]
 
 
-def run_tool(arguments: list[str]) -> str:
-    result = subprocess.run(arguments, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+def _tool_environment() -> dict[str, str]:
+    sensitive = ("TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "API_KEY", "PRIVATE_KEY")
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not any(marker in name.upper() for marker in sensitive)
+    }
+
+
+def run_tool(arguments: list[str], *, timeout_s: float = 120.0) -> str:
+    try:
+        result = subprocess.run(
+            arguments,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=_tool_environment(),
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"flashing tool timed out after {timeout_s:g} seconds") from error
     if result.returncode:
         raise RuntimeError(result.stdout.strip())
     return result.stdout
 
 
 def probe_board(port: str, directory: Path | None = None) -> dict[str, str]:
-    output = run_tool(esptool_command(directory) + ["--port", port, "flash_id"])
+    output = run_tool(
+        esptool_command(directory) + ["--port", port, "flash_id"], timeout_s=30
+    )
     probe = parse_probe(output)
     if not probe:
         raise RuntimeError("device is not the expected ESP32-D0WD-V3/40MHz/4MB class")
@@ -636,7 +658,7 @@ def probe_board(port: str, directory: Path | None = None) -> dict[str, str]:
 def erase_board(port: str, directory: Path | None = None) -> None:
     base = esptool_command(directory) + ["--chip", "esp32", "--port", port, "--baud", "115200"]
     log(f"{port}: factory/unrecognized firmware; performing one-time erase")
-    run_tool(base + ["erase_flash"])
+    run_tool(base + ["erase_flash"], timeout_s=60)
 
 
 def flash_board(port: str, plan: dict[str, Any], directory: Path) -> None:
@@ -647,7 +669,7 @@ def flash_board(port: str, plan: dict[str, Any], directory: Path) -> None:
     ]
     for segment in sorted(plan["segments"], key=lambda item: item["offset"]):
         arguments += [hex(segment["offset"]), str(directory / segment["filename"])]
-    run_tool(arguments)
+    run_tool(arguments, timeout_s=120)
 
 
 def preserves_role_position(before: DeviceInfo, after: DeviceInfo) -> bool:
@@ -709,7 +731,14 @@ def process_port(
     elif device_state == "erase_pending":
         retry_python = stable_platformio_python(Path(sys.executable))
         retry_command = shlex.join(
-            [str(retry_python), str(Path(__file__).resolve()), "retry-factory", probe["mac"]]
+            [
+                str(retry_python),
+                str(Path(__file__).resolve()),
+                "retry-factory",
+                probe["mac"],
+                "--state",
+                str(device_registry.parent),
+            ]
         )
         raise RuntimeError(
             f"prior factory erase has an ambiguous result for {probe['mac']}; "
@@ -797,20 +826,31 @@ def process_port(
 def candidate_port_infos() -> list[PortCandidate]:
     from serial.tools import list_ports
 
-    return [
-        PortCandidate(
-            device=item.device,
-            location=item.location,
-            hardware_id=item.hwid,
+    candidates = []
+    for item in list_ports.comports():
+        if not (
+            item.vid == WCH_VID
+            and item.pid == WCH_PID
+            and (
+                item.device.startswith("/dev/cu.")
+                or item.device.startswith("/dev/ttyUSB")
+            )
+        ):
+            continue
+        try:
+            device_stat = os.stat(item.device)
+            instance_id = f"{device_stat.st_rdev}:{device_stat.st_ino}:{device_stat.st_ctime_ns}"
+        except OSError:
+            instance_id = None
+        candidates.append(
+            PortCandidate(
+                device=item.device,
+                location=item.location,
+                hardware_id=item.hwid,
+                instance_id=instance_id,
+            )
         )
-        for item in list_ports.comports()
-        if item.vid == WCH_VID
-        and item.pid == WCH_PID
-        and (
-            item.device.startswith("/dev/cu.")
-            or item.device.startswith("/dev/ttyUSB")
-        )
-    ]
+    return candidates
 
 
 def candidate_ports() -> set[str]:

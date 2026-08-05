@@ -187,11 +187,9 @@ the root recovery gate that must run before control. The initial production
 channel is disabled, so this first invocation only enrolls the Pi and verifies
 the current release; it does not pull a different version. The control unit also
 requires `/etc/lightweave/control.env`; a missing file prevents startup.
-`StateDirectory=lightweave` creates `/var/lib/lightweave` as mode 0700. Combined
-with `ProtectSystem=strict`, that state directory is the service's only writable
-persistent location. It contains `ota/`, `patterns/`, `calibration/`, and the
-provisioner's `station.json`, `jobs.json`, verified artifact cache, and local
-device safety registry under `provisioner/`.
+The control unit's `StateDirectory=lightweave` creates `/var/lib/lightweave` as mode 0700 for `ota/`, `patterns/`, and `calibration/`.
+The USB daemon is separately confined to `StateDirectory=lightweave/provisioner`, which contains `station.json`, `jobs.json`, its verified artifact cache, and its local device safety registry.
+Combined with `ProtectSystem=strict`, neither service can write outside its declared state boundary.
 
 Check the final ownership and permissions before starting:
 
@@ -208,9 +206,8 @@ Uvicorn listens only on `127.0.0.1:8000`, never `0.0.0.0:8000`.
 
 ### Verify the USB flashing station
 
-Use a powered USB hub and keep its numbered performer ports separate from the
-conductor's fixed port. The provisioner resolves `CONTROL_SERIAL_PORT` through
-its by-path symlink and removes that device from discovery before any probe.
+Use a powered USB hub and keep its numbered performer ports separate from the conductor's fixed port.
+The provisioner resolves `CONTROL_SERIAL_PORT` through its by-path symlink and removes that device from discovery before any probe.
 Check the private socket and both service journals:
 
 ```bash
@@ -219,14 +216,13 @@ sudo journalctl -u lightweave-provisioner.service -n 100 --no-pager
 sudo journalctl -u lightweave-control.service -n 100 --no-pager
 ```
 
-Open the control plane's **Flashing** screen. Newly encountered hub ports wait
-without flashing until each opaque port identity is mapped to the matching
-physical slot number. Start with one board, then prove five-way throughput
-before raising the UI limit toward ten. **Arm registered performers** never
-erases blank firmware. Use **Arm new boards for 15 minutes** only during a
-supervised factory batch; it is the explicit authorization for one-time erase.
-Stopping the station prevents new jobs but lets already-running flash
-subprocesses finish.
+Open the control plane's **Flashing** screen.
+Newly encountered hub ports wait without flashing until each opaque port identity is mapped to the matching physical slot number.
+Start with one board, then prove five-way throughput before raising the UI limit toward ten.
+**Arm registered performers** never erases blank firmware.
+Use **Arm new boards for 15 minutes** only during a supervised factory batch; it is the explicit authorization for one-time erase.
+Factory mode may erase any matching WCH-connected ESP32 that does not answer as a known Lightweave node, so attach only performer boards to the station hub and verify the conductor exclusion before arming it.
+Stopping the station prevents new jobs but lets already-running flash subprocesses finish.
 
 ## 5. Verify the private service boundary
 
@@ -469,6 +465,7 @@ test -x "/opt/lightweave/.venvs/$old_commit/bin/python"
 test ! -e "/opt/lightweave/.venvs/$new_commit"
 sudo systemctl stop lightweave-gitops.service lightweave-gitops.timer
 sudo systemctl stop lightweave-control
+sudo systemctl stop lightweave-provisioner 2>/dev/null || true
 sudo install -d -o root -g root -m 0700 /var/backups/lightweave
 sudo tar -C /var/lib -czf \
   "/var/backups/lightweave/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).tgz" \
@@ -541,10 +538,18 @@ test -x "/opt/lightweave/.venvs/$previous_commit/bin/python"
 sudo systemctl stop lightweave-gitops.service
 sudo systemctl disable --now lightweave-gitops.timer
 sudo systemctl stop lightweave-control
+sudo systemctl stop lightweave-provisioner 2>/dev/null || true
 sudo git -C /opt/lightweave checkout --detach "$previous_commit"
 sudo install -o root -g root -m 0644 \
   /opt/lightweave/deploy/pi/lightweave-control.service \
   /etc/systemd/system/lightweave-control.service
+if test -f /opt/lightweave/deploy/pi/lightweave-provisioner.service; then
+  sudo install -o root -g root -m 0644 \
+    /opt/lightweave/deploy/pi/lightweave-provisioner.service \
+    /etc/systemd/system/lightweave-provisioner.service
+else
+  sudo rm -f /etc/systemd/system/lightweave-provisioner.service
+fi
 sudo install -o root -g root -m 0644 \
   /opt/lightweave/deploy/pi/cloudflared.service \
   /etc/systemd/system/cloudflared.service
@@ -552,6 +557,10 @@ sudo systemctl daemon-reload
 sudo systemd-analyze verify \
   /etc/systemd/system/lightweave-control.service \
   /etc/systemd/system/cloudflared.service
+if test -f /etc/systemd/system/lightweave-provisioner.service; then
+  sudo systemd-analyze verify \
+    /etc/systemd/system/lightweave-provisioner.service
+fi
 sudo ln -sfn "/opt/lightweave/.venvs/$previous_commit" \
   /opt/lightweave/.venv.new
 sudo mv -Tf /opt/lightweave/.venv.new /opt/lightweave/.venv
@@ -562,8 +571,14 @@ sudo chmod 0640 /var/lib/lightweave-gitops/running-commit.new
 sudo mv -f /var/lib/lightweave-gitops/running-commit.new \
   /var/lib/lightweave-gitops/running-commit
 sudo systemctl start lightweave-control
+if test -f /etc/systemd/system/lightweave-provisioner.service; then
+  sudo systemctl start lightweave-provisioner
+fi
 sudo systemctl restart cloudflared
 sudo systemctl status lightweave-control
+if test -f /etc/systemd/system/lightweave-provisioner.service; then
+  sudo systemctl status lightweave-provisioner
+fi
 sudo systemctl status cloudflared
 ```
 

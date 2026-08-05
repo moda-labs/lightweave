@@ -15,16 +15,19 @@ EnvironmentFile=/etc/lightweave/control.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=PROVISIONER_STATE_DIR=/var/lib/lightweave/provisioner
-ExecStart=/opt/lightweave/.venv/bin/python -m uvicorn control.provisioner:app --uds /run/lightweave-provisioner/provisioner.sock --workers 1 --no-proxy-headers
+Environment=PROVISIONER_OPERATION_LOCK=/var/lib/lightweave-gitops/firmware-ota.lock
+UnsetEnvironment=CONTROL_PASSWORD_HASH
+ExecStart=/opt/lightweave/.venv/bin/python -m control.provisioner --socket /run/lightweave-provisioner/provisioner.sock
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=180
 
 RuntimeDirectory=lightweave-provisioner
 RuntimeDirectoryMode=0700
-StateDirectory=lightweave
+StateDirectory=lightweave/provisioner
 StateDirectoryMode=0700
-ReadWritePaths=/var/lib/lightweave
+ReadWritePaths=/var/lib/lightweave/provisioner
+ReadOnlyPaths=/var/lib/lightweave-gitops/firmware-ota.lock
 UMask=0077
 
 NoNewPrivileges=true

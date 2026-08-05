@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -95,6 +96,15 @@ def build_bundle(
     return plan
 
 
+def verify_bundle_runtime(bundle: Path) -> None:
+    from firebeetle_autoflash import esptool_command, extract_bundle, run_tool
+
+    with tempfile.TemporaryDirectory(prefix="lightweave-bundle-") as temporary:
+        destination = Path(temporary)
+        extract_bundle(bundle, destination)
+        run_tool(esptool_command(destination) + ["version"], timeout_s=30)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a deterministic serial flash bundle")
     parser.add_argument("--bootloader", type=Path, required=True)
@@ -116,6 +126,7 @@ def main() -> int:
         esptool_license=args.esptool_license,
         output=args.output,
     )
+    verify_bundle_runtime(args.output)
     print(args.output)
     return 0
 

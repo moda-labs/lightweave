@@ -76,7 +76,7 @@ class Lantern:
 
     def as_dict(self, now: float) -> dict[str, Any]:
         has_position = self.x is not None and self.y is not None
-        node_id = self.node_id if self.node_id is not None else self._node_id_from_label()
+        node_id = self.permanent_id()
         attention = "None"
         if self.status == "missing":
             attention = "Not seen"
@@ -117,6 +117,9 @@ class Lantern:
         if self.label.startswith("#") and self.label[1:].isdigit():
             return int(self.label[1:])
         return 0
+
+    def permanent_id(self) -> int:
+        return self.node_id if self.node_id is not None else self._node_id_from_label()
 
     def _age_label(self, age: float | None = None) -> str:
         age_s = self.last_seen_s if age is None else age
@@ -267,23 +270,28 @@ class MockConductor:
     def reserve_id(self, mac: str, reported_id: int = 0) -> dict[str, Any]:
         normalized = mac.upper()
         existing = self._find(normalized)
-        if existing and existing.node_id:
-            if reported_id not in {0, existing.node_id}:
+        if existing and existing.permanent_id():
+            permanent_id = existing.permanent_id()
+            if reported_id not in {0, permanent_id}:
                 return {"ok": False, "error": "permanent ID conflict"}
             return {
                 "ok": True,
                 "message": "permanent ID already reserved",
-                "node_id": existing.node_id,
+                "node_id": permanent_id,
                 "created": False,
             }
 
         owner = next(
-            (item for item in self._lanterns if reported_id and item.node_id == reported_id),
+            (
+                item
+                for item in self._lanterns
+                if reported_id and item.permanent_id() == reported_id
+            ),
             None,
         )
         if owner and owner.mac != normalized:
             return {"ok": False, "error": "permanent ID conflict"}
-        used = {item.node_id for item in self._lanterns if item.node_id}
+        used = {item.permanent_id() for item in self._lanterns if item.permanent_id()}
         node_id = reported_id or next(
             candidate for candidate in range(1, 65536) if candidate not in used
         )

@@ -275,6 +275,9 @@ There are two explicit modes:
   erase required for previously unseen factory boards. The authorization expires
   automatically and is captured when each job begins.
 
+Factory mode may erase any matching WCH-connected ESP32 that does not answer as a known Lightweave node.
+During that supervised window, connect only performer boards to the station hub and verify that the conductor's stable path is excluded.
+
 Permanent numbers come from the conductor's inventory, not from a per-laptop
 counter. The provisioner asks the control plane to reserve/adopt the board's ID,
 writes it to performer NVS, reads it back, then shows a large `BOARD #n` result

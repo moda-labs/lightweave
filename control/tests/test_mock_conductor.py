@@ -1,6 +1,23 @@
 from control.mock_conductor import MockConductor
 
 
+def test_reserve_id_uses_label_backed_permanent_ids_without_duplicates() -> None:
+    conductor = MockConductor()
+
+    created = conductor.reserve_id("AA:BB:CC:DD:EE:FF", 0)
+    existing = conductor.reserve_id("8C:94:DF:8F:71:50", 1)
+
+    assert created["node_id"] == 3
+    assert existing == {
+        "ok": True,
+        "message": "permanent ID already reserved",
+        "node_id": 1,
+        "created": False,
+    }
+    ids = [item["node_id"] for item in conductor.lanterns()]
+    assert len(ids) == len(set(ids))
+
+
 def test_snapshot_counts_healthy_placed_over_placed_total() -> None:
     conductor = MockConductor()
 
@@ -237,7 +254,11 @@ def test_reserve_id_is_stable_and_uses_lowest_unused_number() -> None:
     created = conductor.reserve_id(mac)
     repeated = conductor.reserve_id(mac)
 
-    used = {item.node_id for item in conductor._lanterns if item.mac != mac and item.node_id}
+    used = {
+        item.permanent_id()
+        for item in conductor._lanterns
+        if item.mac != mac and item.permanent_id()
+    }
     assert created["node_id"] == next(candidate for candidate in range(1, 65536) if candidate not in used)
     assert created["created"] is True
     assert repeated == {
