@@ -69,6 +69,7 @@ OTA_CHUNK_RETRIES = 3
 OTA_STATUS_FRESH_S = 60
 OTA_CHECKPOINT_CHUNKS = 256
 OTA_STATUS_SETTLE_S = 0.35
+OTA_REPAIR_STALL_ROUNDS = 2
 OTA_ACTIVATION_POLL_S = 0.5
 OTA_POST_REBOOT_ATTEMPTS = 31
 OTA_POST_REBOOT_POLL_S = 1.0
@@ -2180,6 +2181,24 @@ def create_app(
         expected_lanterns = expected_ota_lanterns(state)
         expected_macs = set(str(mac) for mac in app.state.ota_install.get("target_macs") or [])
         missing_rounds: dict[str, int] = {}
+        repair_offsets: dict[str, int] = {}
+        repair_stalls: dict[str, int] = {}
+        delivery_confirmed_offsets = {
+            str(mac): int(offset)
+            for mac, offset in dict(
+                app.state.ota_install.get("delivery_confirmed_offsets") or {}
+            ).items()
+        }
+        full_replay_macs = set(
+            str(mac)
+            for mac in app.state.ota_install.get("full_replay_macs") or []
+        )
+
+        def defer_full_replay(mac: str) -> None:
+            full_replay_macs.add(mac)
+            app.state.ota_install.update({
+                "full_replay_macs": sorted(full_replay_macs),
+            })
 
         async def call(method: str, *args: Any) -> dict[str, Any]:
             if app.state.ota_pause_requested:
@@ -2235,6 +2254,7 @@ def create_app(
 
         async def repair_checkpoint(frontier: int) -> list[dict[str, Any]]:
             repair_round = 0
+            final_checkpoint = frontier == artifact.size
             while True:
                 repair_round += 1
                 if repair_round % 10 == 1:
@@ -2246,14 +2266,30 @@ def create_app(
                 repaired_chunks = 0
 
                 for mac in sorted(expected_macs):
+                    if delivery_confirmed_offsets.get(mac) == frontier:
+                        continue
+                    if mac in full_replay_macs and not final_checkpoint:
+                        continue
+                    replayed_from_zero = False
                     node = by_mac.get(mac)
                     if node is None:
                         missing_rounds[mac] = missing_rounds.get(mac, 0) + 1
                         if missing_rounds[mac] < 2:
                             pending.append(mac)
                             continue
+                        if not final_checkpoint:
+                            defer_full_replay(mac)
+                            continue
                         offset = 0
                         await call_until_ok("ota_restart", mac)
+                        replayed_from_zero = True
+                        repair_offsets[mac] = 0
+                        repair_stalls[mac] = 0
+                        app.state.ota_install.update({
+                            "repair_restarts": int(
+                                app.state.ota_install.get("repair_restarts") or 0
+                            ) + 1,
+                        })
                     else:
                         missing_rounds[mac] = 0
                         offset = int(node.get("offset") or 0)
@@ -2265,6 +2301,8 @@ def create_app(
                             and crc32 == checkpoint_crc(frontier)
                             and phase not in {"failed"}
                         ):
+                            repair_offsets.pop(mac, None)
+                            repair_stalls.pop(mac, None)
                             continue
                         restart = (
                             offset < 0
@@ -2276,9 +2314,30 @@ def create_app(
                                 "flash write failed", "crc mismatch", "finalize failed",
                             }
                         )
+                        if not restart:
+                            previous_offset = repair_offsets.get(mac)
+                            if previous_offset == offset:
+                                repair_stalls[mac] = repair_stalls.get(mac, 0) + 1
+                            else:
+                                repair_stalls[mac] = 0
+                            repair_offsets[mac] = offset
+                            restart = repair_stalls[mac] >= OTA_REPAIR_STALL_ROUNDS
                         if restart:
+                            if not final_checkpoint:
+                                defer_full_replay(mac)
+                                repair_offsets.pop(mac, None)
+                                repair_stalls.pop(mac, None)
+                                continue
                             await call_until_ok("ota_restart", mac)
                             offset = 0
+                            replayed_from_zero = True
+                            repair_offsets[mac] = 0
+                            repair_stalls[mac] = 0
+                            app.state.ota_install.update({
+                                "repair_restarts": int(
+                                    app.state.ota_install.get("repair_restarts") or 0
+                                ) + 1,
+                            })
 
                     pending.append(mac)
                     app.state.ota_install.update({
@@ -2292,6 +2351,30 @@ def create_app(
                         await call_until_ok("ota_repair", mac, offset, chunk)
                         offset += len(chunk)
                         repaired_chunks += 1
+                    if replayed_from_zero:
+                        # Legacy performers predate OTA_QUERY and abort their
+                        # writer on the first broadcast gap. A targeted begin +
+                        # delivery-acknowledged replay is the only migration
+                        # path they understand; requiring an immediate query
+                        # response would mistake their stale status row for a
+                        # failed replay and restart them forever. The later
+                        # ota_end + full-image CRC/staged barrier remains the
+                        # authoritative proof before activation.
+                        pending.remove(mac)
+                        confirmed = set(
+                            str(item)
+                            for item in app.state.ota_install.get(
+                                "delivery_confirmed_macs"
+                            ) or []
+                        )
+                        confirmed.add(mac)
+                        delivery_confirmed_offsets[mac] = frontier
+                        app.state.ota_install.update({
+                            "delivery_confirmed_macs": sorted(confirmed),
+                            "delivery_confirmed_offsets": dict(
+                                sorted(delivery_confirmed_offsets.items())
+                            ),
+                        })
 
                 app.state.ota_install.update({
                     "repair_round": repair_round,

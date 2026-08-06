@@ -272,6 +272,41 @@ class PerformerMissedChunkConductor(MockConductor):
         return super().ota_restart(mac)
 
 
+class LegacyPerformerMissedChunkConductor(PerformerMissedChunkConductor):
+    """Old performers accept repair packets only after a fresh OTA begin."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.restarted = False
+        self.ended = False
+        self.stale_node: dict | None = None
+
+    def ota_repair(self, mac: str, offset: int, data: bytes) -> dict:
+        if not self.restarted:
+            self.repair_calls += 1
+            return {"ok": True, "message": "repair queued but writer is closed"}
+        return super().ota_repair(mac, offset, data)
+
+    def ota_restart(self, mac: str) -> dict:
+        self.restarted = True
+        self.stale_node = dict(self._ota_nodes[mac])
+        return super().ota_restart(mac)
+
+    def ota_progress(self) -> dict:
+        progress = super().ota_progress()
+        if self.restarted and not self.ended and self.stale_node is not None:
+            progress["nodes"] = [
+                dict(self.stale_node) if node["mac"] == self.target_mac else node
+                for node in progress.get("nodes", [])
+            ]
+        return progress
+
+    def ota_end(self) -> dict:
+        ack = super().ota_end()
+        self.ended = True
+        return ack
+
+
 class RecordingActivationConductor(MockConductor):
     def __init__(self) -> None:
         super().__init__()
@@ -1787,6 +1822,38 @@ def test_ota_install_repairs_a_performer_that_missed_a_chunk_without_restarting_
     assert conductor.repair_calls > 0
     assert conductor.restart_calls == 0
     assert install["repair_chunks"] == conductor.repair_calls
+    assert {node["phase"] for node in install["nodes"]} == {"complete"}
+
+
+def test_ota_install_restarts_legacy_performer_when_gap_repair_stalls(
+    tmp_path, managed_client
+) -> None:
+    conductor = LegacyPerformerMissedChunkConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    # Cross at least one 32 KiB checkpoint before the final barrier. A legacy
+    # board that cannot confirm an in-place repair must be deferred and replayed
+    # exactly once at the end, not restarted at every checkpoint.
+    firmware = b"\xe9" + bytes(range(255)) * 140
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=firmware,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.restart_calls == 1
+    assert install["repair_restarts"] == 1
+    assert install["delivery_confirmed_macs"] == [conductor.target_mac]
+    assert install["delivery_confirmed_offsets"] == {
+        conductor.target_mac: len(firmware)
+    }
+    assert install["full_replay_macs"] == [conductor.target_mac]
+    assert conductor.repair_calls > 0
     assert {node["phase"] for node in install["nodes"]} == {"complete"}
 
 
