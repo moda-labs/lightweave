@@ -231,12 +231,18 @@ Run the web control plane in mock mode:
 Run it against a real conductor:
 
 ```bash
-CONTROL_CONDUCTOR=serial \
+CONTROL_CONDUCTOR=local-serial \
 CONTROL_SERIAL_PORT=/dev/cu.usbserial-XXXX \
+CONTROL_DATA_DIR="$PWD/.control-data" \
 .venv/bin/python -m uvicorn control.app:app --host 127.0.0.1 --port 8000
 ```
 
 Then open `http://127.0.0.1:8000/`.
+
+This local mode rejects non-loopback hosts and all forwarding headers. Use the
+authenticated HTTPS `serial` deployment contract in
+[`control/README.md`](control/README.md) for the Pi, tunnels, or any remotely
+reachable control plane.
 
 ## Repo guide
 

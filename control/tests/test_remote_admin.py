@@ -56,6 +56,30 @@ def protected_app(tmp_path: Path, *, require_https: bool = True):
     return app, manager
 
 
+def test_local_serial_mode_accepts_only_direct_loopback_requests(tmp_path: Path) -> None:
+    settings = RemoteSettings(
+        conductor_mode="local-serial",
+        password_hash=None,
+        allowed_origins=frozenset(),
+        allow_network_changes=False,
+        require_https=False,
+        data_dir=tmp_path,
+    )
+    app = create_app(MockConductor(), settings=settings)
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        direct = client.get("/api/state")
+        public_host = client.get("/api/state", headers={"Host": "control.example.test"})
+        forwarded = client.get(
+            "/api/state",
+            headers={"X-Forwarded-Proto": "https"},
+        )
+
+    assert direct.status_code == 200
+    assert public_host.status_code == 403
+    assert forwarded.status_code == 403
+
+
 def login(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(auth, "_verify_password_bytes", lambda *_args: True)
     response = client.post(

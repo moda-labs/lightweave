@@ -53,6 +53,26 @@ def test_serial_mode_requires_complete_remote_contract() -> None:
             load_remote_settings(incomplete)
 
 
+def test_local_serial_mode_is_loopback_only_without_remote_credentials(
+    tmp_path: Path,
+) -> None:
+    settings = load_remote_settings(
+        {
+            "CONTROL_CONDUCTOR": "local-serial",
+            "CONTROL_DATA_DIR": str(tmp_path),
+        }
+    )
+
+    assert settings.serial_mode is True
+    assert settings.local_serial_mode is True
+    assert settings.remote_serial_mode is False
+    assert settings.password_hash is None
+    assert settings.allowed_origins == frozenset()
+    assert settings.allow_network_changes is False
+    assert settings.require_https is False
+    assert settings.data_dir == tmp_path
+
+
 @pytest.mark.parametrize("value", ["1", "TRUE", "yes", "", " false "])
 def test_boolean_settings_are_strict(value: str) -> None:
     with pytest.raises(RuntimeError, match="exactly"):

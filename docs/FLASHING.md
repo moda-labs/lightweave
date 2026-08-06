@@ -317,6 +317,12 @@ If the conductor is also attached to the Mac, exclude its stable serial path:
   --conductor-port /dev/cu.usbserial-CONDUCTOR
 ```
 
+Start the control plane with `CONTROL_CONDUCTOR=local-serial` as documented in
+`control/README.md`. That mode is the loopback-only permanent-ID authority for
+the station. Mock mode may inspect boards but intentionally refuses ID
+reservations, so injecting a serial adapter while leaving the settings in mock
+mode is not a functional flashing-station configuration.
+
 If the authoritative conductor remains on the Pi, securely copy the Pi's
 `PROVISIONER_TOKEN` into the Mac station's `token` file (mode `0600`) and point
 the LaunchAgent at the Pi's HTTPS endpoint:

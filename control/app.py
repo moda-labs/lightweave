@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import fcntl
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi import Request
@@ -325,7 +327,7 @@ def create_default_conductor() -> ConductorAdapter:
     mode = os.getenv("CONTROL_CONDUCTOR", "mock").strip().lower()
     if mode in {"mock", ""}:
         return MockConductor()
-    if mode != "serial":
+    if mode not in {"serial", "local-serial"}:
         raise RuntimeError(f"unknown CONTROL_CONDUCTOR={mode!r}")
 
     port = os.getenv("CONTROL_SERIAL_PORT")
@@ -360,7 +362,7 @@ def create_app(
             if resolved_settings.password_hash is not None
             else AuthManager.disabled()
         )
-    if resolved_settings.serial_mode and not resolved_auth.enabled:
+    if resolved_settings.remote_serial_mode and not resolved_auth.enabled:
         raise RuntimeError("authentication cannot be disabled when CONTROL_CONDUCTOR=serial")
 
     @asynccontextmanager
@@ -531,7 +533,7 @@ def create_app(
         socket_value = os.getenv("CONTROL_PROVISIONER_SOCKET")
         if socket_value:
             app.state.provisioning_client = UnixProvisioningClient(Path(socket_value).expanduser())
-        elif resolved_settings.serial_mode:
+        elif resolved_settings.remote_serial_mode:
             app.state.provisioning_client = UnixProvisioningClient(
                 Path("/run/lightweave-provisioner/provisioner.sock")
             )
@@ -557,7 +559,7 @@ def create_app(
     app.state.ota_store = ota_store or OtaArtifactStore(data_dir / "ota" if data_dir else ".control_ota")
     default_deployment_record = (
         "/var/lib/lightweave-gitops/current.json"
-        if resolved_settings.serial_mode
+        if resolved_settings.remote_serial_mode
         else str(data_dir / "deployments" / "current.json") if data_dir else ".control_deployment.json"
     )
     deployment_record_path = Path(
@@ -645,6 +647,28 @@ def create_app(
         scheme = external_scheme(scope, headers)
         return bool(host) and origin == f"{scheme}://{host}"
 
+    def direct_loopback_request(scope: dict[str, Any], headers: Any) -> bool:
+        if not app.state.settings.local_serial_mode:
+            return True
+        try:
+            peer_is_loopback = ipaddress.ip_address(socket_peer_ip(scope)).is_loopback
+            hostname = urlsplit(f"//{headers.get('host', '')}").hostname
+            host_is_loopback = hostname == "localhost" or (
+                hostname is not None and ipaddress.ip_address(hostname).is_loopback
+            )
+        except ValueError:
+            return False
+        forwarded = {
+            "cf-connecting-ip",
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+        }
+        return peer_is_loopback and host_is_loopback and not any(
+            headers.get(name) is not None for name in forwarded
+        )
+
     def live_session(token: str | None):
         return app.state.auth_manager.lookup_session(token) if token else None
 
@@ -696,6 +720,15 @@ def create_app(
         method = request.method.upper()
         scheme = external_scheme(request.scope, request.headers)
         public = (method, path) in PUBLIC_HTTP_ROUTES
+
+        if not direct_loopback_request(request.scope, request.headers):
+            return secure_response(
+                JSONResponse(
+                    {"detail": "local serial mode accepts direct loopback requests only"},
+                    status_code=403,
+                ),
+                scheme,
+            )
 
         if app.state.settings.require_https and scheme != "https":
             if path in {"/login", "/api/auth/login"}:
@@ -3294,6 +3327,9 @@ def create_app(
         token = ws.cookies.get(SESSION_COOKIE)
         session = live_session(token)
         origin = ws.headers.get("origin")
+        if not direct_loopback_request(ws.scope, ws.headers):
+            await ws.close(code=4403)
+            return
         if app.state.settings.require_https and external_scheme(ws.scope, ws.headers) != "https":
             await ws.close(code=4403)
             return
