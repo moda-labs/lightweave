@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**160 pass**) is green; control tests are green; all three
+(**163 pass**) is green; **387 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest in this branch (2026-08-05): **field OTA is reliable and remains live
@@ -30,6 +30,28 @@ serial RPCs, direct-flash that one USB-attached conductor from this release
 before the first live OTA. The control plane detects the legacy command set and
 fails before `ota_begin`, with this instruction, rather than leaving a partial
 transfer. Performers may transition through OTA after that one conductor update.
+
+Hardware acceptance on 2026-08-05 found and fixed three real-device-only edges:
+`ota_begin` copied the 3,080-byte roster onto the ESP32's 8 KiB loop-task stack
+(leaving 64 bytes and crashing the Wi-Fi heap spinlock), repair sends treated an
+ESP-NOW queue acceptance as radio delivery, and deployed `0.5.1` performers could
+not answer the new checkpoint query. The conductor now snapshots a bounded
+385-byte cohort, waits for ESP-NOW unicast delivery callbacks, and defers a
+query-incompatible laggard to at most one full delivery-confirmed replay at the
+final staging barrier instead of repeatedly replaying prefixes. A clean
+`a0e58bfc` artifact (`881984` bytes, CRC32 `3998627663`) completed OTA to
+performer #23 in 709 seconds while Fire Flicker remained controllable; the final
+operation reported all 6,891 chunks, matching CRC, post-reboot `complete`, and
+both conductor and #23 on clean `v0.7.1` build `a0e58bfc`. Ten performers later
+registered on that build, but the requested 18-performer full-field acceptance
+run is still pending because only ten were radio-visible locally.
+
+The next product step is to split the current automatic activation tail from
+background staging: retain durable per-board progress for a long bounded retry
+window, stop at an explicit `N/N staged` barrier, then expose one operator action
+that activates the staged cohort together. The transport and CRC foundation is
+hardware-proven; the current branch still activates automatically once its
+frozen cohort is staged.
 
 Latest on main (2026-08-04): **the multi-board USB flashing station is built.**
 The control plane now has a Flashing screen backed by
