@@ -1018,6 +1018,34 @@ def test_autoflash_discovers_wch_performers_on_macos_and_linux(monkeypatch) -> N
     ]
 
 
+def test_autoflash_device_instance_ignores_ctime_changes_from_serial_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from serial.tools import list_ports
+
+    device = SimpleNamespace(
+        device="/dev/cu.wchusbserial1",
+        location="1-1.1",
+        hwid="wch mac",
+        vid=autoflash.WCH_VID,
+        pid=autoflash.WCH_PID,
+    )
+    stats = iter(
+        [
+            SimpleNamespace(st_rdev=123, st_ino=456, st_ctime_ns=1000),
+            SimpleNamespace(st_rdev=123, st_ino=456, st_ctime_ns=2000),
+        ]
+    )
+    monkeypatch.setattr(list_ports, "comports", lambda: [device])
+    monkeypatch.setattr(autoflash.os, "stat", lambda _device: next(stats))
+
+    first = autoflash.candidate_port_infos()[0]
+    second = autoflash.candidate_port_infos()[0]
+
+    assert first.instance_id == "123:456"
+    assert second.instance_id == first.instance_id
+
+
 def test_autoflash_honors_disabled_production_channel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

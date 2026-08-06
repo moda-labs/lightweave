@@ -850,7 +850,12 @@ def candidate_port_infos() -> list[PortCandidate]:
             continue
         try:
             device_stat = os.stat(item.device)
-            instance_id = f"{device_stat.st_rdev}:{device_stat.st_ino}:{device_stat.st_ctime_ns}"
+            # Opening a character device changes its ctime on macOS. Including
+            # ctime here made the provisioner mistake every serial inspection
+            # for a physical disconnect/reconnect and discard the result.
+            # The device number and devfs inode remain stable while connected
+            # and change when the device node is recreated after a replug.
+            instance_id = f"{device_stat.st_rdev}:{device_stat.st_ino}"
         except OSError:
             instance_id = None
         candidates.append(
