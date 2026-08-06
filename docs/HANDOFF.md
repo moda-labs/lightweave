@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**163 pass**) is green; **391 control tests** are green; all three
+(**168 pass**) is green; **394 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest in this branch (2026-08-05): **field OTA is reliable and remains live
@@ -34,6 +34,18 @@ before the first live OTA. The control plane detects the legacy command set and
 fails before `ota_begin`, with this instruction, rather than leaving a partial
 transfer. Performers may transition through OTA after that one conductor update.
 
+Also in this branch: **performer registration no longer forms a synchronized
+return-traffic herd.** A 17-board local field received conductor beacons but only
+nine initially appeared in the roster; power-cycling five immediately made all
+five register, confirming that their immediate/10-second check-ins were
+phase-locked. REGISTER now uses a dependency-free, host-tested scheduler: expired
+deadlines are spread into stable MAC-derived slots over 500 ms inside the next
+shared radio window, successful delivery returns to a jittered 10–12-second
+cadence, and failed ESP-NOW delivery retries with 100 ms–2 s bounded backoff.
+Performer unicasts are serialized by purpose so REGISTER cannot consume a power
+or OTA-status callback. The UI header separately shows the current conductor
+contact count, and every group dropdown shows `online / total` membership.
+
 Hardware acceptance on 2026-08-05 found and fixed three real-device-only edges:
 `ota_begin` copied the 3,080-byte roster onto the ESP32's 8 KiB loop-task stack
 (leaving 64 bytes and crashing the Wi-Fi heap spinlock), repair sends treated an
@@ -45,16 +57,18 @@ final staging barrier instead of repeatedly replaying prefixes. A clean
 `a0e58bfc` artifact (`881984` bytes, CRC32 `3998627663`) completed OTA to
 performer #23 in 709 seconds while Fire Flicker remained controllable; the final
 operation reported all 6,891 chunks, matching CRC, post-reboot `complete`, and
-both conductor and #23 on clean `v0.7.1` build `a0e58bfc`. Ten performers later
-registered on that build, but the requested 18-performer full-field acceptance
-run is still pending because only ten were radio-visible locally.
+both conductor and #23 on clean `v0.7.1` build `a0e58bfc`. The local field now
+reports 17 performers radio-online after directly updating two protocol-v8
+stragglers; #23 is intentionally offline. The full 18-performer acceptance run
+therefore remains pending.
 
-The next OTA step is the requested 18-performer acceptance run. Do not start it
-until the conductor reports all 18 performers radio-online; it currently reports
-only ten. Stage the clean artifact, record total duration and repairs, verify the
-terminal `18 / 18 staged` state causes zero activation commands, exercise a live
-pattern while staged, then use the single activation action and verify all 18
-performers plus the conductor return on the expected clean build.
+The next OTA step is a 17-performer acceptance run after directly flashing the
+USB-attached conductor with the new scheduler build. Stage the clean artifact,
+record total duration and repairs, verify the terminal `17 / 17 staged` state
+causes zero activation commands, exercise a live pattern while staged, then use
+the single activation action and verify all 17 performers plus the conductor
+return on the expected clean build. Repeat for #23 when it is online to close the
+requested 18-performer gate.
 
 Latest on main (2026-08-04): **the multi-board USB flashing station is built.**
 The control plane now has a Flashing screen backed by
@@ -568,7 +582,7 @@ revised cost roll-up.
 - **Protocol foundation Half 1** (hardware-verified): typed message header
   `{magic, version, type}` with type dispatch; **MAC identity** read at boot and
   shown in `info`; **bidirectional ESP-NOW** — performers unicast `REGISTER`
-  every 10 s and the conductor builds a **MAC-keyed roster** (`roster` command).
+  every 10–12 s and the conductor builds a **MAC-keyed roster** (`roster` command).
   Sync hot path unchanged (still `LOCKED gaps` flat after the rework).
 - **Protocol foundation Half 2** (v7 position, v8 ID, v9 group, and v10
   LED-profile paths hardware-verified on the current bench): **conductor-authoritative

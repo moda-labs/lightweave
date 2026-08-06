@@ -129,7 +129,7 @@ inline bool tableMsgFindRow(const TableMsg& m, const uint8_t mac[6],
 // sender's radio is on RIGHT NOW (TX is gated on radio-up), so the fix is a
 // targeted reply: broadcast just that node's row (28 B) immediately. Any
 // single broadcast the node missed is retried for free by its next REGISTER
-// (10 s cadence), so delivery needs no scheduler, no burst flag, and no
+// (10–12 s cadence), so delivery needs no separate row-retry scheduler or
 // rate-limit machinery.
 
 // Should a REGISTER trigger a row reply? Reply when the sender is new to the

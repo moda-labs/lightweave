@@ -41,6 +41,8 @@
 #include "power_table.h"
 #include "powermon.h"
 #include "powersave.h"
+#include "performer_tx.h"
+#include "registration.h"
 #include "roster.h"
 #include "serial_json.h"
 #include "sync.h"
@@ -116,9 +118,11 @@ static bool        g_ota_maintenance = false;
 static int64_t     g_ota_maintenance_until_us = 0;
 static constexpr int64_t OTA_WINDOW_US = 15LL * 60LL * 1000000LL;
 static constexpr int64_t OTA_STATUS_FRESH_US = 30000000LL;
-// REGISTER arrives every 10 s. Three intervals distinguish an online performer
-// from a stale roster row without making one dropped registration flap it.
-static constexpr int64_t OTA_COHORT_FRESH_US = 3 * REGISTER_INTERVAL_US;
+// REGISTER arrives every 10–12 s. Three longest intervals distinguish an online
+// performer from a stale roster row without making one dropped registration
+// flap it.
+static constexpr int64_t OTA_COHORT_FRESH_US =
+    3 * (REGISTER_INTERVAL_US + REGISTER_INTERVAL_JITTER_US);
 static bool        g_ota_write_active = false;
 static uint32_t    g_ota_write_size = 0;
 static uint32_t    g_ota_write_written = 0;
@@ -144,6 +148,19 @@ static uint8_t        g_ota_local_error = OTA_ERR_NONE;
 static Roster         g_state_roster_snapshot;
 static OtaStatusTable g_state_ota_status_snapshot;
 
+// Performer return traffic is serialized because ESP-NOW delivery callbacks
+// identify only the destination MAC. REGISTER, power telemetry, and OTA status
+// all target the same conductor; tracking one purpose at a time prevents the
+// wrong callback from advancing the registration scheduler.
+static const RegistrationConfig REGISTER_CONFIG = {
+    REGISTER_INTERVAL_US, REGISTER_INTERVAL_JITTER_US,
+    REGISTER_SLOT_SPREAD_US, REGISTER_RETRY_BASE_US,
+    REGISTER_RETRY_MAX_US};
+static RegistrationSchedule g_register_schedule;
+static PerformerTxState      g_performer_tx;
+static portMUX_TYPE g_register_mux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE g_performer_tx_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static bool otaMaintenanceActive(int64_t t);
 static void otaWriteAbort();
 static void otaUnicastPeerRelease();
@@ -164,9 +181,57 @@ static bool otaUnicastBegin(const uint8_t mac[6], uint32_t size,
 static bool otaUnicastActivate(const uint8_t mac[6]);
 
 static void onSend(const uint8_t* mac, esp_now_send_status_t status) {
-  portENTER_CRITICAL(&g_ota_send_ack_mux);
-  otaSendAckComplete(g_ota_send_ack, mac, status == ESP_NOW_SEND_SUCCESS);
-  portEXIT_CRITICAL(&g_ota_send_ack_mux);
+  bool delivered = status == ESP_NOW_SEND_SUCCESS;
+  if (g_role == ROLE_CONDUCTOR) {
+    portENTER_CRITICAL(&g_ota_send_ack_mux);
+    otaSendAckComplete(g_ota_send_ack, mac, delivered);
+    portEXIT_CRITICAL(&g_ota_send_ack_mux);
+    return;
+  }
+
+  PerformerTxCompletion completion;
+  portENTER_CRITICAL(&g_performer_tx_mux);
+  completion = performerTxComplete(g_performer_tx, mac, delivered);
+  portEXIT_CRITICAL(&g_performer_tx_mux);
+  if (completion.matched && completion.purpose == PERFORMER_TX_REGISTER) {
+    portENTER_CRITICAL(&g_register_mux);
+    registrationSendResult(g_register_schedule, esp_timer_get_time(), g_mac,
+                           REGISTER_CONFIG, completion.delivered);
+    portEXIT_CRITICAL(&g_register_mux);
+  }
+}
+
+static bool performerTxReserve(const uint8_t mac[6], uint8_t purpose) {
+  bool reserved;
+  portENTER_CRITICAL(&g_performer_tx_mux);
+  reserved = performerTxBegin(g_performer_tx, mac, purpose);
+  portEXIT_CRITICAL(&g_performer_tx_mux);
+  return reserved;
+}
+
+static void performerTxRelease(const uint8_t mac[6], uint8_t purpose) {
+  portENTER_CRITICAL(&g_performer_tx_mux);
+  performerTxCancel(g_performer_tx, mac, purpose);
+  portEXIT_CRITICAL(&g_performer_tx_mux);
+}
+
+static bool performerTxReady() {
+  bool ready;
+  portENTER_CRITICAL(&g_performer_tx_mux);
+  ready = performerTxAvailable(g_performer_tx);
+  portEXIT_CRITICAL(&g_performer_tx_mux);
+  return ready;
+}
+
+// Queue non-registration performer traffic under the same one-at-a-time
+// ownership used by REGISTER. The delivery callback releases the reservation;
+// callers retain their existing retry/persistence policy.
+static bool performerSend(const uint8_t mac[6], const uint8_t* data, size_t len,
+                          uint8_t purpose) {
+  if (!performerTxReserve(mac, purpose)) return false;
+  if (esp_now_send(mac, data, len) == ESP_OK) return true;
+  performerTxRelease(mac, purpose);
+  return false;
 }
 
 // INA228 power telemetry (powermon.h logic, host-tested; ARCHITECTURE §4.2).
@@ -349,7 +414,6 @@ static portMUX_TYPE g_sync_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t  g_conductor_mac[6] = {0};
 static bool     g_have_conductor = false;
 static bool     g_conductor_peer_added = false;
-static int64_t  g_next_register_us = 0;
 
 // Conductor roster: every node that has registered, keyed on MAC. The logic lives
 // in roster.h (host-tested); here we hold one instance and a spinlock, since it is
@@ -361,7 +425,7 @@ static portMUX_TYPE g_roster_mux = portMUX_INITIALIZER_UNLOCKED;
 // reconciles the persistent inventory and sends any authoritative row reply. Same
 // stash-under-lock/drain-in-loop shape as the power-report queue: no radio
 // work in the callback. Written under g_roster_mux (the REGISTER path already
-// holds it). Overflow just drops the request — the node's next REGISTER (10 s)
+// holds it). Overflow just drops the request — the node's next REGISTER (10–12 s)
 // retries it, so nothing is permanently lost.
 struct RegistrationRequest {
   uint8_t mac[6];
@@ -845,14 +909,34 @@ static bool conductorPeerReady(uint8_t cmac[6]) {
   return g_conductor_peer_added;
 }
 
-// Performer: announce ourselves to the conductor we've heard, periodically so the
-// roster self-heals after a conductor restart.
+// Performer: announce ourselves to the conductor we've heard. Expired periodic
+// deadlines are assigned a stable MAC-derived slot inside the current radio
+// window instead of all transmitting at the wake edge. Queue failures and
+// delivery-callback failures use bounded backoff (registration.h, host-tested).
 static void maybeRegister(int64_t t) {
   if (isConductor()) return;
-  if (t < g_next_register_us) return;
+  bool due;
+  portENTER_CRITICAL(&g_register_mux);
+  due = registrationSendDue(g_register_schedule, t, g_mac, REGISTER_CONFIG);
+  portEXIT_CRITICAL(&g_register_mux);
+  if (!due) return;
+
   uint8_t cmac[6];
-  if (!conductorPeerReady(cmac)) return;  // no conductor heard yet / peer-add failed
-  g_next_register_us = t + REGISTER_INTERVAL_US;
+  if (!conductorPeerReady(cmac)) {
+    portENTER_CRITICAL(&g_register_mux);
+    registrationSendResult(g_register_schedule, t, g_mac, REGISTER_CONFIG,
+                           /*delivered*/ false);
+    portEXIT_CRITICAL(&g_register_mux);
+    return;
+  }
+
+  // Reserve the single performer-unicast slot before marking registration
+  // in-flight. This ordering makes even an unusually fast send callback
+  // unambiguous; a busy slot simply leaves this MAC's due slot pending.
+  if (!performerTxReserve(cmac, PERFORMER_TX_REGISTER)) return;
+  portENTER_CRITICAL(&g_register_mux);
+  registrationSendStarted(g_register_schedule);
+  portEXIT_CRITICAL(&g_register_mux);
 
   RegisterMsg r = {{BEACON_MAGIC, PROTO_VERSION, MSG_REGISTER}, {0}, g_id.id,
                    groupIdSafe(g_id.group_id), ledCountSafe(g_id.led_count),
@@ -861,7 +945,21 @@ static void maybeRegister(int64_t t) {
                    (uint8_t)FIRMWARE_BUILD_DIRTY, {0}};
   firmwareCopyVersion(r.version, FIRMWARE_VERSION);
   memcpy(r.mac, g_mac, 6);
-  esp_now_send(cmac, (const uint8_t*)&r, sizeof(r));
+  if (esp_now_send(cmac, (const uint8_t*)&r, sizeof(r)) != ESP_OK) {
+    performerTxRelease(cmac, PERFORMER_TX_REGISTER);
+    portENTER_CRITICAL(&g_register_mux);
+    registrationSendResult(g_register_schedule, t, g_mac, REGISTER_CONFIG,
+                           /*delivered*/ false);
+    portEXIT_CRITICAL(&g_register_mux);
+  }
+}
+
+static bool registrationHoldingRadio() {
+  bool hold;
+  portENTER_CRITICAL(&g_register_mux);
+  hold = registrationKeepsRadioAwake(g_register_schedule);
+  portEXIT_CRITICAL(&g_register_mux);
+  return hold;
 }
 
 // ---- INA228 power telemetry (ARCHITECTURE §4.2) --------------------------------
@@ -902,12 +1000,12 @@ static void maybePowerReport(int64_t t) {
   // report. powerReportDue re-checks and stays authoritative.
   if (t < g_power_sched.next_us) return;
   uint8_t cmac[6];
-  bool can_send = g_radio_on && conductorPeerReady(cmac);
+  bool can_send = g_radio_on && performerTxReady() && conductorPeerReady(cmac);
   if (!powerReportDue(g_power_sched, t, POWER_REPORT_INTERVAL_US, can_send)) return;
 
   PowerMsg m = {{BEACON_MAGIC, PROTO_VERSION, MSG_POWER}, {0}, readPowerSample(t)};
   memcpy(m.mac, g_mac, 6);
-  esp_now_send(cmac, (const uint8_t*)&m, sizeof(m));
+  performerSend(cmac, (const uint8_t*)&m, sizeof(m), PERFORMER_TX_POWER);
 }
 
 // Conductor: drain + log the reports stashed by the recv callback. Deliberately
@@ -1437,8 +1535,8 @@ static void otaStatusReport(bool keep_pending) {
 
   uint8_t conductor_mac[6];
   if (!conductorPeerReady(conductor_mac)) return;
-  if (esp_now_send(conductor_mac, (const uint8_t*)&msg, sizeof(msg)) == ESP_OK &&
-      !keep_pending) {
+  if (performerSend(conductor_mac, (const uint8_t*)&msg, sizeof(msg),
+                    PERFORMER_TX_OTA_STATUS) && !keep_pending) {
     portENTER_CRITICAL(&g_ota_status_mux);
     g_ota_status_pending_dirty = false;
     portEXIT_CRITICAL(&g_ota_status_mux);
@@ -2377,6 +2475,12 @@ static void handleCommand(char* line) {
       // of resuming a schedule frozen up to 60 s in the future.
       if (!g_radio_on) radioWake();
       dutyInit(g_duty, currentDutyConfig(g_power_policy), now_us());
+      portENTER_CRITICAL(&g_register_mux);
+      registrationInit(g_register_schedule);
+      portEXIT_CRITICAL(&g_register_mux);
+      portENTER_CRITICAL(&g_performer_tx_mux);
+      performerTxInit(g_performer_tx);
+      portEXIT_CRITICAL(&g_performer_tx_mux);
       g_next_table_us = 0;
       printInfo();
     }
@@ -2565,6 +2669,8 @@ void setup() {
   }
   esp_read_mac(g_mac, ESP_MAC_WIFI_STA);  // stable identity, read from efuse
   rosterInit(g_roster);
+  registrationInit(g_register_schedule);
+  performerTxInit(g_performer_tx);
   powerTableInit(g_power_table);
   otaStatusInit(g_ota_status);
   otaCohortInit(g_ota_cohort);
@@ -2685,7 +2791,7 @@ void loop() {
     // Inventory adoption + row replies. A factory-flashed performer reports its
     // permanent number; the conductor records it once, then remains authoritative
     // and sends it back after any later erase. NVS writes stay out of the radio
-    // callback. At worst an overflow retries on the next 10 s REGISTER.
+    // callback. At worst an overflow retries on the next 10–12 s REGISTER.
     if (g_rowreq_n) {
       RegistrationRequest req[ROWREQ_MAX];
       uint8_t n;
@@ -2745,14 +2851,20 @@ void loop() {
     bool wake_rendezvous = bootWakeRendezvousActive(
         g_timer_wake, s.beacons_rx, t, g_dusk_earliest_us);
     bool field_awake = powerPolicyForceAwake(policy);
+    // Give a due registration its MAC-derived slot before dutyStep decides
+    // whether this shared listen window may close. A pending slot/delivery is
+    // the only registration state that extends the window.
+    if (g_radio_on) maybeRegister(t);
+    bool register_holds_radio = registrationHoldingRadio();
     if ((g_ota_write_active || g_ota_local_staged) && !g_radio_on) radioWake();
     if (field_awake && !g_radio_on) radioWake();
     if (g_powersave && !g_ota_write_active && !g_ota_local_staged &&
-        !field_awake) {
+        !field_awake && !register_holds_radio) {
       DutyAction act = dutyStep(g_duty, currentDutyConfig(policy), t);
       if (act == DUTY_WAKE) radioWake();
       else if (act == DUTY_SLEEP) radioSleep();
     }
+    // A duty wake above opens a fresh window; schedule its slot immediately.
     if (g_radio_on) maybeRegister(t);  // TX only when the radio is powered
     maybePowerReport(t);   // no-op without the INA228; defers until radio-on
     maybeOtaStatusReport();

@@ -22,6 +22,8 @@
 #include "powermon.h"
 #include "power_policy.h"
 #include "powersave.h"
+#include "performer_tx.h"
+#include "registration.h"
 #include "roster.h"
 #include "serial_json.h"
 #include "table.h"
@@ -672,6 +674,125 @@ void test_roster_overflow_drops_new_keeps_existing() {
   macN(known, 3);
   TEST_ASSERT_TRUE(rosterUpsert(r, known, 42, 1, 0x33333333, 0, "0.1.0", 12345));
   TEST_ASSERT_EQUAL_UINT16(42, r.entries[rosterFind(r, known)].id);
+}
+
+// ---- Performer registration: fleet spreading + delivery retries ------------
+
+static const RegistrationConfig REGISTRATION_TEST_CONFIG = {
+    10'000'000, 2'000'000, 500'000, 200'000, 2'000'000};
+
+void test_registration_spreads_a_simultaneous_fleet_inside_radio_window() {
+  int64_t slots[60] = {0};
+  int unique = 0;
+  int64_t earliest = INT64_MAX;
+  int64_t latest = 0;
+  for (uint8_t i = 0; i < 60; i++) {
+    uint8_t mac[6] = {0x68, 0xfe, 0x71, 0xa6, 0x30, i};
+    RegistrationSchedule schedule;
+    registrationInit(schedule);
+    registrationSendDue(schedule, 1'000'000, mac, REGISTRATION_TEST_CONFIG);
+    TEST_ASSERT_TRUE(schedule.slot_pending);
+    TEST_ASSERT_TRUE(schedule.slot_us >= 1'000'000);
+    TEST_ASSERT_TRUE(schedule.slot_us <= 1'500'000);
+    slots[i] = schedule.slot_us;
+    if (slots[i] < earliest) earliest = slots[i];
+    if (slots[i] > latest) latest = slots[i];
+    bool seen = false;
+    for (uint8_t j = 0; j < i; j++)
+      if (slots[j] == slots[i]) seen = true;
+    if (!seen) unique++;
+  }
+  TEST_ASSERT_TRUE(unique >= 55);
+  TEST_ASSERT_TRUE(latest - earliest >= 400'000);
+}
+
+void test_registration_holds_radio_only_through_slot_and_delivery() {
+  const uint8_t mac[6] = {0xc0, 0xcd, 0xd6, 0xc7, 0xf2, 0x0c};
+  RegistrationSchedule schedule;
+  registrationInit(schedule);
+  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule));
+
+  registrationSendDue(schedule, 5'000'000, mac, REGISTRATION_TEST_CONFIG);
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule));
+  TEST_ASSERT_TRUE(registrationSendDue(
+      schedule, schedule.slot_us, mac, REGISTRATION_TEST_CONFIG));
+  registrationSendStarted(schedule);
+  TEST_ASSERT_TRUE(schedule.in_flight);
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule));
+
+  registrationSendResult(schedule, 5'600'000, mac,
+                         REGISTRATION_TEST_CONFIG, /*delivered*/ true);
+  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule));
+  TEST_ASSERT_EQUAL_UINT8(0, schedule.failures);
+  TEST_ASSERT_TRUE(schedule.next_due_us >= 15'600'000);
+  TEST_ASSERT_TRUE(schedule.next_due_us <= 17'600'000);
+  TEST_ASSERT_FALSE(registrationSendDue(
+      schedule, schedule.next_due_us - 1, mac, REGISTRATION_TEST_CONFIG));
+}
+
+void test_registration_delivery_failures_back_off_and_cap() {
+  const uint8_t mac[6] = {0x68, 0xfe, 0x71, 0x31, 0xdd, 0x04};
+  RegistrationConfig config = REGISTRATION_TEST_CONFIG;
+  config.slot_spread_us = 0;
+  RegistrationSchedule schedule;
+  registrationInit(schedule);
+
+  TEST_ASSERT_TRUE(registrationSendDue(schedule, 1'000, mac, config));
+  registrationSendStarted(schedule);
+  registrationSendResult(schedule, 2'000, mac, config, /*delivered*/ false);
+  TEST_ASSERT_EQUAL_UINT8(1, schedule.failures);
+  TEST_ASSERT_TRUE(schedule.next_due_us >= 102'000);
+  TEST_ASSERT_TRUE(schedule.next_due_us <= 202'000);
+
+  int64_t previous_delay = schedule.next_due_us - 2'000;
+  for (uint8_t failure = 2; failure <= 12; failure++) {
+    int64_t attempt = schedule.next_due_us;
+    TEST_ASSERT_TRUE(registrationSendDue(schedule, attempt, mac, config));
+    registrationSendStarted(schedule);
+    registrationSendResult(schedule, attempt, mac, config,
+                           /*delivered*/ false);
+    int64_t delay = schedule.next_due_us - attempt;
+    TEST_ASSERT_TRUE(delay <= config.retry_max_us);
+    if (failure <= 5) TEST_ASSERT_TRUE(delay >= previous_delay / 2);
+    previous_delay = delay;
+  }
+  TEST_ASSERT_EQUAL_UINT8(12, schedule.failures);
+  TEST_ASSERT_TRUE(previous_delay >= config.retry_max_us / 2);
+}
+
+void test_performer_tx_serializes_same_destination_packet_types() {
+  const uint8_t conductor[6] = {0x30, 0x76, 0xf5, 0x93, 0x67, 0x3c};
+  PerformerTxState tx;
+  performerTxInit(tx);
+  TEST_ASSERT_TRUE(performerTxAvailable(tx));
+  TEST_ASSERT_TRUE(performerTxBegin(tx, conductor, PERFORMER_TX_REGISTER));
+  TEST_ASSERT_FALSE(performerTxAvailable(tx));
+  TEST_ASSERT_FALSE(performerTxBegin(tx, conductor, PERFORMER_TX_POWER));
+
+  PerformerTxCompletion completion =
+      performerTxComplete(tx, conductor, /*delivered*/ true);
+  TEST_ASSERT_TRUE(completion.matched);
+  TEST_ASSERT_TRUE(completion.delivered);
+  TEST_ASSERT_EQUAL_UINT8(PERFORMER_TX_REGISTER, completion.purpose);
+  TEST_ASSERT_TRUE(performerTxAvailable(tx));
+  TEST_ASSERT_TRUE(performerTxBegin(tx, conductor, PERFORMER_TX_POWER));
+}
+
+void test_performer_tx_ignores_wrong_callback_and_cancels_queue_failure() {
+  const uint8_t conductor[6] = {0x30, 0x76, 0xf5, 0x93, 0x67, 0x3c};
+  const uint8_t other[6] = {0x30, 0x76, 0xf5, 0x93, 0x67, 0x3d};
+  PerformerTxState tx;
+  performerTxInit(tx);
+  TEST_ASSERT_TRUE(performerTxBegin(tx, conductor, PERFORMER_TX_OTA_STATUS));
+
+  PerformerTxCompletion wrong =
+      performerTxComplete(tx, other, /*delivered*/ false);
+  TEST_ASSERT_FALSE(wrong.matched);
+  TEST_ASSERT_FALSE(performerTxAvailable(tx));
+  TEST_ASSERT_FALSE(performerTxCancel(tx, other, PERFORMER_TX_OTA_STATUS));
+  TEST_ASSERT_TRUE(
+      performerTxCancel(tx, conductor, PERFORMER_TX_OTA_STATUS));
+  TEST_ASSERT_TRUE(performerTxAvailable(tx));
 }
 
 void test_firmware_version_matches_proto_build_and_dirty() {
@@ -2517,6 +2638,11 @@ int main(int, char**) {
   RUN_TEST(test_roster_appends_distinct_macs);
   RUN_TEST(test_roster_dedup_updates_in_place);
   RUN_TEST(test_roster_overflow_drops_new_keeps_existing);
+  RUN_TEST(test_registration_spreads_a_simultaneous_fleet_inside_radio_window);
+  RUN_TEST(test_registration_holds_radio_only_through_slot_and_delivery);
+  RUN_TEST(test_registration_delivery_failures_back_off_and_cap);
+  RUN_TEST(test_performer_tx_serializes_same_destination_packet_types);
+  RUN_TEST(test_performer_tx_ignores_wrong_callback_and_cancels_queue_failure);
   RUN_TEST(test_firmware_version_matches_proto_build_and_dirty);
   RUN_TEST(test_firmware_fleet_consistency_requires_every_seen_node_to_match);
   RUN_TEST(test_power_policy_window_handles_daytime_and_overnight_ranges);

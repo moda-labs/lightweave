@@ -229,7 +229,7 @@ not remove its inventory row or change its number.
   REGISTER is the one moment the conductor provably knows that node's radio is
   on (TX is gated on radio-up), so the reply lands inside the sender's open
   listen window instead of playing the ~13%-per-broadcast lottery, and a missed
-  reply is retried for free by the node's next REGISTER (10 s). Steady state
+  reply is retried for free by the node's next REGISTER (10–12 s). Steady state
   (all nodes known + provisioned + profile-matched) costs zero table traffic beyond
   the backstop.
 
@@ -414,8 +414,14 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   `FF:FF:FF:FF:FF:FF`, `WIFI_STA`. The hot path (sync.h) reads `epoch_us`+`seq`.
 - **[done]** Bidirectional ESP-NOW: a performer learns the conductor's MAC from the
   recv-info, adds it as a peer, and unicasts
-  `MSG_REGISTER {mac, id, group_id, led_count, fw, build, dirty, version}` every 10 s; the conductor
-  builds a MAC-keyed roster (`roster` serial command). `fw` is wire
+  `MSG_REGISTER {mac, id, group_id, led_count, fw, build, dirty, version}` every
+  10–12 s; the conductor builds a MAC-keyed roster (`roster` serial command).
+  Shared radio sleep windows do not create a return-traffic herd: after a window
+  opens, each expired performer selects a stable MAC-derived slot across 500 ms,
+  holds the radio only through its own queued delivery, and uses 100 ms–2 s
+  bounded backoff when the ESP-NOW unicast delivery callback fails. Performer
+  unicasts are serialized by purpose so a power or OTA-status callback cannot be
+  mistaken for REGISTER completion. `fw` is wire
   compatibility (`PROTO_VERSION`); `version` + `build` + `dirty` are the OTA
   safety marker that catches same-protocol stale firmware.
 - **[done]** `MSG_TABLE`: the conductor broadcasts inventory and layout in chunks

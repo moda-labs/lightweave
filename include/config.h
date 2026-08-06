@@ -78,6 +78,13 @@ static constexpr int64_t BEACON_STALE_US = 2000000;  // 2s
 // per node every interval, far below the beacon rate. (The roster itself and its
 // capacity ROSTER_MAX live in the dependency-free, host-tested include/roster.h.)
 static constexpr int64_t REGISTER_INTERVAL_US = 10000000;  // 10s
+// A successful board checks in every 10–12 s. When multiple expired deadlines
+// collapse onto one shared radio wake, MAC-derived slots spread them across the
+// next 500 ms. Failed unicast delivery retries with 100 ms–2 s bounded backoff.
+static constexpr int64_t REGISTER_INTERVAL_JITTER_US = 2000000;  // 0–2s
+static constexpr int64_t REGISTER_SLOT_SPREAD_US = 500000;       // 0–500ms
+static constexpr int64_t REGISTER_RETRY_BASE_US = 200000;        // first <=200ms
+static constexpr int64_t REGISTER_RETRY_MAX_US = 2000000;        // cap 2s
 
 // The conductor re-broadcasts its inventory this often. IDs and positions are
 // cached in node NVS, so this is a slow backstop. REGISTER drives immediate ID
