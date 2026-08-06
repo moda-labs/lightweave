@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from control.provisioner import (
+    DeviceInfo,
     HttpIdAuthority,
     PortCandidate,
     ProvisioningManager,
@@ -29,6 +30,18 @@ MANIFEST = {
     "commit": "a" * 40,
     "serial_flash": {"sha256": "b" * 64},
 }
+
+CURRENT_PERFORMER = DeviceInfo(
+    role="PERFORMER",
+    node_id=54,
+    mac="AA:BB:CC:DD:EE:FF",
+    x=0.0,
+    y=0.0,
+    version="0.5.1",
+    proto=10,
+    build="aaaaaaaa",
+    dirty=False,
+)
 
 
 def approved(_channel: str, cache: Path):
@@ -62,6 +75,7 @@ def manager_for(
     discovery: Discovery,
     processor,
     *,
+    inspector=lambda _port: CURRENT_PERFORMER,
     resolver=lambda _mac, _reported: (54, True),
     clock=time.time,
     operation_lock_path: Path | None = None,
@@ -70,6 +84,7 @@ def manager_for(
         tmp_path,
         discover=discovery,
         processor=processor,
+        inspector=inspector,
         id_resolver=resolver,
         artifact_loader=no_cache,
         artifact_refresher=approved,
@@ -92,7 +107,10 @@ def test_detected_port_flashes_without_physical_slot_mapping(tmp_path: Path) -> 
 
     app = create_provisioner_app(manager_for(tmp_path, discovery, processor))
     with TestClient(app) as client:
-        status = wait_for(client, lambda value: len(value["jobs"]) == 1)
+        status = wait_for(
+            client,
+            lambda value: value["jobs"] and value["jobs"][0]["state"] == "queued",
+        )
         job = status["jobs"][0]
         assert job["state"] == "queued"
         assert job["slot"] is None
@@ -104,6 +122,148 @@ def test_detected_port_flashes_without_physical_slot_mapping(tmp_path: Path) -> 
     assert calls == ["/dev/ttyUSB0"]
     assert completed["jobs"][0]["slot"] is None
     assert completed["jobs"][0]["node_id"] == 54
+
+
+def test_idle_station_inspects_board_and_reports_current_firmware(tmp_path: Path) -> None:
+    discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
+    app = create_provisioner_app(
+        manager_for(tmp_path, discovery, lambda *_args, **_kwargs: "unused")
+    )
+
+    with TestClient(app) as client:
+        status = wait_for(
+            client,
+            lambda value: value["jobs"]
+            and value["jobs"][0]["update_status"] == "current",
+        )
+
+    job = status["jobs"][0]
+    assert status["session"]["active"] is False
+    assert job["node_id"] == 54
+    assert job["mac"] == "AA:BB:CC:DD:EE:FF"
+    assert job["firmware_version"] == "0.5.1"
+    assert job["firmware_build"] == "aaaaaaaa"
+    assert job["firmware_proto"] == 10
+    assert job["firmware_dirty"] is False
+    assert job["message"] == "Firmware is current"
+
+
+def test_idle_station_reports_when_firmware_update_is_needed(tmp_path: Path) -> None:
+    old = DeviceInfo(
+        role="PERFORMER",
+        node_id=23,
+        mac="68:FE:71:A6:32:4C",
+        x=0.0,
+        y=0.0,
+        version="0.4.0",
+        proto=8,
+        build="12345678",
+        dirty=False,
+    )
+    discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
+    app = create_provisioner_app(
+        manager_for(
+            tmp_path,
+            discovery,
+            lambda *_args, **_kwargs: "unused",
+            inspector=lambda _port: old,
+        )
+    )
+
+    with TestClient(app) as client:
+        status = wait_for(
+            client,
+            lambda value: value["jobs"]
+            and value["jobs"][0]["update_status"] == "update_needed",
+        )
+
+    job = status["jobs"][0]
+    assert job["node_id"] == 23
+    assert job["firmware_version"] == "0.4.0"
+    assert job["firmware_build"] == "12345678"
+    assert job["firmware_proto"] == 8
+    assert job["message"] == "Firmware update needed"
+
+
+def test_idle_station_identifies_and_excludes_conductor(tmp_path: Path) -> None:
+    conductor = DeviceInfo(
+        role="CONDUCTOR",
+        node_id=0,
+        mac="AA:BB:CC:DD:EE:01",
+        x=0.0,
+        y=0.0,
+        version="0.5.1",
+        proto=10,
+        build="aaaaaaaa",
+        dirty=False,
+    )
+    calls = []
+    discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
+    app = create_provisioner_app(
+        manager_for(
+            tmp_path,
+            discovery,
+            lambda *_args, **_kwargs: calls.append("flash") or "unused",
+            inspector=lambda _port: conductor,
+        )
+    )
+
+    with TestClient(app) as client:
+        status = wait_for(
+            client,
+            lambda value: value["jobs"]
+            and value["jobs"][0]["state"] == "unsupported",
+        )
+        client.post("/session", json={"max_workers": 1}).raise_for_status()
+        time.sleep(0.05)
+
+    assert status["jobs"][0]["role"] == "CONDUCTOR"
+    assert status["jobs"][0]["update_status"] == "unsupported"
+    assert calls == []
+
+
+def test_idle_station_keeps_unreadable_board_explicitly_unknown(tmp_path: Path) -> None:
+    discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
+    app = create_provisioner_app(
+        manager_for(
+            tmp_path,
+            discovery,
+            lambda *_args, **_kwargs: "unused",
+            inspector=lambda _port: None,
+        )
+    )
+
+    with TestClient(app) as client:
+        status = wait_for(
+            client,
+            lambda value: value["jobs"]
+            and value["jobs"][0]["state"] == "queued",
+        )
+
+    job = status["jobs"][0]
+    assert job["update_status"] == "unknown"
+    assert job["firmware_version"] is None
+    assert "unavailable" in job["message"]
+
+
+def test_new_production_target_requeues_connected_completed_board(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path, Discovery([]), lambda *_args, **_kwargs: "unused")
+    manager._approved = (MANIFEST, tmp_path / "old.zip")
+    manager._apply_ports([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
+    job = next(iter(manager._jobs.values()))
+    job.state = "done"
+    job.role = "PERFORMER"
+    job.firmware_build = "aaaaaaaa"
+    job.firmware_dirty = False
+    job.update_status = "current"
+    newer = {**MANIFEST, "commit": "c" * 40}
+
+    manager._approved = (newer, tmp_path / "new.zip")
+    manager._reassess_inspected_jobs()
+
+    assert job.state == "queued"
+    assert job.update_status == "update_needed"
+    assert job.message == "Firmware update needed"
 
 
 def test_worker_limit_bounds_parallel_flashes(tmp_path: Path) -> None:
@@ -284,7 +444,10 @@ def test_port_without_topology_can_flash_and_never_exposes_device_path(
     )
 
     with TestClient(app) as client:
-        status = wait_for(client, lambda value: len(value["jobs"]) == 1)
+        status = wait_for(
+            client,
+            lambda value: value["jobs"] and value["jobs"][0]["state"] == "queued",
+        )
         assert status["jobs"][0]["state"] == "queued"
         client.post("/session", json={"max_workers": 1}).raise_for_status()
         status = wait_for(client, lambda value: value["jobs"][0]["state"] == "done")

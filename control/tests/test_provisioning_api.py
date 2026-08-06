@@ -50,6 +50,12 @@ STATUS = {
             "mac": None,
             "node_id": None,
             "error": None,
+            "role": None,
+            "firmware_version": None,
+            "firmware_build": None,
+            "firmware_proto": None,
+            "firmware_dirty": None,
+            "update_status": "unknown",
         }
     ],
 }

@@ -108,6 +108,10 @@ The v0.7.0 tag workflow publishes a serial ZIP using flash-plan schema 2 with
 its usable local flashing runtime. Older v0.6.0 artifacts fail station preflight
 clearly rather than starting board jobs without that runtime.
 The schema-2 build gate now executes the bundled flashing runtime, the station and GitOps deployment share an operation lock, USB path reuse fails closed, production health includes the daemon, and conductor ID reservations roll back unless NVS persistence succeeds.
+The station now inspects connected USB boards even while idle. The Firmware UI
+shows permanent ID, role, current version/build/protocol, the production target,
+and Current/Update needed before flashing is armed. Unknown boards remain
+explicitly unknown until a station run, and detected conductors are excluded.
 
 The one-time inventory/tagging pass is complete: **53 boards are registered**.
 No performer firmware migration is required for the station itself; only the

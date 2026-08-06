@@ -358,12 +358,18 @@ input[type="number"], input[type="time"], input[type="text"], input[type="passwo
 .flash-jobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
 .flash-job { border: 1px solid var(--line); border-radius: 9px; background: #0b0f0c; padding: 12px; min-height: 132px; }
 .flash-job[data-state="done"] { border-color: rgba(84, 214, 122, .48); }
+.flash-job[data-update-status="current"] { border-color: rgba(84, 214, 122, .48); }
+.flash-job[data-update-status="update_needed"] { border-color: rgba(220, 159, 73, .55); }
+.flash-job[data-update-status="unsupported"] { border-color: rgba(225, 93, 93, .55); }
 .flash-job[data-state="failed"], .flash-job[data-state="disconnected"] { border-color: rgba(225, 93, 93, .55); }
 .flash-job[data-state="flashing"], .flash-job[data-state="erasing"], .flash-job[data-state="assigning_id"] { border-color: rgba(77, 169, 255, .55); box-shadow: inset 0 2px 0 rgba(77, 169, 255, .25); }
 .flash-job-head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
 .flash-slot { font-size: 18px; font-weight: 700; }
 .flash-board-id { margin-top: 12px; font-size: 22px; font-weight: 700; color: var(--live); }
 .flash-job-message { margin-top: 7px; min-height: 36px; color: var(--muted); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.flash-firmware { display: grid; gap: 2px; margin: 8px 0 5px; font: 11px/1.4 "JetBrains Mono", "IBM Plex Mono", monospace; }
+.flash-firmware strong { color: var(--text); }
+.flash-firmware span { color: var(--dim); }
 .flash-job-actions { display: flex; gap: 7px; margin-top: 10px; }
 .flash-job-actions input { width: 76px; }
 .flash-job .mono { color: var(--dim); font-size: 10px; }

@@ -249,10 +249,14 @@ GPIO2 blink is the zero-wiring sync check).
 The normal production workflow is now the **Firmware** screen in the control
 plane. A separate local provisioner owns USB discovery and flash subprocesses,
 so closing or refreshing the browser does not interrupt an in-progress board.
-Choose the simultaneous-flash limit, start the station, and plug boards into a
-powered USB hub. Each board appears automatically and begins when a worker is
-available. Physical hub-slot mappings are optional metadata; when configured,
-they survive port-name shuffles and service restarts.
+Plug boards into a powered USB hub first. The idle station performs a read-only
+serial inspection and shows each board's permanent ID, role, current firmware
+version/build/protocol, production target, and whether an update is needed.
+Choose the simultaneous-flash limit and start the station when ready; boards
+that need work begin as workers become available, while current boards still
+pass through ID and role verification without rewriting their firmware.
+Physical hub-slot mappings are optional metadata; when configured, they survive
+port-name shuffles and service restarts.
 
 The station defaults to five concurrent boards and can be set from one to ten.
 It downloads only the checksum-pinned serial bundle selected by the production
@@ -262,7 +266,9 @@ package and license; every tool file is hash-verified before probing, so the Pi
 does not need a separately installed source-only flashing package. The station
 never builds the local checkout. The configured
 conductor serial path is excluded before probing, and a board that reports the
-CONDUCTOR role is always refused.
+CONDUCTOR role is identified in the idle UI and excluded from performer jobs.
+Blank, sleeping, or otherwise unreadable boards show `Version unknown`; no write
+is attempted until the operator starts an appropriate station session.
 
 The Pi preflights this runtime before a session can be armed. A production
 release made before flash-plan schema 2 is rejected with an upgrade message;

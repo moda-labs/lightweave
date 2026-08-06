@@ -325,7 +325,12 @@ Permanent-ID reservation crosses a scoped credential to the control plane and
 then the conductor's NVS inventory. Pi packaging uses a hardened systemd unit;
 macOS uses a per-user LaunchAgent. A laptop station can point that reservation
 call at the Pi's HTTPS authority while all flash bytes remain local to the USB
-host.
+host. USB discovery also starts a read-only serial inspection while the station
+is idle. The UI shows the board's permanent ID, role, firmware version, build,
+wire protocol, production target, and a server-computed Current/Update needed
+assessment before the operator authorizes any write. Unreadable or factory
+boards remain Version unknown, and detected conductors are excluded from the
+performer job queue.
 
 An internet-connected deployment variant using Starlink Wi-Fi, a named
 Cloudflare Tunnel, and application-authenticated browser sessions is specified

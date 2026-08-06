@@ -365,6 +365,16 @@ function provisioningStateLabel(stateName) {
   return String(stateName || "unknown").replaceAll("_", " ");
 }
 
+function provisioningUpdateLabel(job) {
+  const labels = {
+    current: "Current",
+    update_needed: "Update needed",
+    unsupported: "Not a performer",
+    unknown: "Version unknown",
+  };
+  return labels[job.update_status] || provisioningStateLabel(job.state);
+}
+
 function renderProvisioning() {
   if (!provisioning) return;
   const available = provisioning.available === true;
@@ -395,7 +405,7 @@ function renderProvisioning() {
         ? `Factory provisioning armed for ${formatDuration(factoryRemaining)}. Blank boards may be erased.`
         : session.active
           ? `Station running. New boards appear automatically; up to ${Number(session.max_workers || 5)} flash at once.`
-          : "Choose the simultaneous-flash limit, start the station, then plug in boards.";
+          : "Plug in boards to inspect them. Start the station only when you are ready to update them.";
 
   $('[data-action="start-provisioning"]').disabled = !available || !artifact || session.active;
   $('[data-action="start-factory-provisioning"]').disabled = !available || !artifact || session.active;
@@ -404,17 +414,29 @@ function renderProvisioning() {
 
   $("#provisioning-jobs").innerHTML = jobs.length ? jobs.map((job) => {
     const slot = job.slot ? `Hub slot ${escapeHtml(job.slot)}` : "USB board";
-    const board = job.node_id ? `BOARD #${escapeHtml(job.node_id)}` : provisioningStateLabel(job.state).toUpperCase();
+    const board = job.node_id
+      ? `BOARD #${escapeHtml(job.node_id)}`
+      : escapeHtml(String(job.role || "Unknown board").toUpperCase());
+    const firmware = job.firmware_version && job.firmware_build
+      ? `v${escapeHtml(job.firmware_version)} · ${escapeHtml(job.firmware_build)}${job.firmware_proto !== null && job.firmware_proto !== undefined ? ` · p${escapeHtml(job.firmware_proto)}` : ""}${job.firmware_dirty ? " · dirty" : ""}`
+      : "Version unknown";
+    const target = artifact
+      ? `Target v${escapeHtml(artifact.version)} · ${escapeHtml(artifact.build)}`
+      : "Target unavailable";
+    const badge = ["inspecting", "probing", "reserving_id", "preparing", "flashing", "erasing", "assigning_id", "verifying", "rebooting"].includes(job.state)
+      ? provisioningStateLabel(job.state)
+      : provisioningUpdateLabel(job);
     const retry = job.state === "failed" && job.connected
       ? `<div class="flash-job-actions"><button type="button" data-provision-action="retry" data-job-id="${escapeHtml(job.id)}">Retry this board</button></div>`
       : "";
-    return `<article class="flash-job" data-state="${escapeHtml(job.state)}">
+    return `<article class="flash-job" data-state="${escapeHtml(job.state)}" data-update-status="${escapeHtml(job.update_status || "unknown")}">
       <div class="flash-job-head">
         <div class="flash-slot">${slot}</div>
-        <div class="chip">${escapeHtml(provisioningStateLabel(job.state))}</div>
+        <div class="chip">${escapeHtml(badge)}</div>
       </div>
       <div class="flash-board-id">${board}</div>
       <div class="flash-job-message">${escapeHtml(job.message || "")}</div>
+      <div class="flash-firmware"><strong>${firmware}</strong><span>${target}</span></div>
       ${job.mac ? `<div class="mono">${escapeHtml(job.mac)}</div>` : ""}
       ${retry}
     </article>`;

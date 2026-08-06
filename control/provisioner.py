@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from scripts.firebeetle_autoflash import (
     DEFAULT_CHANNEL,
+    DeviceInfo,
     PortCandidate,
     approved_build,
     candidate_port_infos,
@@ -32,12 +33,15 @@ from scripts.firebeetle_autoflash import (
     extract_bundle,
     load_cached_artifact,
     process_port,
+    read_info,
     refresh_artifact,
+    should_skip,
 )
 
 
-TERMINAL_STATES = {"done", "failed", "disconnected"}
+TERMINAL_STATES = {"done", "failed", "disconnected", "unsupported"}
 ACTIVE_STATES = {
+    "inspecting",
     "probing",
     "reserving_id",
     "preparing",
@@ -79,6 +83,12 @@ class ProvisioningJob:
     mac: str | None = None
     node_id: int | None = None
     error: str | None = None
+    role: str | None = None
+    firmware_version: str | None = None
+    firmware_build: str | None = None
+    firmware_proto: int | None = None
+    firmware_dirty: bool | None = None
+    update_status: str = "unknown"
 
 
 class SessionRequest(BaseModel):
@@ -144,6 +154,7 @@ class ProvisioningManager:
         channel: str = DEFAULT_CHANNEL,
         discover: Callable[[], list[PortCandidate]] = candidate_port_infos,
         processor: Callable[..., str] = process_port,
+        inspector: Callable[[str], DeviceInfo | None] = read_info,
         id_resolver: Callable[[str, int], tuple[int, bool]] | None = None,
         artifact_loader: Callable[[Path], tuple[dict[str, Any], Path] | None] = load_cached_artifact,
         artifact_refresher: Callable[[str, Path], tuple[dict[str, Any], Path] | None] = refresh_artifact,
@@ -159,6 +170,7 @@ class ProvisioningManager:
         self.channel = channel
         self.discover = discover
         self.processor = processor
+        self.inspector = inspector
         self.id_resolver = id_resolver
         self.artifact_loader = artifact_loader
         self.artifact_refresher = artifact_refresher
@@ -171,6 +183,8 @@ class ProvisioningManager:
         self._runner: asyncio.Task[None] | None = None
         self._job_tasks: dict[str, asyncio.Task[None]] = {}
         self._job_devices: dict[str, str] = {}
+        self._inspection_tasks: dict[str, asyncio.Task[None]] = {}
+        self._inspection_devices: dict[str, str] = {}
         self._ports: dict[str, PortCandidate] = {}
         self._jobs: dict[str, ProvisioningJob] = {}
         self._port_job: dict[str, str] = {}
@@ -285,7 +299,7 @@ class ProvisioningManager:
                 await self._runner
             except asyncio.CancelledError:
                 pass
-        active = list(self._job_tasks.values())
+        active = list(self._job_tasks.values()) + list(self._inspection_tasks.values())
         if active:
             await asyncio.gather(*active, return_exceptions=True)
 
@@ -305,6 +319,7 @@ class ProvisioningManager:
             with self._lock:
                 self._approved = refreshed
                 self._artifact_error = None if refreshed else "production channel is disabled"
+                self._reassess_inspected_jobs()
                 self._revision += 1
         except Exception as error:
             with self._lock:
@@ -317,6 +332,7 @@ class ProvisioningManager:
             try:
                 ports = await asyncio.to_thread(self.discover)
                 self._apply_ports(ports)
+                self._schedule_inspections()
                 self._schedule_jobs()
             except Exception as error:
                 with self._lock:
@@ -334,7 +350,7 @@ class ProvisioningManager:
                     job = self._jobs[job_id]
                     job.connected = False
                     job.updated_at = self.clock()
-                    if job.state in {"queued", "unmapped"}:
+                    if job.state in {"detected", "inspecting", "queued", "unmapped", "unsupported"}:
                         job.state = "disconnected"
                         job.message = "Board disconnected before flashing"
                 self._port_job.pop(device, None)
@@ -347,13 +363,13 @@ class ProvisioningManager:
                     prior = self._jobs[prior_job_id]
                     prior.connected = False
                     prior.updated_at = self.clock()
-                    if prior.state in {"queued", "unmapped"}:
+                    if prior.state in {"detected", "inspecting", "queued", "unmapped", "unsupported"}:
                         prior.state = "disconnected"
                         prior.message = "Board disconnected before flashing"
                 now = self.clock()
                 slot = self._slot_map.get(port.location) if port.location else None
-                state = "queued"
-                message = "Waiting to flash"
+                state = "detected"
+                message = "Waiting for firmware inspection"
                 error = None
                 job = ProvisioningJob(
                     id=uuid4().hex,
@@ -373,6 +389,130 @@ class ProvisioningManager:
                 self._save_jobs()
             self._ports = current
 
+    def _schedule_inspections(self) -> None:
+        with self._lock:
+            available = 10 - sum(
+                not task.done() for task in self._inspection_tasks.values()
+            )
+            if available <= 0:
+                return
+            detected = [
+                job for job in self._jobs.values()
+                if job.state == "detected"
+                and job.connected
+                and job.id not in self._inspection_tasks
+            ]
+            detected.sort(key=lambda item: (item.slot or 999, item.created_at))
+            busy_devices = set(self._job_devices.values()) | set(
+                self._inspection_devices.values()
+            )
+            for job in detected[:available]:
+                device = next(
+                    (name for name, job_id in self._port_job.items() if job_id == job.id),
+                    None,
+                )
+                if device is None or device in busy_devices:
+                    continue
+                job.state = "inspecting"
+                job.message = "Reading board identity and firmware"
+                job.updated_at = self.clock()
+                task = asyncio.create_task(self._run_inspection(job.id, device))
+                self._inspection_tasks[job.id] = task
+                self._inspection_devices[job.id] = device
+                busy_devices.add(device)
+                self._revision += 1
+                self._save_jobs()
+
+    async def _run_inspection(self, job_id: str, device: str) -> None:
+        try:
+            info = await asyncio.to_thread(self.inspector, device)
+            with self._lock:
+                job = self._jobs[job_id]
+                if not job.connected or self._port_job.get(device) != job_id:
+                    return
+                job.error = None
+                if info is None:
+                    job.state = "queued"
+                    job.update_status = "unknown"
+                    job.message = (
+                        "Firmware version unavailable; start the station to "
+                        "identify and update"
+                    )
+                else:
+                    job.mac = info.mac
+                    job.node_id = info.node_id or None
+                    job.role = info.role
+                    job.firmware_version = info.version
+                    job.firmware_build = info.build
+                    job.firmware_proto = info.proto
+                    job.firmware_dirty = info.dirty
+                    if info.role != "PERFORMER":
+                        job.state = "unsupported"
+                        job.update_status = "unsupported"
+                        job.message = (
+                            f"{info.role.title()} detected; performer station "
+                            "will not flash it"
+                        )
+                    else:
+                        job.state = "queued"
+                        current = self._approved is not None and should_skip(
+                            info, self._approved[0]
+                        )
+                        job.update_status = "current" if current else "update_needed"
+                        job.message = (
+                            "Firmware is current"
+                            if current
+                            else "Firmware update needed"
+                        )
+                job.updated_at = self.clock()
+                self._revision += 1
+                self._save_jobs()
+        except Exception as error:
+            with self._lock:
+                job = self._jobs[job_id]
+                if job.connected and self._port_job.get(device) == job_id:
+                    job.state = "queued"
+                    job.update_status = "unknown"
+                    job.message = (
+                        "Could not read firmware version; station will retry "
+                        "during update"
+                    )
+                    job.error = str(error).replace(device, "USB device")
+                    job.updated_at = self.clock()
+                    self._revision += 1
+                    self._save_jobs()
+        finally:
+            with self._lock:
+                self._inspection_tasks.pop(job_id, None)
+                self._inspection_devices.pop(job_id, None)
+
+    def _reassess_inspected_jobs(self) -> None:
+        if self._approved is None:
+            return
+        target_build = approved_build(self._approved[0])
+        changed = False
+        for job in self._jobs.values():
+            if (
+                not job.connected
+                or job.role != "PERFORMER"
+                or job.firmware_build is None
+                or job.id in self._job_tasks
+            ):
+                continue
+            current = job.firmware_dirty is False and job.firmware_build == target_build
+            update_status = "current" if current else "update_needed"
+            if job.update_status == update_status:
+                continue
+            job.update_status = update_status
+            if job.state == "done" and not current:
+                job.state = "queued"
+            if job.state == "queued":
+                job.message = "Firmware is current" if current else "Firmware update needed"
+            job.updated_at = self.clock()
+            changed = True
+        if changed:
+            self._save_jobs()
+
     def _schedule_jobs(self) -> None:
         with self._lock:
             if not self._active or self._approved is None:
@@ -387,7 +527,9 @@ class ProvisioningManager:
             ]
             queued.sort(key=lambda item: (item.slot or 999, item.created_at))
             scheduled = 0
-            busy_devices = set(self._job_devices.values())
+            busy_devices = set(self._job_devices.values()) | set(
+                self._inspection_devices.values()
+            )
             for job in queued:
                 if scheduled >= available:
                     break
@@ -448,6 +590,14 @@ class ProvisioningManager:
                 job.node_id = int(match.group(1)) if match else None
                 mac = re.match(r"([0-9A-F:]{17})", result)
                 job.mac = mac.group(1) if mac else None
+                job.role = "PERFORMER"
+                job.firmware_version = approved[0]["version"]
+                job.firmware_build = approved_build(approved[0])
+                job.firmware_proto = (
+                    job.firmware_proto if job.update_status == "current" else None
+                )
+                job.firmware_dirty = False
+                job.update_status = "current"
                 job.updated_at = self.clock()
                 self._revision += 1
                 self._save_jobs()
