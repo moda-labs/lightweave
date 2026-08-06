@@ -134,7 +134,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=2"' in index_html
+    assert 'src="/static/app.js?v=3"' in index_html
     assert 'href="/static/styles.css?v=2"' in index_html
     assert "Blackout all groups" in index_html
     assert "Restore all groups" in index_html
@@ -174,11 +174,52 @@ if (onlinePerformerCount(null) !== 0) process.exit(2);
     assert completed.returncode == 0, completed.stderr
 
 
+def test_group_performer_counts_include_missing_members_but_not_retired() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function groupPerformerCounts(items)")
+    end = app_js.index("\n}\n\nfunction lanternDisplayName", start) + 2
+    counts_source = app_js[start:end]
+    options_start = app_js.index("function groupOptions(selectedGroupId)")
+    options_end = app_js.index("\n}\n\nfunction updateGroupNameDirtyState", options_start) + 2
+    options_source = app_js[options_start:options_end]
+    script = f"""
+const GROUP_COUNT = 8;
+const items = [
+  {{group_id: 0, status: "alive"}},
+  {{group_id: 0, status: "missing"}},
+  {{group_id: 1, status: "alive"}},
+  {{group_id: 1, status: "retired"}},
+  {{group_id: 99, status: "alive"}},
+];
+function lanterns() {{ return items; }}
+function groupLabel(groupId) {{ return `Group ${{groupId + 1}}`; }}
+function escapeHtml(value) {{ return value; }}
+{counts_source}
+{options_source}
+const counts = groupPerformerCounts(items);
+if (JSON.stringify(counts[0]) !== JSON.stringify({{online: 1, total: 2}})) process.exit(1);
+if (JSON.stringify(counts[1]) !== JSON.stringify({{online: 1, total: 1}})) process.exit(2);
+if (groupPerformerCounts(null).some((count) => count.online || count.total)) process.exit(3);
+const options = groupOptions(0);
+if (!options.includes("Group 1 (1 online / 2)")) process.exit(4);
+if (!options.includes("Group 2 (1 online / 1)")) process.exit(5);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_control_plane_assets_revalidate_in_browser() -> None:
     app = create_app(MockConductor())
     with TestClient(app) as client:
         page = client.get("/")
-        script = client.get("/static/app.js?v=2")
+        script = client.get("/static/app.js?v=3")
 
     assert page.status_code == 200
     assert script.status_code == 200

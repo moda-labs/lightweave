@@ -208,6 +208,17 @@ function groupLabel(groupId) {
   return String(groupEntry(groupId)?.label || `Group ${Number(groupId) + 1}`);
 }
 
+function groupPerformerCounts(items) {
+  const counts = Array.from({ length: GROUP_COUNT }, () => ({ online: 0, total: 0 }));
+  for (const item of Array.isArray(items) ? items : []) {
+    const groupId = Number(item.group_id);
+    if (item.status === "retired" || !Number.isInteger(groupId) || groupId < 0 || groupId >= GROUP_COUNT) continue;
+    counts[groupId].total += 1;
+    if (item.status === "alive") counts[groupId].online += 1;
+  }
+  return counts;
+}
+
 function lanternDisplayName(mac) {
   const lantern = lanterns().find((item) => item.mac === mac);
   if (lantern?.label && lantern.label !== "Unknown") return lantern.label;
@@ -752,8 +763,9 @@ function renderUnpositionedTray() {
 }
 
 function groupOptions(selectedGroupId) {
+  const counts = groupPerformerCounts(lanterns());
   return Array.from({ length: GROUP_COUNT }, (_, groupId) =>
-    `<option value="${groupId}" ${groupId === selectedGroupId ? "selected" : ""}>${escapeHtml(groupLabel(groupId))}</option>`
+    `<option value="${groupId}" ${groupId === selectedGroupId ? "selected" : ""}>${escapeHtml(`${groupLabel(groupId)} (${counts[groupId].online} online / ${counts[groupId].total})`)}</option>`
   ).join("");
 }
 
