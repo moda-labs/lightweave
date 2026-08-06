@@ -35,6 +35,7 @@ from scripts.firebeetle_autoflash import (
     process_port,
     read_info,
     refresh_artifact,
+    run_tool,
     should_skip,
 )
 
@@ -61,11 +62,11 @@ def validate_station_artifact(
     destination = state_dir / "preflight" / approved_build(manifest)
     extract_bundle(bundle, destination)
     try:
-        esptool_command(destination)
+        run_tool(esptool_command(destination) + ["version"], timeout_s=30)
     except RuntimeError as error:
         raise RuntimeError(
             "approved production serial bundle does not include a usable flashing runtime; "
-            "promote a release built with flash-plan schema 2"
+            "promote a release with the complete bundled flashing runtime"
         ) from error
     return approved
 

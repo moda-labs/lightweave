@@ -200,6 +200,7 @@ def fake_esptool(tmp_path: Path) -> tuple[Path, Path]:
     package = tmp_path / "fake-tool" / "esptool"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(
+        "from intelhex import IntelHex\n"
         "def _main():\n"
         "    import sys\n"
         "    if sys.argv[1:] != ['version']:\n"
@@ -210,6 +211,12 @@ def fake_esptool(tmp_path: Path) -> tuple[Path, Path]:
     (package / "targets.json").write_text('{"chip": "esp32"}\n')
     license_path = tmp_path / "fake-tool" / "LICENSE"
     license_path.write_text("Fake esptool test license\n")
+    intelhex = tmp_path / "fake-tool" / "_contrib" / "intelhex"
+    intelhex.mkdir(parents=True)
+    (intelhex / "__init__.py").write_text("class IntelHex:\n    pass\n")
+    intelhex_metadata = intelhex.parent / "intelhex-2.3.0.dist-info"
+    intelhex_metadata.mkdir()
+    (intelhex_metadata / "LICENSE.txt").write_text("Fake IntelHex test license\n")
     return package, license_path
 
 
@@ -245,9 +252,12 @@ def test_serial_flash_bundle_is_deterministic_and_self_verifying(tmp_path: Path)
 
     assert first.read_bytes() == second.read_bytes()
     plan = autoflash.extract_bundle(first, tmp_path / "extracted")
+    assert plan["schema_version"] == 3
     assert {item["offset"] for item in plan["segments"]} == set(autoflash.EXPECTED_SEGMENTS)
     assert (tmp_path / "extracted" / "esptool.py").is_file()
     assert (tmp_path / "extracted" / "esptool" / "__main__.py").is_file()
+    assert (tmp_path / "extracted" / "intelhex" / "__init__.py").is_file()
+    assert (tmp_path / "extracted" / "intelhex-LICENSE").is_file()
     bundle.verify_bundle_runtime(first)
 
 

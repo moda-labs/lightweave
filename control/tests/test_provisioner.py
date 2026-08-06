@@ -596,8 +596,31 @@ def test_station_artifact_requires_usable_flash_runtime(
         lambda *_args: (_ for _ in ()).throw(RuntimeError("missing")),
     )
 
-    with pytest.raises(RuntimeError, match="flash-plan schema 2"):
+    with pytest.raises(RuntimeError, match="complete bundled flashing runtime"):
         validate_station_artifact((MANIFEST, tmp_path / "legacy.zip"), tmp_path)
+
+
+def test_station_artifact_preflights_bundled_runtime_imports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "control.provisioner.extract_bundle",
+        lambda *_args: {"schema_version": 2},
+    )
+    monkeypatch.setattr(
+        "control.provisioner.esptool_command",
+        lambda *_args: ["python", "esptool.py"],
+    )
+    monkeypatch.setattr(
+        "control.provisioner.run_tool",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("No module named 'intelhex'")
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="usable flashing runtime"):
+        validate_station_artifact((MANIFEST, tmp_path / "broken.zip"), tmp_path)
 
 
 def test_default_discovery_excludes_configured_conductor(

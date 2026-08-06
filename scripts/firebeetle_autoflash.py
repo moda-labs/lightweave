@@ -483,7 +483,7 @@ def extract_bundle(bundle: Path, destination: Path) -> dict[str, Any]:
         plan = _json(archive.read("flash-plan.json"), "flash plan")
         schema_version = plan.get("schema_version")
         if (
-            schema_version not in {1, 2}
+            schema_version not in {1, 2, 3}
             or plan.get("chip") != "esp32"
             or plan.get("flash_size") != "4MB"
             or plan.get("flash_mode") != "dio"
@@ -492,7 +492,7 @@ def extract_bundle(bundle: Path, destination: Path) -> dict[str, Any]:
             raise ValueError("flash plan settings are invalid")
         expected = {"flash-plan.json", *EXPECTED_SEGMENTS.values()}
         tool_members: list[dict[str, Any]] = []
-        if schema_version == 2:
+        if schema_version in {2, 3}:
             tool = plan.get("tool")
             if not isinstance(tool, dict) or set(tool) != {"name", "members"}:
                 raise ValueError("serial flash tool manifest is invalid")
@@ -509,7 +509,11 @@ def extract_bundle(bundle: Path, destination: Path) -> dict[str, Any]:
                 if (
                     not isinstance(filename, str)
                     or filename in tool_names
-                    or (filename not in {"esptool.py", "esptool-LICENSE"} and not filename.startswith("esptool/"))
+                    or (
+                        filename
+                        not in {"esptool.py", "esptool-LICENSE", "intelhex-LICENSE"}
+                        and not filename.startswith(("esptool/", "intelhex/"))
+                    )
                     or PurePosixPath(filename).is_absolute()
                     or ".." in PurePosixPath(filename).parts
                     or not isinstance(size, int)
@@ -524,6 +528,11 @@ def extract_bundle(bundle: Path, destination: Path) -> dict[str, Any]:
             expected.update(tool_names)
             if "esptool.py" not in expected or "esptool/__main__.py" not in expected:
                 raise ValueError("serial flash tool manifest is incomplete")
+            if schema_version == 3 and not {
+                "intelhex/__init__.py",
+                "intelhex-LICENSE",
+            }.issubset(expected):
+                raise ValueError("serial flash tool dependency manifest is incomplete")
         if names != expected:
             raise ValueError("serial flash bundle members are invalid")
         segments = plan.get("segments")
