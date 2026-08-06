@@ -370,7 +370,7 @@ function provisioningUpdateLabel(job) {
     current: "Current",
     update_needed: "Update needed",
     unsupported: "Not a performer",
-    unknown: "Version unknown",
+    unknown: "Unknown",
   };
   return labels[job.update_status] || provisioningStateLabel(job.state);
 }
@@ -379,55 +379,66 @@ function renderProvisioning() {
   if (!provisioning) return;
   const available = provisioning.available === true;
   const session = provisioning.session || {};
+  const autoUpdate = session.auto_update_enabled === true || session.active === true;
   const artifact = provisioning.artifact;
   const jobs = Array.isArray(provisioning.jobs)
     ? provisioning.jobs.filter((job) => job.connected).sort(comparePerformers)
     : [];
   const status = $("#provisioning-status");
-  status.textContent = !available ? "unavailable" : session.active ? "armed" : "idle";
-  status.className = `chip ${available && session.active ? "sync" : !available ? "active" : ""}`;
+  status.textContent = !available ? "unavailable" : autoUpdate ? "auto-update on" : "manual";
+  status.className = `chip ${available && autoUpdate ? "sync" : !available ? "active" : ""}`;
   $("#provisioning-release").textContent = artifact
     ? `${artifact.release} · ${artifact.build}`
     : "No approved artifact";
   $("#provisioning-connected").textContent = `${Number(provisioning.connected || 0)} boards`;
   $("#provisioning-running").textContent = String(Number(provisioning.running || 0));
-  if (!session.active) $("#provisioning-workers").value = String(session.max_workers || 5);
+  if (!autoUpdate) $("#provisioning-workers").value = String(session.max_workers || 5);
 
-  const factoryUntil = Number(session.factory_expires_at || 0);
-  const factoryRemaining = Math.max(0, Math.round(factoryUntil - Date.now() / 1000));
   const notice = $("#provisioning-notice");
-  notice.className = `flash-notice ${!available || provisioning.artifact_error || session.factory_armed ? "warn" : ""}`;
+  notice.className = `flash-notice ${!available || provisioning.artifact_error ? "warn" : ""}`;
   notice.textContent = !available
     ? (provisioning.artifact_error || "Install and start the local USB provisioner on this host.")
     : provisioning.artifact_error
       ? `Artifact warning: ${provisioning.artifact_error}`
-      : session.factory_armed
-        ? `Factory provisioning armed for ${formatDuration(factoryRemaining)}. Blank boards may be erased.`
-        : session.active
-          ? `Station running. New boards appear automatically; up to ${Number(session.max_workers || 5)} flash at once.`
-          : "Plug in boards to inspect them. Start the station only when you are ready to update them.";
+      : autoUpdate
+        ? `Auto-update is on. New and outdated boards install automatically; up to ${Number(session.max_workers || 5)} run at once.`
+        : "Auto-update is off. Use Install firmware on an individual board, or enable auto-update for the station.";
 
-  $('[data-action="start-provisioning"]').disabled = !available || !artifact || session.active;
-  $('[data-action="start-factory-provisioning"]').disabled = !available || !artifact || session.active;
-  $('[data-action="stop-provisioning"]').disabled = !session.active;
-  $("#provisioning-workers").disabled = session.active;
+  const enableAuto = $('[data-action="enable-provisioning-auto-update"]');
+  const disableAuto = $('[data-action="disable-provisioning-auto-update"]');
+  enableAuto.hidden = autoUpdate;
+  disableAuto.hidden = !autoUpdate;
+  enableAuto.disabled = !available || !artifact || autoUpdate;
+  disableAuto.disabled = !autoUpdate;
+  $("#provisioning-workers").disabled = autoUpdate;
 
   $("#provisioning-jobs").innerHTML = jobs.length ? jobs.map((job) => {
     const slot = job.slot ? `Hub slot ${escapeHtml(job.slot)}` : "USB board";
     const board = job.node_id
       ? `BOARD #${escapeHtml(job.node_id)}`
-      : escapeHtml(String(job.role || "Unknown board").toUpperCase());
+      : escapeHtml(String(job.role || "Unknown").toUpperCase());
     const firmware = job.firmware_version && job.firmware_build
       ? `v${escapeHtml(job.firmware_version)} · ${escapeHtml(job.firmware_build)}${job.firmware_proto !== null && job.firmware_proto !== undefined ? ` · p${escapeHtml(job.firmware_proto)}` : ""}${job.firmware_dirty ? " · dirty" : ""}`
-      : "Version unknown";
+      : "Unknown";
     const target = artifact
       ? `Target v${escapeHtml(artifact.version)} · ${escapeHtml(artifact.build)}`
       : "Target unavailable";
-    const badge = ["inspecting", "probing", "reserving_id", "preparing", "flashing", "erasing", "assigning_id", "verifying", "rebooting"].includes(job.state)
+    const active = ["inspecting", "probing", "reserving_id", "preparing", "flashing", "erasing", "assigning_id", "verifying", "rebooting"].includes(job.state);
+    const differentBuild = job.update_status === "update_needed"
+      && job.firmware_version === artifact?.version
+      && job.firmware_build
+      && job.firmware_build !== artifact?.build;
+    const badge = active
       ? provisioningStateLabel(job.state)
-      : provisioningUpdateLabel(job);
-    const retry = job.state === "failed" && job.connected
-      ? `<div class="flash-job-actions"><button type="button" data-provision-action="retry" data-job-id="${escapeHtml(job.id)}">Retry this board</button></div>`
+      : differentBuild
+        ? `Different build of ${escapeHtml(job.firmware_version)}`
+        : provisioningUpdateLabel(job);
+    const installable = job.connected
+      && !active
+      && job.update_status !== "current"
+      && job.update_status !== "unsupported";
+    const install = installable
+      ? `<div class="flash-job-actions"><button type="button" data-provision-action="install" data-job-id="${escapeHtml(job.id)}" ${autoUpdate ? "disabled" : ""}>Install firmware</button></div>`
       : "";
     return `<article class="flash-job" data-state="${escapeHtml(job.state)}" data-update-status="${escapeHtml(job.update_status || "unknown")}">
       <div class="flash-job-head">
@@ -438,7 +449,7 @@ function renderProvisioning() {
       <div class="flash-job-message">${escapeHtml(job.message || "")}</div>
       <div class="flash-firmware"><strong>${firmware}</strong><span>${target}</span></div>
       ${job.mac ? `<div class="mono">${escapeHtml(job.mac)}</div>` : ""}
-      ${retry}
+      ${install}
     </article>`;
   }).join("") : '<div class="empty-state">No FireBeetles detected. Plug boards into the powered hub.</div>';
 }
@@ -2259,7 +2270,7 @@ async function refresh() {
     provisioning = {
       available: false,
       artifact_error: error.message,
-      session: { active: false, max_workers: 5, factory_armed: false },
+      session: { active: false, auto_update_enabled: false, max_workers: 5 },
       jobs: [],
     };
   }
@@ -2539,24 +2550,21 @@ async function runAction(action) {
       toast(ack.message);
       return;
     }
-    if (action === "start-provisioning" || action === "start-factory-provisioning") {
-      const factory = action === "start-factory-provisioning";
-      if (factory && !confirm("Arm factory provisioning for 15 minutes? Blank boards may be erased before flashing.")) return;
-      provisioning = await api("/api/provisioning/session", {
-        method: "POST",
+    if (action === "enable-provisioning-auto-update") {
+      provisioning = await api("/api/provisioning/auto-update", {
+        method: "PUT",
         body: JSON.stringify({
           max_workers: Number($("#provisioning-workers").value || 5),
-          factory,
         }),
       });
       renderProvisioning();
-      toast(factory ? "factory provisioning armed" : "flashing station armed");
+      toast("USB firmware auto-update enabled");
       return;
     }
-    if (action === "stop-provisioning") {
-      provisioning = await api("/api/provisioning/session", { method: "DELETE" });
+    if (action === "disable-provisioning-auto-update") {
+      provisioning = await api("/api/provisioning/auto-update", { method: "DELETE" });
       renderProvisioning();
-      toast("station stopped accepting new boards");
+      toast("USB firmware auto-update disabled");
       return;
     }
     if (action === "upload-ota-artifact") {
@@ -2794,13 +2802,13 @@ document.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-provision-action]");
   if (!target) return;
   try {
-    if (target.dataset.provisionAction === "retry") {
+    if (target.dataset.provisionAction === "install") {
       provisioning = await api(
-        `/api/provisioning/jobs/${encodeURIComponent(target.dataset.jobId)}/retry`,
+        `/api/provisioning/jobs/${encodeURIComponent(target.dataset.jobId)}/install`,
         { method: "POST" },
       );
       renderProvisioning();
-      toast("board queued for retry");
+      toast("firmware installation queued");
       return;
     }
     if (target.dataset.provisionAction === "map-slot") {
@@ -3133,10 +3141,6 @@ window.addEventListener("mouseup", (event) => {
   if (!movingLanternMac || !movingDrag) return;
   finishLanternMove(event.clientX, event.clientY);
 });
-
-window.setInterval(() => {
-  if (provisioning?.session?.factory_armed) renderProvisioning();
-}, 1000);
 
 refresh().then(() => {
   connectWebSocket();

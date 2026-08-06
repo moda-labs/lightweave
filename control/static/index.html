@@ -225,7 +225,7 @@
           <div class="section-head">
             <div>
               <h2>USB Flashing Station</h2>
-              <p>Plug performers into a powered USB hub to identify them and compare their firmware with the production target. Start the station to update boards that need it.</p>
+              <p>Plug performers into a powered USB hub to identify them and compare their exact firmware build with the production target.</p>
             </div>
             <div class="chip" id="provisioning-status">checking</div>
           </div>
@@ -247,9 +247,8 @@
               </select>
             </label>
             <div class="button-row">
-              <button class="primary" data-action="start-provisioning">Start station</button>
-              <button class="danger" data-action="start-factory-provisioning">Start for new boards (15 min)</button>
-              <button data-action="stop-provisioning">Stop station</button>
+              <button class="primary" data-action="enable-provisioning-auto-update">Enable auto-update</button>
+              <button data-action="disable-provisioning-auto-update">Disable auto-update</button>
             </div>
           </div>
 
@@ -578,6 +577,6 @@
     </section>
   </div>
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js?v=13"></script>
+  <script src="/static/app.js?v=14"></script>
 </body>
 </html>

@@ -176,6 +176,63 @@ autoflash = load_script("firebeetle_autoflash")
 promote = load_script("promote_release")
 
 
+def test_firmware_version_is_plain_only_for_clean_exact_release() -> None:
+    identity = load_script("firmware_identity")
+
+    assert identity.reported_version("0.7.1", "v0.7.1\n", dirty=False) == "0.7.1"
+    assert identity.reported_version("0.7.1", "v0.7.0\n", dirty=False) == "0.7.1-dev"
+    assert identity.reported_version("0.7.1", "", dirty=False) == "0.7.1-dev"
+    assert identity.reported_version("0.7.1", "v0.7.1\n", dirty=True) == "0.7.1-dev"
+
+
+def test_firmware_version_rejects_values_that_do_not_fit_wire_format() -> None:
+    identity = load_script("firmware_identity")
+
+    with pytest.raises(ValueError, match="wire format"):
+        identity.reported_version("123456789012", "", dirty=False)
+
+
+def test_firmware_build_hook_loads_in_platformio_isolated_path() -> None:
+    hook = REPO_ROOT / "scripts" / "firmware_build_id.py"
+    program = """
+import sys
+from pathlib import Path
+
+class FakeEnv:
+    def __init__(self):
+        self.defines = None
+
+    def Append(self, *, CPPDEFINES):
+        self.defines = CPPDEFINES
+
+    def subst(self, value):
+        assert value == "$PROJECT_DIR"
+        return str(Path.cwd())
+
+env = FakeEnv()
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+exec(
+    compile(source, sys.argv[1], "exec"),
+    {"Import": lambda _name: None, "env": env},
+)
+assert env.defines
+assert {item[0] for item in env.defines} == {
+    "FIRMWARE_BUILD_ID",
+    "FIRMWARE_BUILD_DIRTY",
+    "FIRMWARE_VERSION",
+}
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", program, str(hook)],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def autoflash_manifest(bundle_data: bytes) -> dict:
     filename = f"lightweave-serial-flash-{TAG}.zip"
     return {

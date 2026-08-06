@@ -8,6 +8,9 @@ import httpx
 
 class ProvisioningClient(Protocol):
     async def status(self) -> dict[str, Any]: ...
+    async def enable_auto_update(self, *, max_workers: int) -> dict[str, Any]: ...
+    async def disable_auto_update(self) -> dict[str, Any]: ...
+    async def install(self, job_id: str) -> dict[str, Any]: ...
     async def start_session(self, *, max_workers: int, factory: bool) -> dict[str, Any]: ...
     async def stop_session(self) -> dict[str, Any]: ...
     async def map_slot(self, *, port_id: str, slot: int) -> dict[str, Any]: ...
@@ -58,6 +61,19 @@ class UnixProvisioningClient:
     async def status(self) -> dict[str, Any]:
         return await self._request("GET", "/status")
 
+    async def enable_auto_update(self, *, max_workers: int) -> dict[str, Any]:
+        return await self._request(
+            "PUT",
+            "/auto-update",
+            json={"max_workers": max_workers},
+        )
+
+    async def disable_auto_update(self) -> dict[str, Any]:
+        return await self._request("DELETE", "/auto-update")
+
+    async def install(self, job_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/jobs/{job_id}/install")
+
     async def start_session(self, *, max_workers: int, factory: bool) -> dict[str, Any]:
         return await self._request(
             "POST",
@@ -84,7 +100,11 @@ class UnavailableProvisioningClient:
         return {
             "available": False,
             "revision": 0,
-            "session": {"active": False, "max_workers": 5, "factory_armed": False},
+            "session": {
+                "active": False,
+                "auto_update_enabled": False,
+                "max_workers": 5,
+            },
             "artifact": None,
             "artifact_error": "USB provisioner is not configured on this host",
             "connected": 0,
@@ -94,6 +114,15 @@ class UnavailableProvisioningClient:
 
     async def _unavailable(self) -> dict[str, Any]:
         raise ProvisioningClientError("USB provisioner is not configured on this host")
+
+    async def enable_auto_update(self, *, max_workers: int) -> dict[str, Any]:
+        return await self._unavailable()
+
+    async def disable_auto_update(self) -> dict[str, Any]:
+        return await self._unavailable()
+
+    async def install(self, job_id: str) -> dict[str, Any]:
+        return await self._unavailable()
 
     async def start_session(self, *, max_workers: int, factory: bool) -> dict[str, Any]:
         return await self._unavailable()

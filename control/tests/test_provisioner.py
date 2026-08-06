@@ -43,6 +43,18 @@ CURRENT_PERFORMER = DeviceInfo(
     dirty=False,
 )
 
+OUTDATED_PERFORMER = DeviceInfo(
+    role="PERFORMER",
+    node_id=54,
+    mac="AA:BB:CC:DD:EE:FF",
+    x=0.0,
+    y=0.0,
+    version="0.5.0",
+    proto=9,
+    build="cccccccc",
+    dirty=False,
+)
+
 
 def approved(_channel: str, cache: Path):
     return MANIFEST, cache / "bundle.zip"
@@ -75,7 +87,7 @@ def manager_for(
     discovery: Discovery,
     processor,
     *,
-    inspector=lambda _port: CURRENT_PERFORMER,
+    inspector=lambda _port: OUTDATED_PERFORMER,
     resolver=lambda _mac, _reported: (54, True),
     clock=time.time,
     operation_lock_path: Path | None = None,
@@ -127,7 +139,12 @@ def test_detected_port_flashes_without_physical_slot_mapping(tmp_path: Path) -> 
 def test_idle_station_inspects_board_and_reports_current_firmware(tmp_path: Path) -> None:
     discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
     app = create_provisioner_app(
-        manager_for(tmp_path, discovery, lambda *_args, **_kwargs: "unused")
+        manager_for(
+            tmp_path,
+            discovery,
+            lambda *_args, **_kwargs: "unused",
+            inspector=lambda _port: CURRENT_PERFORMER,
+        )
     )
 
     with TestClient(app) as client:
@@ -243,7 +260,7 @@ def test_idle_station_keeps_unreadable_board_explicitly_unknown(tmp_path: Path) 
     job = status["jobs"][0]
     assert job["update_status"] == "unknown"
     assert job["firmware_version"] is None
-    assert "unavailable" in job["message"]
+    assert job["message"] == "Unknown board; install firmware to identify it"
 
 
 def test_new_production_target_requeues_connected_completed_board(tmp_path: Path) -> None:
@@ -299,58 +316,79 @@ def test_worker_limit_bounds_parallel_flashes(tmp_path: Path) -> None:
         release.set()
 
 
-def test_factory_authorization_is_session_scoped_and_retry_recovers(tmp_path: Path) -> None:
+def test_manual_install_authorizes_unknown_board_and_returns_label_instruction(
+    tmp_path: Path,
+) -> None:
     discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
-    attempts = 0
-    factory_values: list[bool] = []
-
-    def processor(_port, *_args, factory_authorized, **_kwargs):
-        nonlocal attempts
-        attempts += 1
-        factory_values.append(factory_authorized)
-        if attempts == 1:
-            raise RuntimeError("serial cable disconnected")
-        return "AA:BB:CC:DD:EE:FF flashed; permanent ID #54 verified"
-
-    manager = manager_for(tmp_path, discovery, processor)
-    manager._slot_map = {"1-1.2": 1}
-    app = create_provisioner_app(manager)
-    with TestClient(app) as client:
-        wait_for(client, lambda value: len(value["jobs"]) == 1)
-        armed = client.post("/session", json={"max_workers": 1, "factory": True}).json()
-        assert armed["session"]["factory_armed"] is True
-        failed = wait_for(client, lambda value: value["jobs"][0]["state"] == "failed")
-        job_id = failed["jobs"][0]["id"]
-        client.post(f"/jobs/{job_id}/retry").raise_for_status()
-        wait_for(client, lambda value: value["jobs"][0]["state"] == "done")
-
-    assert factory_values == [True, True]
-
-
-def test_factory_authorization_expires_before_a_later_retry(tmp_path: Path) -> None:
-    discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
-    now = [1000.0]
     factory_values: list[bool] = []
 
     def processor(_port, *_args, factory_authorized, **_kwargs):
         factory_values.append(factory_authorized)
-        if len(factory_values) == 1:
-            raise RuntimeError("first attempt failed")
-        return "AA:BB:CC:DD:EE:FF flashed; permanent ID #54 verified"
+        return "AA:BB:CC:DD:EE:09 flashed; permanent ID #9 verified"
 
-    manager = manager_for(tmp_path, discovery, processor, clock=lambda: now[0])
-    manager._slot_map = {"1-1.2": 1}
+    manager = manager_for(
+        tmp_path,
+        discovery,
+        processor,
+        inspector=lambda _port: None,
+    )
     app = create_provisioner_app(manager)
     with TestClient(app) as client:
-        wait_for(client, lambda value: len(value["jobs"]) == 1)
-        client.post("/session", json={"max_workers": 1, "factory": True}).raise_for_status()
-        failed = wait_for(client, lambda value: value["jobs"][0]["state"] == "failed")
-        now[0] += 901
-        job_id = failed["jobs"][0]["id"]
-        client.post(f"/jobs/{job_id}/retry").raise_for_status()
+        unknown = wait_for(
+            client,
+            lambda value: value["jobs"]
+            and value["jobs"][0]["update_status"] == "unknown",
+        )
+        assert factory_values == []
+        job_id = unknown["jobs"][0]["id"]
+        client.post(f"/jobs/{job_id}/install").raise_for_status()
+        completed = wait_for(
+            client, lambda value: value["jobs"][0]["state"] == "done"
+        )
+
+    assert factory_values == [True]
+    assert completed["session"]["auto_update_enabled"] is False
+    assert completed["jobs"][0]["node_id"] == 9
+    assert completed["jobs"][0]["message"] == "Write #9 on the board"
+
+
+def test_auto_update_persists_and_installs_unknown_boards(tmp_path: Path) -> None:
+    discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "wch")])
+    factory_values: list[bool] = []
+
+    def processor(_port, *_args, factory_authorized, **_kwargs):
+        factory_values.append(factory_authorized)
+        return "AA:BB:CC:DD:EE:FF flashed; permanent ID #54 verified"
+
+    manager = manager_for(
+        tmp_path,
+        discovery,
+        processor,
+        inspector=lambda _port: None,
+    )
+    app = create_provisioner_app(manager)
+    with TestClient(app) as client:
+        unknown = wait_for(
+            client,
+            lambda value: value["jobs"]
+            and value["jobs"][0]["update_status"] == "unknown",
+        )
+        enabled = client.put(
+            "/auto-update", json={"max_workers": 3}
+        ).json()
+        assert enabled["session"]["auto_update_enabled"] is True
+        assert client.post(
+            f"/jobs/{unknown['jobs'][0]['id']}/install"
+        ).status_code == 409
         wait_for(client, lambda value: value["jobs"][0]["state"] == "done")
 
-    assert factory_values == [True, False]
+    restarted = manager_for(tmp_path, Discovery([]), processor)
+    assert restarted.status()["session"] == {
+        "active": True,
+        "auto_update_enabled": True,
+        "max_workers": 3,
+    }
+    assert factory_values == [True]
 
 
 def test_reused_device_path_waits_for_old_job_and_invalidates_it(tmp_path: Path) -> None:

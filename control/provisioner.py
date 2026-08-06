@@ -186,6 +186,7 @@ class ProvisioningManager:
         self._job_devices: dict[str, str] = {}
         self._inspection_tasks: dict[str, asyncio.Task[None]] = {}
         self._inspection_devices: dict[str, str] = {}
+        self._manual_jobs: set[str] = set()
         self._ports: dict[str, PortCandidate] = {}
         self._jobs: dict[str, ProvisioningJob] = {}
         self._port_job: dict[str, str] = {}
@@ -195,7 +196,6 @@ class ProvisioningManager:
         self._last_refresh = 0.0
         self._active = False
         self._max_workers = 5
-        self._factory_until = 0.0
         self._revision = 0
         self._load_config()
         self._load_jobs()
@@ -214,6 +214,9 @@ class ProvisioningManager:
         if not path.is_file():
             return
         document = json.loads(path.read_text(encoding="utf-8"))
+        schema_version = document.get("schema_version") if isinstance(document, dict) else None
+        if schema_version not in {1, 2}:
+            raise ValueError("provisioning station config is invalid")
         slots = document.get("slots") if isinstance(document, dict) else None
         if not isinstance(slots, dict):
             raise ValueError("provisioning station config is invalid")
@@ -225,13 +228,36 @@ class ProvisioningManager:
                 raise ValueError("provisioning slot map contains invalid or duplicate slots")
             parsed[key] = value
         self._slot_map = parsed
+        if schema_version == 2:
+            auto_update_enabled = document.get("auto_update_enabled")
+            max_workers = document.get("max_workers")
+            if not isinstance(auto_update_enabled, bool):
+                raise ValueError("provisioning auto-update setting is invalid")
+            if (
+                not isinstance(max_workers, int)
+                or isinstance(max_workers, bool)
+                or not 1 <= max_workers <= 10
+            ):
+                raise ValueError("provisioning worker setting is invalid")
+            self._active = auto_update_enabled
+            self._max_workers = max_workers
 
     def _save_config(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         path = self.state_dir / "station.json"
         temporary = path.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps({"schema_version": 1, "slots": self._slot_map}, indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "slots": self._slot_map,
+                    "auto_update_enabled": self._active,
+                    "max_workers": self._max_workers,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
         os.chmod(temporary, 0o600)
@@ -435,10 +461,7 @@ class ProvisioningManager:
                 if info is None:
                     job.state = "queued"
                     job.update_status = "unknown"
-                    job.message = (
-                        "Firmware version unavailable; start the station to "
-                        "identify and update"
-                    )
+                    job.message = "Unknown board; install firmware to identify it"
                 else:
                     job.mac = info.mac
                     job.node_id = info.node_id or None
@@ -516,7 +539,7 @@ class ProvisioningManager:
 
     def _schedule_jobs(self) -> None:
         with self._lock:
-            if not self._active or self._approved is None:
+            if self._approved is None:
                 return
             running = sum(not task.done() for task in self._job_tasks.values())
             available = self._max_workers - running
@@ -524,7 +547,16 @@ class ProvisioningManager:
                 return
             queued = [
                 job for job in self._jobs.values()
-                if job.state == "queued" and job.connected and job.id not in self._job_tasks
+                if job.state == "queued"
+                and job.connected
+                and job.id not in self._job_tasks
+                and (
+                    job.id in self._manual_jobs
+                    or (
+                        self._active
+                        and job.update_status in {"update_needed", "unknown"}
+                    )
+                )
             ]
             queued.sort(key=lambda item: (item.slot or 999, item.created_at))
             scheduled = 0
@@ -543,7 +575,11 @@ class ProvisioningManager:
                 job.state = "probing"
                 job.message = "Starting board probe"
                 job.updated_at = self.clock()
-                task = asyncio.create_task(self._run_job(job.id, device))
+                factory_authorized = self._active or job.id in self._manual_jobs
+                self._manual_jobs.discard(job.id)
+                task = asyncio.create_task(
+                    self._run_job(job.id, device, factory_authorized)
+                )
                 self._job_tasks[job.id] = task
                 self._job_devices[job.id] = device
                 busy_devices.add(device)
@@ -551,10 +587,11 @@ class ProvisioningManager:
                 self._revision += 1
                 self._save_jobs()
 
-    async def _run_job(self, job_id: str, device: str) -> None:
+    async def _run_job(
+        self, job_id: str, device: str, factory_authorized: bool
+    ) -> None:
         with self._lock:
             approved = self._approved
-            factory = self.clock() < self._factory_until
         if approved is None:
             self._fail_job(job_id, "No approved production artifact is available")
             return
@@ -578,7 +615,7 @@ class ProvisioningManager:
                 self._process_locked,
                 device,
                 approved,
-                factory,
+                factory_authorized,
                 progress,
             )
             match = ID_RE.search(result)
@@ -587,7 +624,9 @@ class ProvisioningManager:
                 if not job.connected or self._port_job.get(device) != job_id:
                     raise RuntimeError("board disconnected or USB path was reused")
                 job.state = "done"
-                job.message = match.group(0).upper() + " ready to label" if match else result
+                job.message = (
+                    f"Write #{match.group(1)} on the board" if match else result
+                )
                 job.node_id = int(match.group(1)) if match else None
                 mac = re.match(r"([0-9A-F:]{17})", result)
                 job.mac = mac.group(1) if mac else None
@@ -658,6 +697,9 @@ class ProvisioningManager:
             self._save_jobs()
 
     def start_session(self, *, max_workers: int, factory: bool) -> dict[str, Any]:
+        return self.enable_auto_update(max_workers=max_workers)
+
+    def enable_auto_update(self, *, max_workers: int) -> dict[str, Any]:
         with self._lock:
             if self._approved is None:
                 raise RuntimeError(self._artifact_error or "approved production artifact unavailable")
@@ -665,18 +707,50 @@ class ProvisioningManager:
                 raise RuntimeError("Permanent-ID authority is unavailable")
             self._active = True
             self._max_workers = max_workers
-            self._factory_until = self.clock() + 15 * 60 if factory else 0.0
-            for job in self._jobs.values():
-                if job.connected and job.state == "disconnected":
-                    job.state = "queued" if job.slot is not None else "unmapped"
+            self._save_config()
             self._revision += 1
         return self.status()
 
     def stop_session(self) -> dict[str, Any]:
+        return self.disable_auto_update()
+
+    def disable_auto_update(self) -> dict[str, Any]:
         with self._lock:
             self._active = False
-            self._factory_until = 0.0
+            self._save_config()
             self._revision += 1
+        return self.status()
+
+    def install(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            if self._active:
+                raise RuntimeError(
+                    "disable auto-update before installing an individual board"
+                )
+            if self._approved is None:
+                raise RuntimeError(
+                    self._artifact_error or "approved production artifact unavailable"
+                )
+            if self.id_resolver is None:
+                raise RuntimeError("Permanent-ID authority is unavailable")
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError("job not found")
+            if not job.connected:
+                raise RuntimeError("reconnect the board before installing firmware")
+            if job.id in self._job_tasks or job.state in ACTIVE_STATES:
+                raise RuntimeError("firmware installation is already running")
+            if job.update_status == "current" and job.state != "failed":
+                raise RuntimeError("firmware is already current")
+            if job.state == "unsupported":
+                raise RuntimeError("only performer boards can be updated")
+            job.state = "queued"
+            job.message = "Waiting to install firmware"
+            job.error = None
+            job.updated_at = self.clock()
+            self._manual_jobs.add(job.id)
+            self._revision += 1
+            self._save_jobs()
         return self.status()
 
     def map_slot(self, *, port_id: str, slot: int) -> dict[str, Any]:
@@ -705,25 +779,10 @@ class ProvisioningManager:
         return self.status()
 
     def retry(self, job_id: str) -> dict[str, Any]:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise KeyError("job not found")
-            if job.state != "failed":
-                raise RuntimeError("only failed jobs can be retried")
-            if not job.connected:
-                raise RuntimeError("reconnect the board before retrying")
-            job.state = "queued"
-            job.message = "Waiting to retry"
-            job.error = None
-            job.updated_at = self.clock()
-            self._revision += 1
-            self._save_jobs()
-        return self.status()
+        return self.install(job_id)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            now = self.clock()
             artifact = None
             if self._approved is not None:
                 manifest = self._approved[0]
@@ -739,9 +798,8 @@ class ProvisioningManager:
                 "revision": self._revision,
                 "session": {
                     "active": self._active,
+                    "auto_update_enabled": self._active,
                     "max_workers": self._max_workers,
-                    "factory_armed": self._active and now < self._factory_until,
-                    "factory_expires_at": self._factory_until or None,
                 },
                 "artifact": artifact,
                 "artifact_error": self._artifact_error,
@@ -839,6 +897,19 @@ def create_provisioner_app(manager: ProvisioningManager | None = None) -> FastAP
     async def stop_session() -> dict[str, Any]:
         return app.state.manager.stop_session()
 
+    @app.put("/auto-update")
+    async def enable_auto_update(request: SessionRequest) -> dict[str, Any]:
+        try:
+            return app.state.manager.enable_auto_update(
+                max_workers=request.max_workers
+            )
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.delete("/auto-update")
+    async def disable_auto_update() -> dict[str, Any]:
+        return app.state.manager.disable_auto_update()
+
     @app.put("/slots")
     async def map_slot(request: SlotRequest) -> dict[str, Any]:
         try:
@@ -852,6 +923,15 @@ def create_provisioner_app(manager: ProvisioningManager | None = None) -> FastAP
     async def retry(job_id: str) -> dict[str, Any]:
         try:
             return app.state.manager.retry(job_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/jobs/{job_id}/install")
+    async def install(job_id: str) -> dict[str, Any]:
+        try:
+            return app.state.manager.install(job_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except RuntimeError as error:

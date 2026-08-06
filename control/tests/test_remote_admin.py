@@ -135,7 +135,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=13"' in index_html
+    assert 'src="/static/app.js?v=14"' in index_html
     assert 'href="/static/styles.css?v=4"' in index_html
     assert 'data-view="power"' in index_html
     assert 'id="view-power"' in index_html
@@ -153,10 +153,16 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert flash_view.index("Update field") < flash_view.index('id="ota-nodes"')
     assert "USB Flashing Station" in flash_view
     assert "Simultaneous flashes" in flash_view
-    assert "Start station" in flash_view
+    assert "Enable auto-update" in flash_view
+    assert "Disable auto-update" in flash_view
+    assert "Start station" not in flash_view
+    assert "Start for new boards" not in flash_view
     assert ".filter((job) => job.connected)" in app_js
     assert "function provisioningUpdateLabel(job)" in app_js
     assert 'update_needed: "Update needed"' in app_js
+    assert 'unknown: "Unknown"' in app_js
+    assert "Install firmware" in app_js
+    assert "/api/provisioning/auto-update" in app_js
     assert "job.firmware_version && job.firmware_build" in app_js
     assert "Target v${escapeHtml(artifact.version)}" in app_js
     assert "Battery SOC" in index_html

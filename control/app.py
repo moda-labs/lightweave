@@ -390,7 +390,7 @@ def create_app(
         async def provisioning_ticker() -> None:
             last_revision: int | None = None
             last_available: bool | None = None
-            last_factory_armed: bool | None = None
+            last_auto_update: bool | None = None
             while True:
                 await asyncio.sleep(1)
                 try:
@@ -399,7 +399,11 @@ def create_app(
                     status = {
                         "available": False,
                         "revision": 0,
-                        "session": {"active": False, "max_workers": 5, "factory_armed": False},
+                        "session": {
+                            "active": False,
+                            "auto_update_enabled": False,
+                            "max_workers": 5,
+                        },
                         "artifact": None,
                         "artifact_error": str(error),
                         "connected": 0,
@@ -408,17 +412,19 @@ def create_app(
                     }
                 revision = int(status.get("revision") or 0)
                 available = bool(status.get("available"))
-                factory_armed = bool((status.get("session") or {}).get("factory_armed"))
+                auto_update = bool(
+                    (status.get("session") or {}).get("auto_update_enabled")
+                )
                 app.state.provisioning_snapshot = status
                 if (
                     revision != last_revision
                     or available != last_available
-                    or factory_armed != last_factory_armed
+                    or auto_update != last_auto_update
                 ):
                     await publish({"type": "provisioning", "provisioning": status})
                     last_revision = revision
                     last_available = available
-                    last_factory_armed = factory_armed
+                    last_auto_update = auto_update
 
         ticker_task = asyncio.create_task(ticker())
         reaper_task = asyncio.create_task(session_reaper())
@@ -1446,6 +1452,23 @@ def create_app(
         await publish({"type": "provisioning", "provisioning": result})
         return result
 
+    @app.put("/api/provisioning/auto-update")
+    async def enable_provisioning_auto_update(
+        payload: ProvisioningSessionRequest,
+    ) -> dict[str, Any]:
+        result = await provisioning_call(
+            "enable_auto_update",
+            max_workers=payload.max_workers,
+        )
+        await publish({"type": "provisioning", "provisioning": result})
+        return result
+
+    @app.delete("/api/provisioning/auto-update")
+    async def disable_provisioning_auto_update() -> dict[str, Any]:
+        result = await provisioning_call("disable_auto_update")
+        await publish({"type": "provisioning", "provisioning": result})
+        return result
+
     @app.put("/api/provisioning/slots")
     async def map_provisioning_slot(payload: ProvisioningSlotRequest) -> dict[str, Any]:
         result = await provisioning_call(
@@ -1461,6 +1484,14 @@ def create_app(
         if not re.fullmatch(r"[0-9a-f]{32}", job_id):
             raise HTTPException(status_code=404, detail="provisioning job not found")
         result = await provisioning_call("retry", job_id)
+        await publish({"type": "provisioning", "provisioning": result})
+        return result
+
+    @app.post("/api/provisioning/jobs/{job_id}/install")
+    async def install_provisioning_job(job_id: str) -> dict[str, Any]:
+        if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise HTTPException(status_code=404, detail="provisioning job not found")
+        result = await provisioning_call("install", job_id)
         await publish({"type": "provisioning", "provisioning": result})
         return result
 

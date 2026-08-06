@@ -26,8 +26,8 @@ class FakeManager:
             "revision": 1,
             "session": {
                 "active": self.active,
+                "auto_update_enabled": self.active,
                 "max_workers": 5,
-                "factory_armed": False,
             },
             "artifact": None,
             "artifact_error": None,
@@ -39,14 +39,27 @@ class FakeManager:
     def start_session(self, *, max_workers: int, factory: bool):
         self.active = True
         value = self.status()
-        value["session"].update(
-            {"max_workers": max_workers, "factory_armed": factory}
-        )
+        value["session"]["max_workers"] = max_workers
         return value
 
     def stop_session(self):
         self.active = False
         return self.status()
+
+    def enable_auto_update(self, *, max_workers: int):
+        self.active = True
+        value = self.status()
+        value["session"]["max_workers"] = max_workers
+        return value
+
+    def disable_auto_update(self):
+        self.active = False
+        return self.status()
+
+    def install(self, job_id: str):
+        value = self.status()
+        value["installed_job"] = job_id
+        return value
 
     def map_slot(self, *, port_id: str, slot: int):
         return self.status()
@@ -76,12 +89,14 @@ def test_unix_socket_client_reaches_isolated_provisioner_daemon() -> None:
                 await asyncio.sleep(0.01)
             client = UnixProvisioningClient(socket)
             assert (await client.status())["available"] is True
-            started = await client.start_session(max_workers=8, factory=True)
-            assert started["session"] == {
+            enabled = await client.enable_auto_update(max_workers=8)
+            assert enabled["session"] == {
                 "active": True,
+                "auto_update_enabled": True,
                 "max_workers": 8,
-                "factory_armed": True,
             }
+            installed = await client.install("a" * 32)
+            assert installed["installed_job"] == "a" * 32
         finally:
             server.should_exit = True
             await task

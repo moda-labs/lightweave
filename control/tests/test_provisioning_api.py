@@ -24,9 +24,8 @@ STATUS = {
     "revision": 7,
     "session": {
         "active": False,
+        "auto_update_enabled": False,
         "max_workers": 5,
-        "factory_armed": False,
-        "factory_expires_at": None,
     },
     "artifact": {
         "release": "v0.5.1",
@@ -73,14 +72,44 @@ class FakeProvisioningClient:
         self.calls.append(("start", max_workers, factory))
         self.value["revision"] += 1
         self.value["session"].update(
-            {"active": True, "max_workers": max_workers, "factory_armed": factory}
+            {
+                "active": True,
+                "auto_update_enabled": True,
+                "max_workers": max_workers,
+            }
         )
         return deepcopy(self.value)
 
     async def stop_session(self):
         self.calls.append(("stop",))
         self.value["revision"] += 1
-        self.value["session"].update({"active": False, "factory_armed": False})
+        self.value["session"].update(
+            {"active": False, "auto_update_enabled": False}
+        )
+        return deepcopy(self.value)
+
+    async def enable_auto_update(self, *, max_workers: int):
+        self.calls.append(("enable_auto_update", max_workers))
+        self.value["revision"] += 1
+        self.value["session"].update(
+            {
+                "active": True,
+                "auto_update_enabled": True,
+                "max_workers": max_workers,
+            }
+        )
+        return deepcopy(self.value)
+
+    async def disable_auto_update(self):
+        self.calls.append(("disable_auto_update",))
+        self.value["revision"] += 1
+        self.value["session"].update(
+            {"active": False, "auto_update_enabled": False}
+        )
+        return deepcopy(self.value)
+
+    async def install(self, job_id: str):
+        self.calls.append(("install", job_id))
         return deepcopy(self.value)
 
     async def map_slot(self, *, port_id: str, slot: int):
@@ -117,24 +146,24 @@ def test_provisioning_api_proxies_only_validated_station_operations() -> None:
     provisioner = FakeProvisioningClient()
     with TestClient(create_app(provisioning_client=provisioner)) as client:
         assert client.get("/api/provisioning/status").json()["revision"] == 7
-        started = client.post(
-            "/api/provisioning/session",
-            json={"max_workers": 10, "factory": True},
+        enabled = client.put(
+            "/api/provisioning/auto-update",
+            json={"max_workers": 10},
         )
-        assert started.status_code == 200
-        assert started.json()["session"]["factory_armed"] is True
+        assert enabled.status_code == 200
+        assert enabled.json()["session"]["auto_update_enabled"] is True
         assert client.put(
             "/api/provisioning/slots",
             json={"port_id": "2" * 16, "slot": 4},
         ).status_code == 200
-        assert client.post(f"/api/provisioning/jobs/{'1' * 32}/retry").status_code == 200
-        assert client.delete("/api/provisioning/session").status_code == 200
+        assert client.post(f"/api/provisioning/jobs/{'1' * 32}/install").status_code == 200
+        assert client.delete("/api/provisioning/auto-update").status_code == 200
 
     assert provisioner.calls == [
-        ("start", 10, True),
+        ("enable_auto_update", 10),
         ("slot", "2" * 16, 4),
-        ("retry", "1" * 32),
-        ("stop",),
+        ("install", "1" * 32),
+        ("disable_auto_update",),
     ]
 
 
@@ -151,9 +180,9 @@ def test_websocket_publishes_station_session_change() -> None:
     provisioner = FakeProvisioningClient()
     with TestClient(create_app(provisioning_client=provisioner)) as client:
         with client.websocket_connect("/ws") as websocket:
-            response = client.post(
-                "/api/provisioning/session",
-                json={"max_workers": 5, "factory": False},
+            response = client.put(
+                "/api/provisioning/auto-update",
+                json={"max_workers": 5},
             )
             assert response.status_code == 200
             event = websocket.receive_json()
@@ -161,27 +190,27 @@ def test_websocket_publishes_station_session_change() -> None:
                 event = websocket.receive_json()
 
     assert event["type"] == "provisioning"
-    assert event["provisioning"]["session"]["active"] is True
+    assert event["provisioning"]["session"]["auto_update_enabled"] is True
 
 
-def test_websocket_publishes_factory_expiry_without_revision_change() -> None:
+def test_websocket_publishes_auto_update_change_without_revision_change() -> None:
     provisioner = FakeProvisioningClient()
-    provisioner.value["session"]["factory_armed"] = True
+    provisioner.value["session"]["auto_update_enabled"] = True
     with TestClient(create_app(provisioning_client=provisioner)) as client:
         with client.websocket_connect("/ws") as websocket:
             event = websocket.receive_json()
             while not (
                 event.get("type") == "provisioning"
-                and event["provisioning"]["session"]["factory_armed"] is True
+                and event["provisioning"]["session"]["auto_update_enabled"] is True
             ):
                 event = websocket.receive_json()
-            provisioner.value["session"]["factory_armed"] = False
+            provisioner.value["session"]["auto_update_enabled"] = False
             expired = websocket.receive_json()
             while expired.get("type") != "provisioning":
                 expired = websocket.receive_json()
 
     assert expired["provisioning"]["revision"] == STATUS["revision"]
-    assert expired["provisioning"]["session"]["factory_armed"] is False
+    assert expired["provisioning"]["session"]["auto_update_enabled"] is False
 
 
 def test_internal_id_authority_requires_scoped_bearer_token(
