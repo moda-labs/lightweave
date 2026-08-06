@@ -17,6 +17,7 @@ from control.group_store import GroupStore
 from control.mock_conductor import Lantern, MockConductor
 from control.ota_store import OtaArtifactStore
 from control.pattern_store import PatternStore
+from control.power_monitor import PowerMonitorStore
 from control.preview import _fire_flicker_sample
 
 
@@ -1706,6 +1707,58 @@ def test_power_monitor_settings_and_manual_full_sync() -> None:
     assert sync.status_code == 200
     state = client.get("/api/state").json()
     sample = next(item for item in state["power_monitor"]["samples"] if item["mac"] == mac)
+    assert sample["soc_percent"] == 100.0
+    assert sample["full_anchor"]["manual"] is True
+
+
+def test_power_monitor_draw_uses_recent_energy_delta_without_changing_lifetime_wh(
+    monkeypatch,
+) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(app_module.time, "time", lambda: now[0])
+    conductor = MockConductor()
+    meter = conductor._lanterns[0]
+    meter.power_wh = 15.059
+    meter.avg_w = 13.482
+    meter.power_elapsed_s = 4021
+    meter.bus_v = 13.26
+    meter.current_ma = 55.0
+    meter.power_last_report_s = 0
+    client = TestClient(create_app(conductor))
+
+    first = client.get("/api/state").json()["power_monitor"]["samples"][0]
+    assert first["avg_w"] == pytest.approx(0.7293)
+    assert first["draw_source"] == "instantaneous"
+    assert first["wh"] == 15.059
+
+    meter.power_wh = 16.868
+    meter.power_elapsed_s = 11402
+    now[0] += 7381
+    second = client.get("/api/state").json()["power_monitor"]["samples"][0]
+
+    assert second["avg_w"] == pytest.approx(0.882, abs=0.001)
+    assert second["draw_source"] == "recent_average"
+    assert second["wh"] == 16.868
+    assert second["lifetime_avg_w"] == 13.482
+
+
+def test_power_monitor_settings_and_anchor_survive_control_restart(tmp_path: Path) -> None:
+    store = PowerMonitorStore(tmp_path)
+    conductor = MockConductor()
+    mac = "8C:94:DF:8F:71:50"
+    first = TestClient(create_app(conductor, power_monitor_store=store))
+
+    assert first.post(
+        "/api/operations/power-monitor",
+        json={"battery_capacity_wh": 200.0, "full_voltage": 14.2},
+    ).status_code == 200
+    assert first.post(f"/api/lanterns/{mac}/power-sync-full").status_code == 200
+
+    restarted = TestClient(create_app(conductor, power_monitor_store=PowerMonitorStore(tmp_path)))
+    state = restarted.get("/api/state").json()["power_monitor"]
+    sample = next(item for item in state["samples"] if item["mac"] == mac)
+    assert state["battery_capacity_wh"] == 200.0
+    assert state["full_voltage"] == 14.2
     assert sample["soc_percent"] == 100.0
     assert sample["full_anchor"]["manual"] is True
 

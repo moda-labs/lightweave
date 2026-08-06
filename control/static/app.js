@@ -1160,7 +1160,10 @@ function renderPowerMonitor() {
     const classes = [sample.stale ? "warn" : "", sample.plausible === false ? "bad" : ""].filter(Boolean).join(" ");
     const socLabel = sample.soc_percent === null || sample.soc_percent === undefined ? "--" : `${Number(sample.soc_percent).toFixed(1)}%`;
     const voltage = sample.bus_v === null || sample.bus_v === undefined ? "--" : `${Number(sample.bus_v).toFixed(2)} V`;
-    const detail = `${fmt(sample.used_since_full_wh)} Wh used · ${fmt(sample.avg_w)} W avg · ${voltage}`;
+    const drawLabel = sample.draw_source === "recent_average"
+      ? `${fmt(sample.avg_w)} W recent avg`
+      : `${fmt(sample.avg_w)} W now`;
+    const detail = `${fmt(sample.used_since_full_wh)} Wh since full · ${drawLabel} · ${voltage}`;
     return `<div class="power-sample-row ${classes}">
       <span><strong>${escapeHtml(sample.label || sample.mac || "node")}</strong><small class="mono">${escapeHtml(sample.mac || "")}</small></span>
       <span>${escapeHtml(socLabel)}</span>

@@ -42,6 +42,7 @@ from .ota_store import (
     PersistentOtaInstall,
 )
 from .pattern_store import PatternStore, PatternStoreError
+from .power_monitor import PowerDrawTracker, PowerMonitorStore
 from .preview import parse_params, render_preview_data, render_preview_frames, render_preview_png, review_preview
 from .provisioning_client import (
     ProvisioningClient,
@@ -353,6 +354,7 @@ def create_app(
     settings: RemoteSettings | None = None,
     provisioning_client: ProvisioningClient | None = None,
     group_store: GroupStore | None = None,
+    power_monitor_store: PowerMonitorStore | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_remote_settings(os.environ)
     resolved_auth = auth_manager
@@ -611,11 +613,17 @@ def create_app(
     )
     app.state.ota_operation_lock = None
     app.state.calibration_previous_pattern = None
+    app.state.power_monitor_store = power_monitor_store or PowerMonitorStore(
+        data_dir / "power" if data_dir else None
+    )
+    stored_power_monitor = app.state.power_monitor_store.load()
     app.state.power_monitor_config = {
         "battery_capacity_wh": float(os.getenv("CONTROL_BATTERY_CAPACITY_WH", DEFAULT_BATTERY_CAPACITY_WH)),
         "full_voltage": float(os.getenv("CONTROL_BATTERY_FULL_VOLTAGE", DEFAULT_FULL_VOLTAGE)),
+        **stored_power_monitor.get("config", {}),
     }
-    app.state.power_full_anchors = {}
+    app.state.power_full_anchors = dict(stored_power_monitor.get("full_anchors", {}))
+    app.state.power_draw_tracker = PowerDrawTracker()
     app.state.conductor_lock = asyncio.Lock()
     app.state.ws_clients: dict[WebSocket, str] = {}
 
@@ -855,6 +863,12 @@ def create_app(
             "failed_ota": failed_ota,
         }
 
+    def save_power_monitor_state() -> None:
+        app.state.power_monitor_store.save({
+            "config": dict(app.state.power_monitor_config),
+            "full_anchors": dict(app.state.power_full_anchors),
+        })
+
     def power_monitor_summary(state: dict[str, Any]) -> dict[str, Any]:
         config = dict(app.state.power_monitor_config)
         capacity_wh = float(config.get("battery_capacity_wh") or DEFAULT_BATTERY_CAPACITY_WH)
@@ -871,8 +885,8 @@ def create_app(
         for lantern in lanterns:
             power = lantern.get("power") or {}
             wh = power.get("wh")
-            avg_w = power.get("avg_w")
-            if not isinstance(wh, (int, float)) or not isinstance(avg_w, (int, float)):
+            lifetime_avg_w = power.get("avg_w")
+            if not isinstance(wh, (int, float)):
                 continue
             mac = str(lantern.get("mac") or "")
             bus_v = power.get("bus_v")
@@ -885,17 +899,44 @@ def create_app(
                 implausible_count += 1
             full_detected = isinstance(bus_v, (int, float)) and bus_v >= full_voltage
             anchor = anchors.get(mac)
-            if full_detected:
-                anchor = {"wh": float(wh), "ts": now, "bus_v": float(bus_v)}
+            anchor_wh = float(anchor["wh"]) if anchor and isinstance(anchor.get("wh"), (int, float)) else 0.0
+            if anchor and float(wh) + 0.001 < anchor_wh:
+                anchor = {
+                    "wh": float(wh),
+                    "ts": now,
+                    "reason": "meter accumulator restarted",
+                }
                 anchors[mac] = anchor
+                save_power_monitor_state()
+            if full_detected:
+                if not anchor or float(anchor.get("wh", -1)) != float(wh) or anchor.get("full_detected") is not True:
+                    anchor = {
+                        "wh": float(wh),
+                        "ts": now,
+                        "bus_v": float(bus_v),
+                        "full_detected": True,
+                    }
+                    anchors[mac] = anchor
+                    save_power_monitor_state()
             anchor_wh = float(anchor["wh"]) if anchor and isinstance(anchor.get("wh"), (int, float)) else 0.0
             used_since_full_wh = max(0.0, float(wh) - anchor_wh)
             soc_percent = max(0.0, min(100.0, 100.0 * (1.0 - used_since_full_wh / capacity_wh)))
+            report_age = max(0.0, float(last_report_s)) if isinstance(last_report_s, (int, float)) else 0.0
+            draw = app.state.power_draw_tracker.observe(
+                mac,
+                wh=float(wh),
+                elapsed_s=power.get("elapsed_s"),
+                reported_at=now - report_age,
+                bus_v=bus_v,
+                current_ma=power.get("current_ma"),
+            )
             sample = {
                 "mac": mac,
                 "label": lantern.get("label"),
                 "wh": float(wh),
-                "avg_w": float(avg_w),
+                "avg_w": draw.watts,
+                "draw_source": draw.source,
+                "lifetime_avg_w": float(lifetime_avg_w) if isinstance(lifetime_avg_w, (int, float)) else None,
                 "used_since_full_wh": used_since_full_wh,
                 "soc_percent": soc_percent,
                 "bus_v": bus_v,
@@ -910,7 +951,8 @@ def create_app(
             samples.append(sample)
             if not stale and plausible is not False:
                 usable_wh.append(used_since_full_wh)
-                usable_w.append(float(avg_w))
+                if draw.watts is not None:
+                    usable_w.append(draw.watts)
         avg_node_wh = sum(usable_wh) / len(usable_wh) if usable_wh else None
         avg_node_w = sum(usable_w) / len(usable_w) if usable_w else None
         estimated_soc = (
@@ -920,7 +962,7 @@ def create_app(
         return {
             "battery_capacity_wh": capacity_wh,
             "full_voltage": full_voltage,
-            "full_anchor_policy": "SOC resets to 100% when a sample reports pack voltage at or above the full-voltage threshold.",
+            "full_anchor_policy": "Lifetime Wh stays on the meter; the durable full-charge anchor resets SOC to 100% without clearing accumulated energy.",
             "placed_count": placed_count,
             "sample_count": len(samples),
             "usable_sample_count": len(usable_w),
@@ -2269,6 +2311,7 @@ def create_app(
     async def update_power_monitor(request: PowerMonitorUpdate) -> dict[str, Any]:
         async with app.state.conductor_lock:
             app.state.power_monitor_config = request.model_dump()
+            save_power_monitor_state()
         await publish_state("power-monitor")
         return {"ok": True, "message": "power monitor settings changed", "power_monitor": app.state.power_monitor_config}
 
@@ -2287,6 +2330,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="lantern has no power reading")
         anchor = {"wh": float(wh), "ts": time.time(), "manual": True, "bus_v": power.get("bus_v")}
         app.state.power_full_anchors[mac] = anchor
+        save_power_monitor_state()
         await publish_state("power-sync-full")
         return {"ok": True, "message": f"{lantern.get('label') or mac} synced to 100%", "anchor": anchor}
 
