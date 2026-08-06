@@ -500,6 +500,13 @@ deferred and automatically catch up when they later check in. Operators can turn
 automatic updates off before a show; doing so prevents new background work and
 pauses an automatic transfer at its next safe command boundary.
 
+`Update.end()` also selects the newly written ESP32 partition for the next
+boot, so the conductor deliberately defers that call until its final explicit
+activation. An incidental conductor reset during performer repair therefore
+returns to the current conductor image instead of silently installing the
+staged image early. Performers finalize on their own successful END because
+their activation follows immediately and independently.
+
 The first rollout has one explicit bootstrap seam: the USB-attached conductor
 must be direct-flashed once because the previously deployed firmware cannot
 serve the new repair/probe/activation serial RPCs. Control-plane preflight

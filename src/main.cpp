@@ -1624,6 +1624,10 @@ static void otaFinalizePending() {
   if (!g_ota_finalize_pending) return;
   g_ota_finalize_pending = false;
   if (!g_ota_write_active) return;
+  if (!otaShouldFinalizeFlash(isConductor(), OTA_FINALIZE_ON_END)) {
+    g_ota_local_staged = true;
+    return;
+  }
   if (!Update.end(true)) {
     otaSetLocalStatus(OTA_PHASE_ERROR, OTA_ERR_END_FAILED,
                       g_ota_write_written, g_ota_write_crc);
@@ -1894,12 +1898,14 @@ static void handleOtaEnd(const SerialJsonCommand& cmd) {
   }
   otaBroadcastEnd();
   if (g_ota_write_active) {
-    if (!Update.end(true)) {
-      otaWriteAbort();
-      jsonError(cmd.id, "ota finalize failed");
-      return;
+    if (otaShouldFinalizeFlash(isConductor(), OTA_FINALIZE_ON_END)) {
+      if (!Update.end(true)) {
+        otaWriteAbort();
+        jsonError(cmd.id, "ota finalize failed");
+        return;
+      }
+      g_ota_write_active = false;
     }
-    g_ota_write_active = false;
     g_ota_local_staged = true;
   }
   Serial.printf("{\"id\":%lu,\"ok\":true,\"message\":\"ota image staged\","
@@ -1993,6 +1999,15 @@ static void handleOtaActivate(const SerialJsonCommand& cmd) {
     if (!g_ota_local_staged) {
       jsonError(cmd.id, "conductor firmware is not staged");
       return;
+    }
+    if (g_ota_write_active &&
+        otaShouldFinalizeFlash(isConductor(), OTA_FINALIZE_ON_ACTIVATE)) {
+      if (!Update.end(true)) {
+        otaWriteAbort();
+        jsonError(cmd.id, "conductor firmware finalize failed");
+        return;
+      }
+      g_ota_write_active = false;
     }
     jsonOk(cmd.id, "activating conductor firmware");
     Serial.flush();

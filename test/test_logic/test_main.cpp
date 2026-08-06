@@ -973,6 +973,17 @@ void test_ota_flash_settle_only_follows_complete_sector() {
   TEST_ASSERT_FALSE(otaFlashSettleDue(883200, 112));
 }
 
+void test_ota_conductor_defers_boot_partition_selection_until_activation() {
+  TEST_ASSERT_TRUE(otaShouldFinalizeFlash(
+      /*is_conductor=*/false, OTA_FINALIZE_ON_END));
+  TEST_ASSERT_FALSE(otaShouldFinalizeFlash(
+      /*is_conductor=*/false, OTA_FINALIZE_ON_ACTIVATE));
+  TEST_ASSERT_FALSE(otaShouldFinalizeFlash(
+      /*is_conductor=*/true, OTA_FINALIZE_ON_END));
+  TEST_ASSERT_TRUE(otaShouldFinalizeFlash(
+      /*is_conductor=*/true, OTA_FINALIZE_ON_ACTIVATE));
+}
+
 void test_ota_status_table_upserts_by_mac() {
   OtaStatusTable t;
   otaStatusInit(t);
@@ -2677,6 +2688,7 @@ int main(int, char**) {
   RUN_TEST(test_ota_chunk_decision_accepts_repeated_written_chunks);
   RUN_TEST(test_ota_expected_chunk_len_uses_full_chunks_until_tail);
   RUN_TEST(test_ota_flash_settle_only_follows_complete_sector);
+  RUN_TEST(test_ota_conductor_defers_boot_partition_selection_until_activation);
   RUN_TEST(test_ota_status_table_upserts_by_mac);
   RUN_TEST(test_ota_status_complete_requires_matching_fresh_complete);
   RUN_TEST(test_ota_status_slots_spread_inventory_ids_and_hash_unknown_nodes);

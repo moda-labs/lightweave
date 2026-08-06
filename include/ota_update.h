@@ -63,6 +63,22 @@ enum OtaChunkDecision : uint8_t {
   OTA_CHUNK_OVERFLOW = 3,
 };
 
+enum OtaFinalizeEvent : uint8_t {
+  OTA_FINALIZE_ON_END = 0,
+  OTA_FINALIZE_ON_ACTIVATE = 1,
+};
+
+// Update.end() selects the newly written ESP32 partition for the next boot.
+// Performers can do that as soon as their image verifies because activation
+// follows immediately. The conductor must defer it until its explicit final
+// activation so an incidental reset cannot install it ahead of the field.
+inline bool otaShouldFinalizeFlash(bool is_conductor,
+                                   OtaFinalizeEvent event) {
+  return is_conductor
+      ? event == OTA_FINALIZE_ON_ACTIVATE
+      : event == OTA_FINALIZE_ON_END;
+}
+
 inline OtaChunkDecision otaChunkDecision(uint32_t written, uint32_t size,
                                          uint32_t offset, uint32_t len) {
   if (offset < written && offset + len <= written) return OTA_CHUNK_DUPLICATE;

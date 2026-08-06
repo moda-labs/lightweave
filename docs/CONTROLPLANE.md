@@ -589,6 +589,11 @@ number while showing "Not seen".
   verification is authoritative.
   Pyserial writes use `write_timeout=2.0` and do not call unbounded `flush()`
   after every line.
+- The conductor keeps its verified writer open but does not call
+  `Update.end()` until the explicit conductor-last activation. Because
+  `Update.end()` selects the next boot partition, this prevents an unrelated
+  USB reset or crash during straggler repair from installing the conductor
+  image ahead of the performers.
 - Hardware-verified 2026-07-06 on the 3-board bench: staged `firmware.bin`
   (`860944` bytes, `6727` chunks, sha256
   `906fc37a03fa2c1afe97c1a35ba4f8153e295df0de5672232312d2fb7e9c1568`),

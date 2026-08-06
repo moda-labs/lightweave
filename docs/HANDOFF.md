@@ -44,6 +44,9 @@ The local USB-attached conductor has been direct-flashed with the new
 repair/probe/activation and shared-rebroadcast RPCs while preserving its NVS.
 Any still-legacy conductor needs that same one-time bootstrap before its first
 live OTA; preflight detects the old command set before `ota_begin`.
+The conductor now also defers `Update.end()` itself until conductor-last
+activation; merely verifying its local image no longer changes the partition
+that an incidental reset will boot.
 
 Also in this branch: **performer registration no longer forms a synchronized
 return-traffic herd.** A 17-board local field received conductor beacons but only
