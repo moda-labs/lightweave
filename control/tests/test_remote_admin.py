@@ -131,6 +131,11 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Field firmware" in index_html
     assert "field-release-pending-changes" in index_html
     assert "Full release changelog" in index_html
+    assert "Performers online" in index_html
+    assert 'id="online-performer-count"' in index_html
+    assert "Placed lights" in index_html
+    assert 'src="/static/app.js?v=2"' in index_html
+    assert 'href="/static/styles.css?v=2"' in index_html
     assert "Blackout all groups" in index_html
     assert "Restore all groups" in index_html
     assert 'data-action="turn-off-group"' in index_html
@@ -141,6 +146,44 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "event.code === 4401" in app_js
     assert 'await api("/api/auth/logout", { method: "POST" })' in app_js
     assert "JSON.stringify({password: passwordInput.value})" in login_js
+
+
+def test_online_performer_count_uses_fresh_roster_status() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function onlinePerformerCount(items)")
+    end = app_js.index("\n}\n\nfunction render()", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+{function_source}
+const lanterns = [
+  {{status: "alive"}},
+  {{status: "missing"}},
+  {{status: "alive"}},
+];
+if (onlinePerformerCount(lanterns) !== 2) process.exit(1);
+if (onlinePerformerCount(null) !== 0) process.exit(2);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_control_plane_assets_revalidate_in_browser() -> None:
+    app = create_app(MockConductor())
+    with TestClient(app) as client:
+        page = client.get("/")
+        script = client.get("/static/app.js?v=2")
+
+    assert page.status_code == 200
+    assert script.status_code == 200
+    assert page.headers["cache-control"] == "no-cache"
+    assert script.headers["cache-control"] == "no-cache"
 
 
 def test_live_state_refreshes_release_status_in_executed_javascript() -> None:

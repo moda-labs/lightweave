@@ -31,7 +31,7 @@ header { padding: 14px 16px 10px; background: #080b09; border-bottom: 1px solid 
 .topline { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 h1 { margin: 0; font-size: 19px; line-height: 1; font-weight: 650; }
 .mode { border: 1px solid rgba(84, 214, 122, .35); border-radius: 999px; color: var(--live); padding: 6px 10px; font-size: 12px; white-space: nowrap; }
-.summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .tile { min-height: 72px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 10px; }
 .label, .control-label { color: var(--dim); font-size: 11px; font-weight: 700; text-transform: uppercase; }
 .value { margin-top: 8px; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -629,7 +629,6 @@ input[type="number"], input[type="time"], input[type="text"], input[type="passwo
 @media (max-width: 760px) {
   .app { border: 0; }
   .summary { grid-template-columns: 1fr 1fr; }
-  .summary .tile:last-child { grid-column: 1 / -1; }
   .toolbar { align-items: stretch; flex-direction: column; }
   .actions, .segmented { grid-template-columns: 1fr 1fr; }
   .saved-pattern-row {

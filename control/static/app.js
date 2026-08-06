@@ -290,12 +290,17 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function onlinePerformerCount(items) {
+  return (Array.isArray(items) ? items : []).filter((item) => item.status === "alive").length;
+}
+
 function render() {
   if (!state) return;
   if (!selectedMac && lanterns().length) selectedMac = lanterns()[0].mac;
   if (!patternDraft || !isPatternDirty()) patternDraft = patternDraftFromState();
 
   $("#connection-status").textContent = state.conductor.connected ? "connected" : "disconnected";
+  $("#online-performer-count").textContent = `${onlinePerformerCount(lanterns())}`;
   $("#field-count").textContent = `${state.summary.alive} / ${state.summary.total}`;
   const activePattern = activePatternState();
   renderGroupControls();

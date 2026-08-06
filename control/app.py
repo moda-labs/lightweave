@@ -629,6 +629,8 @@ def create_app(
                 return secure_response(RedirectResponse("/login", status_code=303), scheme)
 
         response = await call_next(request)
+        if path == "/" or path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
         return secure_response(response, scheme)
 
     def ota_install_progress(install: dict[str, Any]) -> dict[str, Any]:
