@@ -135,7 +135,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=10"' in index_html
+    assert 'src="/static/app.js?v=11"' in index_html
     assert 'href="/static/styles.css?v=3"' in index_html
     assert 'data-view="power"' in index_html
     assert 'id="view-power"' in index_html
@@ -356,6 +356,7 @@ const otaInstall = {{
   target_macs: ["AA", "BB"],
   node_offsets: {{AA: 250, BB: 1000}},
   staged_macs: ["AA", "BB"],
+  activated_macs: ["BB"],
   nodes: [],
 }};
 function $(selector) {{ return selector === "#ota-nodes" ? box : null; }}
@@ -368,7 +369,7 @@ renderOtaNodes();
 if (box.hidden) process.exit(1);
 if (!box.innerHTML.includes("Uploading · 25%")) process.exit(2);
 if (!box.innerHTML.includes("250 B / 1000 B")) process.exit(3);
-if (!box.innerHTML.includes("Uploaded · 100%")) process.exit(4);
+if (!box.innerHTML.includes("Installed · 100%")) process.exit(4);
 if ((box.innerHTML.match(/aria-label="verified">✓/g) || []).length !== 1) process.exit(4);
 if ((box.innerHTML.match(/ota-node-row /g) || []).length !== 2) process.exit(5);
 """

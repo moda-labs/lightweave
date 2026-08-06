@@ -1349,6 +1349,9 @@ function renderOtaNodes() {
   }
   const totalSize = Number(otaInstall?.size || 0);
   const stagedMacs = new Set(Array.isArray(otaInstall?.staged_macs) ? otaInstall.staged_macs : []);
+  const activatedMacs = new Set(
+    Array.isArray(otaInstall?.activated_macs) ? otaInstall.activated_macs : [],
+  );
   const alreadyInstalledMacs = new Set(
     Array.isArray(otaInstall?.already_installed_macs) ? otaInstall.already_installed_macs : [],
   );
@@ -1362,7 +1365,7 @@ function renderOtaNodes() {
   };
   box.innerHTML = nodes.map((node) => {
     const failed = node.phase === "failed";
-    const alreadyInstalled = alreadyInstalledMacs.has(node.mac);
+    const alreadyInstalled = alreadyInstalledMacs.has(node.mac) || activatedMacs.has(node.mac);
     const uploaded = alreadyInstalled
       ? totalSize
       : Math.max(0, Math.min(totalSize, Number(node.offset || 0)));

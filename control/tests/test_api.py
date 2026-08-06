@@ -312,6 +312,110 @@ class PerformersMissedSharedRangeConductor(MockConductor):
         return super().ota_repair(mac, offset, data)
 
 
+class PerformersMissedBeginConductor(MockConductor):
+    """Performers ignore every chunk until a targeted begin reaches them."""
+
+    def __init__(self, missed_count: int = 2) -> None:
+        super().__init__()
+        self.target_macs = [item.mac for item in self._lanterns[:missed_count]]
+        self.restarted_macs: list[str] = []
+        self.activation_order: list[str | None] = []
+        self.operation_order: list[str] = []
+        self.rebroadcast_calls = 0
+        self.repair_calls = 0
+        self._image = b""
+
+    def _preserve_idle(self) -> dict[str, dict]:
+        return {
+            mac: dict(self._ota_nodes[mac])
+            for mac in self.target_macs
+            if self._ota_nodes[mac]["phase"] == "idle"
+        }
+
+    def _restore_idle(self, idle: dict[str, dict]) -> None:
+        for mac, node in idle.items():
+            self._ota_nodes[mac] = node
+
+    def ota_begin(self, size: int, crc32: int) -> dict:
+        ack = super().ota_begin(size, crc32)
+        for mac in self.target_macs:
+            self._ota_nodes[mac].update({
+                "phase": "idle",
+                "error": "none",
+                "offset": 0,
+                "crc32": 0,
+            })
+        return ack
+
+    def ota_chunk(self, offset: int, data: bytes) -> dict:
+        idle = self._preserve_idle()
+        ack = super().ota_chunk(offset, data)
+        self._restore_idle(idle)
+        return ack
+
+    def ota_restart(self, mac: str) -> dict:
+        self.restarted_macs.append(mac)
+        self.operation_order.append(f"restart:{mac}")
+        return super().ota_restart(mac)
+
+    def ota_rebroadcast(self, offset: int, data: bytes) -> dict:
+        self.rebroadcast_calls += 1
+        for node in self._ota_nodes.values():
+            if node["phase"] == "idle" or int(node.get("offset") or 0) != offset:
+                continue
+            node.update({
+                "phase": "writing",
+                "error": "none",
+                "offset": offset + len(data),
+                "crc32": zlib.crc32(self._image[: offset + len(data)]) & 0xFFFFFFFF,
+                "last_seen_s": 0,
+            })
+        return {"ok": True, "message": "ota repair chunk rebroadcast"}
+
+    def ota_repair(self, mac: str, offset: int, data: bytes) -> dict:
+        self.repair_calls += 1
+        node = self._ota_nodes[mac]
+        if node["phase"] == "idle":
+            return {"ok": True, "message": "idle performer ignored repair chunk"}
+        if int(node.get("offset") or 0) != offset:
+            return {"ok": False, "error": "ota repair range is invalid"}
+        node.update({
+            "phase": "writing",
+            "error": "none",
+            "offset": offset + len(data),
+            "crc32": zlib.crc32(self._image[: offset + len(data)]) & 0xFFFFFFFF,
+            "last_seen_s": 0,
+        })
+        return {"ok": True, "message": "ota repair chunk sent"}
+
+    def ota_end(self) -> dict:
+        if self._ota_write is not None:
+            self._image = bytes(self._ota_write)
+            idle = self._preserve_idle()
+            ack = super().ota_end()
+            self._restore_idle(idle)
+            return ack
+        for node in self._ota_nodes.values():
+            if (
+                int(node.get("offset") or 0) == self._ota_expected_size
+                and int(node.get("crc32") or 0) == self._ota_expected_crc32
+                and node.get("phase") not in {"staged", "activating", "complete"}
+            ):
+                node.update({"phase": "staged", "error": "none", "last_seen_s": 0})
+        return {
+            "ok": True,
+            "message": "ota image staged where complete",
+            "staged": True,
+            "nodes": list(self._ota_nodes.values()),
+        }
+
+    def ota_activate(self, mac: str | None = None) -> dict:
+        self.activation_order.append(mac)
+        if mac is not None:
+            self.operation_order.append(f"activate:{mac}")
+        return super().ota_activate(mac)
+
+
 class LegacyPerformerMissedChunkConductor(PerformerMissedChunkConductor):
     """Old performers accept repair packets only after a fresh OTA begin."""
 
@@ -1985,6 +2089,58 @@ def test_ota_install_rebroadcasts_one_shared_range_for_multiple_lagging_performe
     assert conductor.repair_calls == 0
     assert install["shared_repair_chunks"] == conductor.rebroadcast_calls
     assert install["repair_chunks"] == conductor.rebroadcast_calls
+    assert {node["phase"] for node in install["nodes"]} == {"complete"}
+
+
+def test_ota_install_restarts_performers_that_missed_begin_before_shared_replay(
+    tmp_path, managed_client
+) -> None:
+    conductor = PerformersMissedBeginConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    firmware = b"\xe9" + bytes(range(255)) * 3
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=firmware,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.restarted_macs == sorted(conductor.target_macs)
+    assert conductor.rebroadcast_calls > 0
+    assert conductor.repair_calls == 0
+    assert install["repair_restarts"] == len(conductor.target_macs)
+    assert {node["phase"] for node in install["nodes"]} == {"complete"}
+
+
+def test_ota_install_activates_verified_performer_before_repairing_straggler(
+    tmp_path, managed_client
+) -> None:
+    conductor = PerformersMissedBeginConductor(missed_count=1)
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    healthy_mac = conductor._lanterns[1].mac
+    straggler_mac = conductor.target_macs[0]
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    firmware = b"\xe9" + bytes(range(255)) * 3
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=firmware,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.operation_order.index(f"activate:{healthy_mac}") < (
+        conductor.operation_order.index(f"restart:{straggler_mac}")
+    )
+    assert conductor.activation_order[-1] is None
     assert {node["phase"] for node in install["nodes"]} == {"complete"}
 
 

@@ -566,16 +566,18 @@ number while showing "Not seen".
   `ota_end` over USB serial to the conductor. The conductor writes its own OTA
   partition, returns its frozen target MACs to the control plane, and broadcasts
   the same begin/chunk/end packets over ESP-NOW. Each
-  performer writes the image into its own OTA partition and reboots after a
-  successful size/CRC/end check. Normal chunks use callback-confirmed broadcast
+  performer writes the image into its own OTA partition. After a successful
+  size/CRC/end check, the control plane activates that performer immediately and
+  verifies its return; it does not wait for a fleet-wide staging barrier. Normal chunks use callback-confirmed broadcast
   redundancy and flash-sector pacing. At each 256-chunk checkpoint, performers
   with valid lagging prefixes share one suffix rebroadcast when possible; only a
   lone straggler falls back to per-MAC unicast. The UI polls install progress and shows chunk
   counts, elapsed time, transfer rate, and ETA independently of the start request.
   The conductor's `ota_progress` response includes its own write offset plus
   performer status rows; the API samples it every 256 chunks so the UI can show
-  node progress during the transfer, and any performer-reported failure aborts
-  before `ota_end`. Serial chunk timeouts and retryable conductor chunk NACKs
+  node progress during the transfer. A performer-reported failure restarts and
+  repairs only that performer while verified peers install independently. Serial
+  chunk timeouts and retryable conductor chunk NACKs
   are retried; duplicate already-written chunks are idempotent on both conductor
   and performers. Firmware rejects any decoded chunk whose length does not
   exactly match the expected full/tail chunk length at the current offset, so a

@@ -76,7 +76,7 @@ pio test -e native
 - Shared lantern detail sheet
 - Actions for identify, assign, forget, replace, pattern changes, and blackout
 - Shared-password sessions that protect HTTP, previews, uploads, and WebSockets
-- Durable two-phase background field OTA with checkpoint repair, a six-hour
-  retry window, explicit verified staging, one-action rolling activation, and
+- Durable background field OTA with checkpoint repair, a six-hour retry window,
+  per-performer verified staging and independent one-action activation, and
   normal show controls available throughout the transfer
 - Persistent stores rooted by `CONTROL_DATA_DIR`

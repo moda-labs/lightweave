@@ -29,8 +29,9 @@ eight. An 80 ms pause at each 4 KiB flash boundary prevents a receiver's sector
 write from swallowing the next chunk. A targeted repair uses one
 delivery-confirmed copy, because the checkpoint and final CRC barriers own
 reliability. Serial and radio recovery retry with bounded backoff for up to six
-hours. The normal UI is one operation: it stops at a full-size/full-CRC barrier,
-then starts one-at-a-time performer reboots and activates the conductor last. The
+hours. The normal UI is one operation: each performer installs and reboots as
+soon as its own full image and CRC are verified, without waiting for the rest of
+the field; laggards keep repairing independently and the conductor activates last. The
 stage-only and separate activation routes remain recovery APIs. The UI
 exposes broadcast/repair/staging/activation phases and leaves pattern, blackout,
 and power controls available. Install state is journaled beside the
@@ -72,11 +73,11 @@ reports 17 performers radio-online after directly updating two protocol-v8
 stragglers; #23 is intentionally offline. The full 18-performer acceptance run
 therefore remains pending.
 
-The 17-performer acceptance run is active on the local conductor. The optimized
-path has repeatedly crossed its 32 KiB CRC barriers and resumed broadcast; at
-the 96 KiB barrier 16 performers were already current and the lone laggard was
-being delivery-confirmed by unicast. Let the automatic run reach terminal
-install, record total duration and repair counts, and verify all performers plus
+The next scale acceptance run must exercise independent completion explicitly:
+healthy performers should install as soon as they verify, a board that missed
+`OTA_BEGIN` must receive a targeted writer restart before shared suffix replay,
+and that laggard must not hold already-verified performers behind a fleet-wide
+barrier. Record total duration and repair counts, and verify all performers plus
 the conductor return on the expected clean build. Repeat for #23 when it is
 online to close the requested 18-performer gate. The UI progress regression is
 covered: a partial row such as 224 KiB / 862 KiB cannot render 100%, and the

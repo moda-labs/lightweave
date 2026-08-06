@@ -72,6 +72,7 @@ OTA_STATUS_FRESH_S = 60
 OTA_CHECKPOINT_CHUNKS = 256
 OTA_STATUS_SETTLE_S = 0.35
 OTA_REPAIR_STALL_ROUNDS = 2
+OTA_ACTIVE_WRITER_PHASES = frozenset({"begin", "writing", "repairing"})
 OTA_ACTIVATION_POLL_S = 0.5
 OTA_POST_REBOOT_ATTEMPTS = 31
 OTA_POST_REBOOT_POLL_S = 1.0
@@ -2377,6 +2378,9 @@ def create_app(
             str(mac)
             for mac in app.state.ota_install.get("full_replay_macs") or []
         )
+        activated = set(
+            str(mac) for mac in app.state.ota_install.get("activated_macs") or []
+        )
         retry_deadline_at = float(
             app.state.ota_install.get("retry_deadline_at")
             or (time.time() + OTA_RETRY_TIMEOUT_S)
@@ -2467,7 +2471,23 @@ def create_app(
             })
             return value
 
-        async def repair_checkpoint(frontier: int) -> list[dict[str, Any]]:
+        async def restart_performer_writer(mac: str) -> None:
+            await call_until_ok("ota_restart", mac)
+            node_offsets[mac] = 0
+            repair_offsets[mac] = 0
+            repair_stalls[mac] = 0
+            app.state.ota_install.update_volatile({
+                "node_offsets": dict(sorted(node_offsets.items())),
+            })
+            app.state.ota_install.update({
+                "repair_restarts": int(
+                    app.state.ota_install.get("repair_restarts") or 0
+                ) + 1,
+            })
+
+        async def repair_checkpoint(
+            frontier: int, *, single_round: bool = False
+        ) -> list[dict[str, Any]]:
             repair_round = 0
             final_checkpoint = frontier == artifact.size
             while True:
@@ -2478,8 +2498,35 @@ def create_app(
                 current = await probe()
                 nodes = fresh_ota_nodes(current.get("nodes") or [])
                 by_mac = {str(node.get("mac")): node for node in nodes if node.get("mac")}
+
+                # A valid zero-byte checkpoint is not sufficient evidence that
+                # a performer has an open OTA writer. Boards that missed BEGIN
+                # report idle and intentionally ignore every chunk. Restart
+                # those writers first so one shared replay can advance them.
+                repair_target_macs = expected_macs - activated
+                for mac in sorted(repair_target_macs):
+                    node = by_mac.get(mac)
+                    if node is None:
+                        continue
+                    offset = int(node.get("offset") or 0)
+                    crc32 = int(node.get("crc32") or 0)
+                    phase = str(node.get("phase") or "idle")
+                    if (
+                        0 <= offset < frontier
+                        and crc32 == checkpoint_crc(offset)
+                        and phase not in OTA_ACTIVE_WRITER_PHASES
+                        and phase != "failed"
+                    ):
+                        await restart_performer_writer(mac)
+                        node.update({
+                            "phase": "begin",
+                            "error": "none",
+                            "offset": 0,
+                            "crc32": 0,
+                        })
+
                 shared_repair_offsets: dict[str, int] = {}
-                for mac in sorted(expected_macs):
+                for mac in sorted(repair_target_macs):
                     node = by_mac.get(mac)
                     if node is None:
                         continue
@@ -2516,11 +2563,13 @@ def create_app(
                             app.state.ota_install.get("shared_repair_chunks") or 0
                         ) + shared_chunks,
                     })
+                    if single_round:
+                        return nodes
                     continue
                 pending: list[str] = []
                 repaired_chunks = 0
 
-                for mac in sorted(expected_macs):
+                for mac in sorted(repair_target_macs):
                     if delivery_confirmed_offsets.get(mac) == frontier:
                         continue
                     if mac in full_replay_macs and not final_checkpoint:
@@ -2536,19 +2585,8 @@ def create_app(
                             defer_full_replay(mac)
                             continue
                         offset = 0
-                        await call_until_ok("ota_restart", mac)
-                        node_offsets[mac] = 0
-                        app.state.ota_install.update_volatile({
-                            "node_offsets": dict(sorted(node_offsets.items())),
-                        })
+                        await restart_performer_writer(mac)
                         replayed_from_zero = True
-                        repair_offsets[mac] = 0
-                        repair_stalls[mac] = 0
-                        app.state.ota_install.update({
-                            "repair_restarts": int(
-                                app.state.ota_install.get("repair_restarts") or 0
-                            ) + 1,
-                        })
                     else:
                         missing_rounds[mac] = 0
                         offset = int(node.get("offset") or 0)
@@ -2587,20 +2625,9 @@ def create_app(
                                 repair_offsets.pop(mac, None)
                                 repair_stalls.pop(mac, None)
                                 continue
-                            await call_until_ok("ota_restart", mac)
+                            await restart_performer_writer(mac)
                             offset = 0
-                            node_offsets[mac] = 0
-                            app.state.ota_install.update_volatile({
-                                "node_offsets": dict(sorted(node_offsets.items())),
-                            })
                             replayed_from_zero = True
-                            repair_offsets[mac] = 0
-                            repair_stalls[mac] = 0
-                            app.state.ota_install.update({
-                                "repair_restarts": int(
-                                    app.state.ota_install.get("repair_restarts") or 0
-                                ) + 1,
-                            })
 
                     pending.append(mac)
                     app.state.ota_install.update({
@@ -2651,6 +2678,8 @@ def create_app(
                     "nodes": nodes,
                 })
                 if not pending:
+                    return nodes
+                if single_round:
                     return nodes
                 ensure_retry_window()
                 await asyncio.sleep(min(5.0, 0.25 * repair_round))
@@ -2761,12 +2790,24 @@ def create_app(
                     "bytes_sent": offset,
                     "chunks_sent": chunks_sent,
                 })
-                if chunks_sent == artifact.chunks or chunks_sent % OTA_CHECKPOINT_CHUNKS == 0:
+                if (
+                    chunks_sent < artifact.chunks
+                    and chunks_sent % OTA_CHECKPOINT_CHUNKS == 0
+                ):
                     await repair_checkpoint(offset)
 
-            await repair_checkpoint(artifact.size)
-            app.state.ota_install.update({"phase": "staging", "repairing_macs": []})
+            # Finalize and activate every performer that already has the full
+            # image before spending time repairing stragglers. A slow board
+            # must never hold a verified board in the staged state.
+            nodes: list[dict[str, Any]] = []
             while True:
+                app.state.ota_install.update({"phase": "staging", "repairing_macs": []})
+                # Capture the final writer state before END closes the
+                # conductor's local writer. This preserves late performer
+                # failures and gives timeout retries a durable checkpoint.
+                current = await probe()
+                nodes = fresh_ota_nodes(current.get("nodes") or [])
+                app.state.ota_install.update({"nodes": nodes})
                 await call_until_ok("ota_end")
                 current = await probe()
                 nodes = fresh_ota_nodes(current.get("nodes") or [])
@@ -2779,10 +2820,47 @@ def create_app(
                     and int(by_mac[mac].get("offset") or 0) == artifact.size
                     and int(by_mac[mac].get("crc32") or 0) == artifact.crc32
                 }
-                app.state.ota_install.update({"nodes": nodes, "staged_macs": sorted(staged_macs)})
-                if staged_macs == expected_macs:
+                app.state.ota_install.update({
+                    "nodes": nodes,
+                    "staged_macs": sorted(staged_macs | activated),
+                    "activated_macs": sorted(activated),
+                })
+
+                if activate:
+                    for mac in sorted(staged_macs - activated):
+                        while mac not in activated:
+                            ensure_retry_window()
+                            app.state.ota_install.update({
+                                "phase": "activating",
+                                "active_mac": mac,
+                                "activated_macs": sorted(activated),
+                            })
+                            await call_until_ok("ota_activate", mac)
+                            current = await progress()
+                            node = next(
+                                (
+                                    item
+                                    for item in current.get("nodes") or []
+                                    if str(item.get("mac")) == mac
+                                ),
+                                None,
+                            )
+                            if node and node.get("phase") == "complete":
+                                activated.add(mac)
+                                break
+                            await asyncio.sleep(OTA_ACTIVATION_POLL_S)
+                        app.state.ota_install.update({
+                            "activated_macs": sorted(activated),
+                            "nodes": fresh_ota_nodes(
+                                (await progress()).get("nodes") or []
+                            ),
+                        })
+                    if activated == expected_macs:
+                        break
+                elif (staged_macs | activated) == expected_macs:
                     break
-                await repair_checkpoint(artifact.size)
+
+                await repair_checkpoint(artifact.size, single_round=True)
 
             if not activate:
                 staged_at = time.time()
@@ -2812,37 +2890,6 @@ def create_app(
                     "message": ack["message"],
                     "artifact": artifact.as_dict(),
                 }
-
-            activated = set(str(mac) for mac in app.state.ota_install.get("activated_macs") or [])
-            for mac in sorted(expected_macs):
-                while mac not in activated:
-                    current = await progress()
-                    node = next(
-                        (item for item in current.get("nodes") or [] if str(item.get("mac")) == mac),
-                        None,
-                    )
-                    if node and node.get("phase") == "complete":
-                        activated.add(mac)
-                        break
-                    app.state.ota_install.update({
-                        "phase": "activating",
-                        "active_mac": mac,
-                        "activated_macs": sorted(activated),
-                    })
-                    await call_until_ok("ota_activate", mac)
-                    current = await progress()
-                    node = next(
-                        (item for item in current.get("nodes") or [] if str(item.get("mac")) == mac),
-                        None,
-                    )
-                    if node and node.get("phase") == "complete":
-                        activated.add(mac)
-                        break
-                    await asyncio.sleep(OTA_ACTIVATION_POLL_S)
-                app.state.ota_install.update({
-                    "activated_macs": sorted(activated),
-                    "nodes": fresh_ota_nodes((await progress()).get("nodes") or []),
-                })
 
             app.state.ota_install.update({"phase": "activating-conductor", "active_mac": None})
             try:
@@ -3105,8 +3152,9 @@ def create_app(
 
     @app.post("/api/operations/ota-install", status_code=202)
     async def install_ota_artifact() -> dict[str, Any]:
-        # Normal operator path: verify the full frozen cohort, then roll through
-        # activation automatically. Stage-only remains available to API clients.
+        # Normal operator path: activate each performer as soon as that board is
+        # verified, keep repairing stragglers, and activate the conductor last.
+        # Stage-only remains available to API clients.
         return await start_ota_install(activate=True)
 
     @app.post("/api/operations/ota-stage", status_code=202)

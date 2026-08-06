@@ -486,14 +486,16 @@ the durable six-hour retry deadline. Starting staging again after that deadline
 opens a fresh window and reconciles the conductor plus each performer from its
 verified offset/CRC. Duplicate chunks and finalization are idempotent.
 
-Performers finalize into a full-size/full-CRC staged state before any rolling
-activation begins. The normal UI and automatic reconciler use one operation:
-upload, verify, activate performers one at a time, verify each re-registration,
-then activate the conductor last. The stage-only and explicit-activation API
+Each performer finalizes independently and activates as soon as its own image is
+full-size/full-CRC staged; there is no fleet-wide verification barrier. The
+normal UI and automatic reconciler use one operation: upload, verify, activate
+each ready performer, verify its re-registration, keep repairing laggards, then
+activate the conductor last. One performer's failure therefore cannot block a
+different verified performer. The stage-only and explicit-activation API
 routes remain recovery tools. The durable install journal and checksum-pinned
 artifact survive browser disconnects and service restarts. The control plane
 recognizes already-installed members of a partially migrated legacy cohort so
-they cannot deadlock a resumed staging barrier. Offline inventory rows are
+they cannot deadlock a resumed update. Offline inventory rows are
 deferred and automatically catch up when they later check in. Operators can turn
 automatic updates off before a show; doing so prevents new background work and
 pauses an automatic transfer at its next safe command boundary.

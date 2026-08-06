@@ -147,6 +147,7 @@ class MockConductor:
     ota_started_at: float | None = None
     ota_installed_crc32: int | None = None
     _ota_write: bytearray | None = field(default=None, init=False, repr=False)
+    _ota_image: bytes = field(default=b"", init=False, repr=False)
     _ota_expected_size: int = field(default=0, init=False, repr=False)
     _ota_expected_crc32: int = field(default=0, init=False, repr=False)
     _ota_nodes: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
@@ -421,6 +422,7 @@ class MockConductor:
         if self.ota_started_at is None:
             self.ota_started_at = _now()
         self._ota_write = bytearray()
+        self._ota_image = b""
         self._ota_expected_size = size
         self._ota_expected_crc32 = crc32
         self._ota_nodes = {
@@ -481,7 +483,8 @@ class MockConductor:
             return {"ok": True, "message": "ota repair chunk already written"}
         if offset != current:
             return {"ok": False, "error": "ota repair range is invalid"}
-        prefix = bytes(self._ota_write or b"")[: offset + len(data)]
+        image = bytes(self._ota_write) if self._ota_write is not None else self._ota_image
+        prefix = image[: offset + len(data)]
         node.update({
             "phase": "writing",
             "error": "none",
@@ -494,9 +497,10 @@ class MockConductor:
     def ota_rebroadcast(self, offset: int, data: bytes) -> dict[str, Any]:
         if self._ota_write is None and self.ota_installed_crc32 is None:
             return {"ok": False, "error": "ota write is not active"}
-        if offset + len(data) > len(self._ota_write or b""):
+        image = bytes(self._ota_write) if self._ota_write is not None else self._ota_image
+        if offset + len(data) > len(image):
             return {"ok": False, "error": "ota rebroadcast range is invalid"}
-        prefix = bytes(self._ota_write or b"")
+        prefix = image
         for node in self._ota_nodes.values():
             current = int(node.get("offset") or 0)
             if offset < current and offset + len(data) <= current:
@@ -525,6 +529,17 @@ class MockConductor:
     def ota_end(self) -> dict[str, Any]:
         if self._ota_write is None:
             if self.ota_installed_crc32 == self._ota_expected_crc32 and self._ota_expected_size > 0:
+                for node in self._ota_nodes.values():
+                    if (
+                        int(node.get("offset") or 0) == self._ota_expected_size
+                        and int(node.get("crc32") or 0) == self._ota_expected_crc32
+                        and node.get("phase") not in {"staged", "activating", "complete"}
+                    ):
+                        node.update({
+                            "phase": "staged",
+                            "error": "none",
+                            "last_seen_s": 0,
+                        })
                 return {
                     "ok": True,
                     "message": "ota image already staged",
@@ -543,7 +558,10 @@ class MockConductor:
                 node.update({"phase": "failed", "error": "crc mismatch", "offset": len(self._ota_write or b"")})
             return {"ok": False, "error": "ota crc mismatch"}
         self.ota_installed_crc32 = self._ota_expected_crc32
+        self._ota_image = bytes(self._ota_write)
         for node in self._ota_nodes.values():
+            if node.get("phase") == "failed":
+                continue
             if int(node.get("offset") or 0) != self._ota_expected_size:
                 node.update({"phase": "repairing", "error": "image incomplete"})
                 continue
