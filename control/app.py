@@ -149,6 +149,11 @@ def ota_reconcile_needed(
     )
 
 
+def ota_monotonic_offset(current: int, reported: int, image_size: int) -> int:
+    """Keep passive status reports from undoing saved per-board progress."""
+    return max(max(0, min(current, image_size)), max(0, min(reported, image_size)))
+
+
 class PatternUpdate(BaseModel):
     pattern: str = Field(min_length=1)
     brightness: int = Field(ge=0, le=192)
@@ -2354,10 +2359,17 @@ def create_app(
             str(mac)
             for mac in app.state.ota_install.get("delivery_confirmed_macs") or []
         }
+        previously_activated_macs = {
+            str(mac)
+            for mac in app.state.ota_install.get("activated_macs") or []
+        }
+        installed_evidence_macs = legacy_delivery_macs | previously_activated_macs
+        artifact_has_identity = bool(artifact.version and artifact.commit)
         installed_macs = {
             mac
-            for mac, item in all_lanterns.items()
-            if mac in legacy_delivery_macs and already_installed(item)
+            for mac, item in expected_lanterns.items()
+            if (artifact_has_identity or mac in installed_evidence_macs)
+            and already_installed(item)
         }
         missing_rounds: dict[str, int] = {}
         repair_offsets: dict[str, int] = {}
@@ -2378,9 +2390,9 @@ def create_app(
             str(mac)
             for mac in app.state.ota_install.get("full_replay_macs") or []
         )
-        activated = set(
-            str(mac) for mac in app.state.ota_install.get("activated_macs") or []
-        )
+        # Activation evidence only survives a fresh job when the live firmware
+        # identity still proves that the same artifact is installed.
+        activated = set(installed_macs)
         retry_deadline_at = float(
             app.state.ota_install.get("retry_deadline_at")
             or (time.time() + OTA_RETRY_TIMEOUT_S)
@@ -2465,7 +2477,9 @@ def create_app(
                 mac = str(node.get("mac") or "")
                 offset = int(node.get("offset") or 0)
                 if mac:
-                    node_offsets[mac] = max(0, min(offset, artifact.size))
+                    node_offsets[mac] = ota_monotonic_offset(
+                        node_offsets.get(mac, 0), offset, artifact.size
+                    )
             app.state.ota_install.update_volatile({
                 "node_offsets": dict(sorted(node_offsets.items())),
             })
@@ -2742,6 +2756,11 @@ def create_app(
                     "nodes": nodes,
                     "target_macs": sorted(installed_macs),
                     "target_count": len(installed_macs),
+                    "already_installed_macs": sorted(installed_macs),
+                    "activated_macs": sorted(installed_macs),
+                    "node_offsets": {
+                        mac: artifact.size for mac in sorted(installed_macs)
+                    },
                     "completed_at": time.time(),
                     "installed_artifact_sha256": artifact.sha256,
                 })
@@ -3046,6 +3065,43 @@ def create_app(
                 or artifact.sha256,
                 "installed_artifact_sha256": app.state.ota_install.get("installed_artifact_sha256"),
             }
+            same_artifact_retry = (
+                app.state.ota_install.get("sha256") == artifact.sha256
+            )
+            preserved_activated = (
+                sorted(
+                    str(mac)
+                    for mac in app.state.ota_install.get("activated_macs") or []
+                )
+                if same_artifact_retry
+                else []
+            )
+            preserved_delivery = (
+                sorted(
+                    str(mac)
+                    for mac in app.state.ota_install.get("delivery_confirmed_macs") or []
+                )
+                if same_artifact_retry
+                else []
+            )
+            previous_delivery_offsets = dict(
+                app.state.ota_install.get("delivery_confirmed_offsets") or {}
+            )
+            preserved_delivery_offsets = {
+                mac: max(
+                    0,
+                    min(int(previous_delivery_offsets.get(mac) or 0), artifact.size),
+                )
+                for mac in preserved_delivery
+            }
+            preserved_evidence = set(preserved_activated) | set(preserved_delivery)
+            previous_offsets = dict(app.state.ota_install.get("node_offsets") or {})
+            preserved_offsets = {
+                mac: max(0, min(int(previous_offsets.get(mac) or 0), artifact.size))
+                for mac in preserved_evidence
+            }
+            for mac in preserved_activated:
+                preserved_offsets[mac] = artifact.size
             job = {
                 **persistent_settings,
                 "running": True,
@@ -3064,6 +3120,12 @@ def create_app(
                 "retry_timeout_s": OTA_RETRY_TIMEOUT_S,
                 "retry_deadline_at": started_at + OTA_RETRY_TIMEOUT_S,
                 "automatic": automatic,
+                "activated_macs": preserved_activated,
+                "delivery_confirmed_macs": preserved_delivery,
+                "delivery_confirmed_offsets": dict(
+                    sorted(preserved_delivery_offsets.items())
+                ),
+                "node_offsets": dict(sorted(preserved_offsets.items())),
             }
             if resuming:
                 app.state.ota_install.update(job)

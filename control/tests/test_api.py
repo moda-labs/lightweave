@@ -12,7 +12,7 @@ import pytest
 
 import control.app as app_module
 from control.adapters import SerialProtocolError
-from control.app import create_app, ota_reconcile_needed
+from control.app import create_app, ota_monotonic_offset, ota_reconcile_needed
 from control.group_store import GroupStore
 from control.mock_conductor import Lantern, MockConductor
 from control.ota_store import OtaArtifactStore
@@ -123,6 +123,12 @@ def test_release_api_reuses_latest_state_snapshot(managed_client) -> None:
     client.app.state.latest_snapshot_at = 0
     assert client.get("/api/releases").status_code == 200
     assert conductor.snapshot_calls == 2
+
+
+def test_ota_status_offset_only_moves_backward_after_an_explicit_restart() -> None:
+    assert ota_monotonic_offset(884_000, 0, 884_000) == 884_000
+    assert ota_monotonic_offset(458_752, 462_848, 884_000) == 462_848
+    assert ota_monotonic_offset(458_752, 900_000, 884_000) == 884_000
 
 
 def test_gitops_deployment_record_stages_verified_firmware_on_startup(
@@ -2142,6 +2148,86 @@ def test_ota_install_activates_verified_performer_before_repairing_straggler(
     )
     assert conductor.activation_order[-1] is None
     assert {node["phase"] for node in install["nodes"]} == {"complete"}
+
+
+def test_ota_retry_keeps_successful_board_installed_after_its_writer_resets(
+    tmp_path, managed_client
+) -> None:
+    conductor = RecordingActivationConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "missing"
+    performer = conductor._lanterns[0]
+    performer.status = "alive"
+    store = OtaArtifactStore(tmp_path)
+    app = create_app(conductor, ota_store=store)
+    client = managed_client(app)
+    artifact = client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9" + bytes(range(255)) * 2,
+        headers={"content-type": "application/octet-stream"},
+    ).json()["artifact"]
+    app.state.ota_install.update({
+        "sha256": artifact["sha256"],
+        "phase": "failed",
+        "activated_macs": [performer.mac],
+        "node_offsets": {performer.mac: artifact["size"]},
+    })
+    conductor._ota_nodes[performer.mac] = {
+        "mac": performer.mac,
+        "phase": "idle",
+        "error": "none",
+        "offset": 0,
+        "crc32": 0,
+        "last_seen_s": 0,
+    }
+
+    accepted = client.post("/api/operations/ota-install")
+    install = wait_for_ota_terminal(client)
+
+    assert accepted.status_code == 202
+    assert install["complete"] is True
+    assert install["already_installed_macs"] == [performer.mac]
+    assert install["activated_macs"] == [performer.mac]
+    assert install["node_offsets"] == {performer.mac: artifact["size"]}
+    assert install["nodes"] == [{
+        "mac": performer.mac,
+        "phase": "complete",
+        "error": "none",
+        "offset": artifact["size"],
+        "crc32": artifact["crc32"],
+        "source": "live_firmware_identity",
+    }]
+    assert conductor.activation_order == []
+
+
+def test_ota_install_skips_live_board_matching_trusted_artifact_identity(
+    tmp_path, managed_client
+) -> None:
+    conductor = RecordingActivationConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "missing"
+    performer = conductor._lanterns[0]
+    performer.status = "alive"
+    firmware = performer.firmware or {}
+    build = str(firmware["build_label"])
+    store = OtaArtifactStore(tmp_path)
+    artifact = store.stage(
+        "firmware.bin",
+        b"\xe9" + bytes(range(255)) * 2,
+        source="release",
+        version=str(firmware["version"]),
+        commit=build + "0" * (40 - len(build)),
+    )
+    client = managed_client(create_app(conductor, ota_store=store))
+
+    accepted = client.post("/api/operations/ota-install")
+    install = wait_for_ota_terminal(client)
+
+    assert accepted.status_code == 202
+    assert install["complete"] is True
+    assert install["already_installed_macs"] == [performer.mac]
+    assert install["node_offsets"] == {performer.mac: artifact["size"]}
+    assert conductor.activation_order == []
 
 
 def test_ota_install_restarts_legacy_performer_when_gap_repair_stalls(
