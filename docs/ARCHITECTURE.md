@@ -467,18 +467,24 @@ same-protocol mixed-firmware recovery that restored performer #1 from
 chunks. Each performer reports its exact written offset and prefix CRC in a
 deterministic status slot; the control plane unicasts only its missing suffix.
 CRC divergence or a fatal flash error restarts and replays only that performer.
-Transient serial failures retry with bounded backoff until success. Duplicate
-chunks and finalization are idempotent.
+Transient serial and radio failures retry with bounded backoff until success or
+the durable six-hour retry deadline. Starting staging again after that deadline
+opens a fresh window and reconciles the conductor plus each performer from its
+verified offset/CRC. Duplicate chunks and finalization are idempotent.
 
-Performers finalize into a staged state without rebooting. Once the complete
-online cohort is staged, the control plane activates performers one at a time,
-verifies each re-registration, then activates the conductor last. This bounds the
-visible disruption to one lantern at a time. The durable install journal and
-checksum-pinned artifact survive browser disconnects and service restarts; a
-restarted control plane reconciles the conductor's live offset/CRC and resumes.
-An operator may pause between commands and later continue from the verified
-prefix. Offline inventory rows are deferred rather than blocking the online
-field.
+Performers finalize into a staged state without rebooting. The normal operator
+path stops at an explicit full-size/full-CRC `N/N staged` barrier. A separate
+**Activate staged field** action then activates performers one at a time, verifies
+each re-registration, and activates the conductor last; one click starts the
+whole rolling activation while bounding visible disruption to one lantern at a
+time. The legacy `/api/operations/ota-install` endpoint retains its one-shot
+stage-and-activate behavior for compatible automation, but the browser UI never
+uses it. The durable install journal and checksum-pinned artifact survive browser
+disconnects and service restarts; a restarted control plane reconciles the
+conductor's live offset/CRC, resumes the requested phase, and never turns a
+stage-only job into automatic activation. An operator may pause between commands
+and later continue from the verified prefix. Offline inventory rows are deferred
+rather than blocking the online field.
 
 The first rollout has one explicit bootstrap seam: the USB-attached conductor
 must be direct-flashed once because the previously deployed firmware cannot

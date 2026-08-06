@@ -346,7 +346,7 @@
                 <div class="ops-value" id="ota-timeout">Automatic</div>
               </div>
             </div>
-            <p id="ota-blockers">Updates run in the background while the field remains operational. Each performer restarts only after its image is verified.</p>
+            <p id="ota-blockers">Firmware stages in the background while the field remains operational. The field restarts only after an explicit activation.</p>
             <div class="ops-form-grid">
               <label class="control-label" for="ota-file">Firmware binary
                 <input id="ota-file" type="file" accept=".bin,application/octet-stream">
@@ -364,7 +364,8 @@
             <div class="ota-nodes" id="ota-nodes" hidden></div>
             <div class="button-row">
               <button data-action="stage-ota-artifact" disabled>Stage firmware</button>
-              <button class="primary" data-action="install-ota" disabled>Update online field</button>
+              <button class="primary" data-action="stage-ota" disabled>Stage on online field</button>
+              <button class="primary" data-action="activate-ota" disabled>Activate staged field</button>
               <button data-action="pause-ota" hidden>Pause update</button>
             </div>
           </div>

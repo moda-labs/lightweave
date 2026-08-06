@@ -73,6 +73,7 @@ OTA_REPAIR_STALL_ROUNDS = 2
 OTA_ACTIVATION_POLL_S = 0.5
 OTA_POST_REBOOT_ATTEMPTS = 31
 OTA_POST_REBOOT_POLL_S = 1.0
+OTA_RETRY_TIMEOUT_S = 6 * 60 * 60
 
 
 class OtaPauseRequested(Exception):
@@ -388,7 +389,17 @@ def create_app(
                             app.state.ota_operation_lock = acquire_ota_operation_lock()
                             state = await conductor_call("snapshot")
                             app.state.ota_reserved = True
-                            await ota_install_worker(artifact, state, resume=True)
+                            await ota_install_worker(
+                                artifact,
+                                state,
+                                resume=True,
+                                activate=bool(
+                                    app.state.ota_install.get(
+                                        "activate_after_stage",
+                                        True,
+                                    )
+                                ),
+                            )
                             return
                         except (HTTPException, SerialProtocolError) as error:
                             app.state.ota_reserved = False
@@ -2172,6 +2183,7 @@ def create_app(
         data: bytes,
         *,
         resume: bool = False,
+        activate: bool = True,
     ) -> dict[str, Any]:
         all_lanterns = {
             str(item.get("mac")): item
@@ -2193,6 +2205,25 @@ def create_app(
             str(mac)
             for mac in app.state.ota_install.get("full_replay_macs") or []
         )
+        retry_deadline_at = float(
+            app.state.ota_install.get("retry_deadline_at")
+            or (time.time() + OTA_RETRY_TIMEOUT_S)
+        )
+        if not app.state.ota_install.get("retry_deadline_at"):
+            app.state.ota_install.update({
+                "retry_timeout_s": OTA_RETRY_TIMEOUT_S,
+                "retry_deadline_at": retry_deadline_at,
+            })
+
+        def ensure_retry_window() -> None:
+            if time.time() >= retry_deadline_at:
+                raise HTTPException(
+                    status_code=504,
+                    detail=(
+                        "OTA retry window expired before every target verified; "
+                        "start staging again to resume from verified device progress"
+                    ),
+                )
 
         def defer_full_replay(mac: str) -> None:
             full_replay_macs.add(mac)
@@ -2208,6 +2239,7 @@ def create_app(
         async def call_until_ok(method: str, *args: Any) -> dict[str, Any]:
             attempt = 0
             while True:
+                ensure_retry_window()
                 attempt += 1
                 try:
                     ack = await call(method, *args)
@@ -2216,6 +2248,7 @@ def create_app(
                         "phase": "waiting",
                         "last_retry": {"attempt": attempt, "error": str(error)},
                     })
+                    ensure_retry_window()
                     await asyncio.sleep(min(5.0, 0.25 * attempt))
                     continue
                 if ack.get("ok") is True:
@@ -2229,6 +2262,7 @@ def create_app(
                         "phase": "waiting",
                         "last_retry": {"attempt": attempt, "error": error},
                     })
+                    ensure_retry_window()
                     await asyncio.sleep(min(5.0, 0.25 * attempt))
                     continue
                 raise HTTPException(
@@ -2256,6 +2290,7 @@ def create_app(
             repair_round = 0
             final_checkpoint = frontier == artifact.size
             while True:
+                ensure_retry_window()
                 repair_round += 1
                 if repair_round % 10 == 1:
                     await call_until_ok("set_ota_mode", True)
@@ -2385,6 +2420,7 @@ def create_app(
                 })
                 if not pending:
                     return nodes
+                ensure_retry_window()
                 await asyncio.sleep(min(5.0, 0.25 * repair_round))
 
         try:
@@ -2408,6 +2444,13 @@ def create_app(
             else:
                 reported_targets = {str(mac) for mac in current.get("targets") or []}
                 expected_macs = reported_targets or expected_macs or set(expected_lanterns)
+                if staged:
+                    # A finalized writer may report no active byte prefix even
+                    # though its image and performer cohort are fully staged.
+                    # The per-node full-size/full-CRC barrier below is the
+                    # authority; do not try to append chunk zero to a closed
+                    # writer while resuming for explicit activation.
+                    written = artifact.size
 
             if not expected_macs:
                 raise HTTPException(status_code=400, detail="no performers online")
@@ -2469,6 +2512,33 @@ def create_app(
                 if staged_macs == expected_macs:
                     break
                 await repair_checkpoint(artifact.size)
+
+            if not activate:
+                app.state.ota_install.update({
+                    "running": False,
+                    "complete": False,
+                    "phase": "ready-to-activate",
+                    "error": None,
+                    "message": "firmware staged and verified; activation is waiting for the operator",
+                    "nodes": nodes,
+                    "staged_at": time.time(),
+                })
+                ack = {
+                    "ok": True,
+                    "message": "firmware staged and verified; ready to activate",
+                    "nodes": nodes,
+                }
+                await publish({
+                    "type": "ack",
+                    "action": "ota-stage",
+                    "artifact": artifact.as_dict(),
+                    "ack": ack,
+                })
+                return {
+                    "ok": True,
+                    "message": ack["message"],
+                    "artifact": artifact.as_dict(),
+                }
 
             activated = set(str(mac) for mac in app.state.ota_install.get("activated_macs") or [])
             for mac in sorted(expected_macs):
@@ -2555,10 +2625,17 @@ def create_app(
         state: dict[str, Any],
         *,
         resume: bool = False,
+        activate: bool = True,
     ) -> None:
         try:
             data = await asyncio.to_thread(app.state.ota_store.read_verified, artifact)
-            await perform_ota_install(artifact, state, data, resume=resume)
+            await perform_ota_install(
+                artifact,
+                state,
+                data,
+                resume=resume,
+                activate=activate,
+            )
         except asyncio.CancelledError:
             raise
         except OtaPauseRequested:
@@ -2587,8 +2664,7 @@ def create_app(
             app.state.ota_reserved = False
             release_ota_operation_lock()
 
-    @app.post("/api/operations/ota-install", status_code=202)
-    async def install_ota_artifact() -> dict[str, Any]:
+    async def start_ota_install(*, activate: bool) -> dict[str, Any]:
         async with app.state.ota_start_lock:
             if app.state.ota_reserved:
                 raise HTTPException(status_code=409, detail="OTA install already running")
@@ -2627,11 +2703,13 @@ def create_app(
             app.state.ota_operation_lock = operation_lock
             app.state.ota_pause_requested = False
 
+            started_at = time.time()
             app.state.ota_install.reset({
                 "running": True,
                 "complete": False,
                 "error": None,
                 "phase": "starting",
+                "activate_after_stage": activate,
                 "filename": artifact.filename,
                 "sha256": artifact.sha256,
                 "size": artifact.size,
@@ -2639,13 +2717,76 @@ def create_app(
                 "bytes_sent": 0,
                 "chunks_sent": 0,
                 "chunks_total": artifact.chunks,
-                "started_at": time.time(),
+                "started_at": started_at,
+                "retry_timeout_s": OTA_RETRY_TIMEOUT_S,
+                "retry_deadline_at": started_at + OTA_RETRY_TIMEOUT_S,
             })
-            task = asyncio.create_task(ota_install_worker(artifact, state))
+            task = asyncio.create_task(
+                ota_install_worker(artifact, state, activate=activate)
+            )
             app.state.ota_task = task
             return {
                 "ok": True,
-                "message": "OTA install accepted",
+                "message": "OTA install accepted" if activate else "OTA staging accepted",
+                "install": ota_install_progress(app.state.ota_install),
+            }
+
+    @app.post("/api/operations/ota-install", status_code=202)
+    async def install_ota_artifact() -> dict[str, Any]:
+        # Backward-compatible one-shot API. The operator UI uses ota-stage plus
+        # ota-activate so distribution and field reboot are separate decisions.
+        return await start_ota_install(activate=True)
+
+    @app.post("/api/operations/ota-stage", status_code=202)
+    async def stage_ota_artifact_on_field() -> dict[str, Any]:
+        return await start_ota_install(activate=False)
+
+    @app.post("/api/operations/ota-activate", status_code=202)
+    async def activate_staged_ota() -> dict[str, Any]:
+        async with app.state.ota_start_lock:
+            if app.state.ota_reserved:
+                raise HTTPException(status_code=409, detail="OTA operation already running")
+            if app.state.ota_install.get("phase") != "ready-to-activate":
+                raise HTTPException(status_code=409, detail="no verified staged field is ready to activate")
+            artifact = app.state.ota_store.artifact()
+            if artifact is None:
+                raise HTTPException(status_code=400, detail="no firmware staged")
+            if (
+                int(app.state.ota_install.get("size") or 0) != artifact.size
+                or int(app.state.ota_install.get("crc32") or 0) != artifact.crc32
+            ):
+                raise HTTPException(status_code=409, detail="staged field does not match the current artifact")
+            operation_lock = acquire_ota_operation_lock()
+            try:
+                async with app.state.conductor_lock:
+                    state = await asyncio.to_thread(app.state.conductor.snapshot)
+                    app.state.ota_reserved = True
+            except Exception as error:
+                if operation_lock is not None:
+                    operation_lock.close()
+                if isinstance(error, SerialProtocolError):
+                    raise HTTPException(status_code=503, detail=str(error)) from error
+                raise
+
+            app.state.ota_operation_lock = operation_lock
+            app.state.ota_pause_requested = False
+            app.state.ota_install.update({
+                "running": True,
+                "complete": False,
+                "phase": "preparing-activation",
+                "activate_after_stage": True,
+                "error": None,
+                "activation_requested_at": time.time(),
+                "retry_timeout_s": OTA_RETRY_TIMEOUT_S,
+                "retry_deadline_at": time.time() + OTA_RETRY_TIMEOUT_S,
+            })
+            task = asyncio.create_task(
+                ota_install_worker(artifact, state, resume=True, activate=True)
+            )
+            app.state.ota_task = task
+            return {
+                "ok": True,
+                "message": "OTA activation accepted",
                 "install": ota_install_progress(app.state.ota_install),
             }
 

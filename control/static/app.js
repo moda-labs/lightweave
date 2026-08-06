@@ -1134,6 +1134,7 @@ function renderOta() {
   const active = Boolean(ota.enabled);
   const ready = Boolean(ota.ready);
   const installing = Boolean(otaInstall?.running);
+  const readyToActivate = otaInstall?.phase === "ready-to-activate";
   const expected = Number(ota.expected ?? state?.summary?.total ?? 0);
   const readyCount = Number(ota.ready_count ?? 0);
   const deferred = Number(ota.deferred ?? ota.missing ?? Math.max(0, expected - readyCount));
@@ -1142,7 +1143,8 @@ function renderOta() {
   $("#ota-mode").className = `chip ${active ? "sync" : ""}`;
   $("#ota-readiness").textContent = `${readyCount} online · ${deferred} deferred`;
   $("#ota-readiness").className = `ops-value ${ready ? "ok" : "warn"}`;
-  $("#ota-timeout").textContent = "Until verified";
+  const retryTimeout = Number(otaInstall?.retry_timeout_s || 6 * 60 * 60);
+  $("#ota-timeout").textContent = `${formatDuration(retryTimeout)} retry window`;
   $("#ota-timeout").className = "ops-value ok";
   $("#ota-blockers").textContent = blockers.length
     ? `Blocked: ${blockers.join(", ")}.`
@@ -1155,11 +1157,12 @@ function renderOta() {
   renderOtaProgress();
   renderOtaNodes();
   const fileInput = $("#ota-file");
-  fileInput.disabled = installing;
-  $('[data-action="stage-ota-artifact"]').disabled = installing || !fileInput?.files?.length;
-  const installButton = $('[data-action="install-ota"]');
-  installButton.textContent = otaInstall?.phase === "paused" ? "Resume update" : "Update online field";
-  installButton.disabled = installing || !otaReadyForInstall() || !otaArtifact;
+  fileInput.disabled = installing || readyToActivate;
+  $('[data-action="stage-ota-artifact"]').disabled = installing || readyToActivate || !fileInput?.files?.length;
+  const stageButton = $('[data-action="stage-ota"]');
+  stageButton.textContent = otaInstall?.phase === "paused" ? "Resume staging" : "Stage on online field";
+  stageButton.disabled = installing || readyToActivate || !otaReadyForInstall() || !otaArtifact;
+  $('[data-action="activate-ota"]').disabled = installing || !readyToActivate;
   $('[data-action="pause-ota"]').hidden = !installing;
 }
 
@@ -1184,7 +1187,8 @@ function renderOtaProgress() {
   const targetCount = Number(otaInstall?.target_count || 0);
   const deferredCount = Number(otaInstall?.deferred_count || 0);
   const paused = otaInstall?.phase === "paused";
-  const show = running || complete || error || paused;
+  const readyToActivate = otaInstall?.phase === "ready-to-activate";
+  const show = running || complete || error || paused || readyToActivate;
   progress.hidden = !show;
   if (!show) return;
 
@@ -1194,6 +1198,10 @@ function renderOtaProgress() {
   const size = Number(otaInstall?.size || 0);
   const percent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 0;
   const phase = String(otaInstall?.phase || "starting");
+  const repairChunks = Number(otaInstall?.repair_chunks || 0);
+  const activated = Array.isArray(otaInstall?.activated_macs) ? otaInstall.activated_macs.length : 0;
+  const staged = Array.isArray(otaInstall?.staged_macs) ? otaInstall.staged_macs.length : 0;
+  const activeMac = otaInstall?.active_mac;
   const phaseLabels = {
     starting: "Preparing firmware update",
     waiting: "Retrying conductor connection",
@@ -1201,15 +1209,19 @@ function renderOtaProgress() {
     repairing: "Repairing missed chunks",
     staging: "Verifying staged images",
     staged: "Firmware staged on performers",
+    "ready-to-activate": "Firmware verified and ready to activate",
+    "preparing-activation": "Rechecking staged firmware",
     activating: "Restarting performers one at a time",
     "activating-conductor": "Restarting the conductor",
     paused: "Firmware update paused",
   };
   const label = error
     ? `Install failed: ${error}`
-    : complete
-      ? `Install complete for ${targetCount || "online"} performer${targetCount === 1 ? "" : "s"}; ${deferredCount} deferred`
-      : phaseLabels[phase] || `Installing ${otaInstall?.filename || "firmware"}`;
+    : readyToActivate
+      ? `${staged || targetCount} / ${targetCount} performers staged · ready to activate`
+      : complete
+        ? `Install complete for ${targetCount || "online"} performer${targetCount === 1 ? "" : "s"}; ${deferredCount} deferred`
+        : phaseLabels[phase] || `Installing ${otaInstall?.filename || "firmware"}`;
   $("#ota-progress-label").textContent = label;
   $("#ota-progress-count").textContent = total > 0
     ? `${sent} / ${total} chunks`
@@ -1218,10 +1230,6 @@ function renderOtaProgress() {
   const eta = Number(otaInstall?.eta_s || 0);
   const rate = Number(otaInstall?.bytes_per_s || 0);
   const rateLabel = rate > 0 ? `${formatBytes(rate)}/s` : "--";
-  const repairChunks = Number(otaInstall?.repair_chunks || 0);
-  const activated = Array.isArray(otaInstall?.activated_macs) ? otaInstall.activated_macs.length : 0;
-  const staged = Array.isArray(otaInstall?.staged_macs) ? otaInstall.staged_macs.length : 0;
-  const activeMac = otaInstall?.active_mac;
   const activity = phase === "repairing"
     ? `${repairChunks} repair chunks sent`
     : phase === "activating"
@@ -1231,14 +1239,16 @@ function renderOtaProgress() {
         : `ETA ${formatDuration(eta)} · ${rateLabel}`;
   $("#ota-progress-meta").textContent = running
     ? `Elapsed ${formatDuration(elapsed)} · ${activity}`
-    : complete
-      ? `Completed in ${formatDuration(elapsed)} · average ${rateLabel}`
-      : error
-        ? `Stopped after ${formatDuration(elapsed)}`
-        : "";
-  $("#ota-progress-fill").style.width = `${complete ? 100 : percent}%`;
+    : readyToActivate
+      ? `Staged in ${formatDuration(elapsed)} · activation is waiting for the operator`
+      : complete
+        ? `Completed in ${formatDuration(elapsed)} · average ${rateLabel}`
+        : error
+          ? `Stopped after ${formatDuration(elapsed)}`
+          : "";
+  $("#ota-progress-fill").style.width = `${complete || readyToActivate ? 100 : percent}%`;
   progress.classList.toggle("bad", Boolean(error));
-  progress.classList.toggle("ok", complete && !error);
+  progress.classList.toggle("ok", (complete || readyToActivate) && !error);
 }
 
 function renderOtaNodes() {
@@ -2383,9 +2393,9 @@ async function runAction(action) {
       toast(ack.message);
       return;
     }
-    if (action === "install-ota") {
+    if (action === "stage-ota") {
       if (!otaArtifact || !otaReadyForInstall()) return;
-      if (!confirm("Update every online performer? The field stays live; each performer will briefly restart only after its firmware is verified.")) return;
+      if (!confirm("Stage firmware on every online performer? The field stays live and no board will restart until you explicitly activate it.")) return;
       otaInstall = {
         running: true,
         complete: false,
@@ -2397,12 +2407,24 @@ async function runAction(action) {
         chunks_total: otaArtifact.chunks,
       };
       renderOta();
-      const ack = await api("/api/operations/ota-install", { method: "POST" });
+      const ack = await api("/api/operations/ota-stage", { method: "POST" });
       otaInstall = ack.install;
       renderOta();
       await pollOtaInstallUntilTerminal();
       if (otaInstall.error) throw new Error(otaInstall.error);
-      toast("OTA install complete");
+      toast(otaInstall.phase === "ready-to-activate" ? "Firmware staged; ready to activate" : "OTA staging stopped");
+      await refresh();
+      return;
+    }
+    if (action === "activate-ota") {
+      if (otaInstall?.phase !== "ready-to-activate") return;
+      if (!confirm("Activate the verified staged firmware now? Staged performers and the conductor will restart.")) return;
+      const ack = await api("/api/operations/ota-activate", { method: "POST" });
+      otaInstall = ack.install;
+      renderOta();
+      await pollOtaInstallUntilTerminal();
+      if (otaInstall.error) throw new Error(otaInstall.error);
+      toast("OTA activation complete");
       await refresh();
       return;
     }

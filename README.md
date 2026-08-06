@@ -40,8 +40,9 @@ independent group pattern control, reversible blackout, runtime power policy, an
 the local web control plane. The control plane now includes a same-host flashing
 station for automatically detecting and provisioning up to ten USB-connected
 FireBeetles in parallel, with permanent performer-ID assignment for physical
-labeling. Field-wide OTA runs in the background with checkpoint repair, durable
-resume, and rolling per-performer activation; the earlier transfer path has
+labeling. Field-wide OTA runs in the background with checkpoint repair, a
+six-hour retry window, durable resume, an explicit full-field staged barrier,
+and one-action rolling per-performer activation; the earlier transfer path has
 completed successful bench installs, including same-protocol mixed-firmware
 recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
 the exact latest state and the pending scale hardware gate.
@@ -164,8 +165,9 @@ batch notes.
 - Radio duty cycling, CPU light-sleep support, and schedule-driven deep-sleep
   policy.
 - Optional INA228 energy telemetry from reference nodes back to the conductor.
-- Background field-wide OTA over serial and ESP-NOW with per-performer repair,
-  durable resume, and rolling activation while show controls remain available.
+- Two-phase background field-wide OTA over serial and ESP-NOW with per-performer
+  repair, a durable six-hour retry window, an explicit verified staging barrier,
+  and one-action rolling activation while show controls remain available.
 - Human serial CLI plus newline-delimited JSON serial protocol for the web UI.
 
 ### Control plane
@@ -177,7 +179,7 @@ batch notes.
 - Node actions: identify, move/place, assign group, forget, and replace.
 - Per-group pattern controls with conductor acknowledgements before writes are
   treated as saved.
-- Operations view for firmware consistency, recovery state, OTA staging/install,
+- Operations view for firmware consistency, recovery state, OTA staging/activation,
   runtime power policy, and sparse power monitoring. Battery capacity defaults
   to the 384 Wh KUNLUN pack and can be changed in the UI; metered nodes can
   be manually synced to 100% after charging.

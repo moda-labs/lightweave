@@ -119,7 +119,8 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Firmware installation is finishing." in app_js
     assert "async function pollOtaInstallUntilTerminal()" in app_js
     assert "pollOtaInstallWhile" not in app_js
-    assert 'const ack = await api("/api/operations/ota-install"' in app_js
+    assert 'const ack = await api("/api/operations/ota-stage"' in app_js
+    assert 'const ack = await api("/api/operations/ota-activate"' in app_js
     assert "await pollOtaInstallUntilTerminal()" in app_js
     assert "wifi.allow_changes !== false" in app_js
     assert 'releaseInfo = await api("/api/releases")' in app_js
@@ -186,7 +187,8 @@ def test_ota_ui_keeps_field_controls_live_and_locks_only_firmware_inputs() -> No
     assert "[data-pattern]" not in function_source
     assert "fileInput.disabled = installing" in function_source
     assert "stage-ota-artifact" in function_source
-    assert "install-ota" in function_source
+    assert "stage-ota" in function_source
+    assert "activate-ota" in function_source
     assert "pause-ota" in function_source
 
 

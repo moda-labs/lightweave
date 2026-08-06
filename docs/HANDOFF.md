@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**163 pass**) is green; **387 control tests** are green; all three
+(**163 pass**) is green; **391 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest in this branch (2026-08-05): **field OTA is reliable and remains live
@@ -16,16 +16,19 @@ during operation.** The conductor continues normal beacons and the control plane
 interleaves show commands between 128-byte OTA chunks. Every 256 chunks it probes
 the frozen online cohort; a performer that missed data receives its suffix by
 MAC-addressed unicast, while a bad prefix CRC or fatal flash error restarts only
-that board. Serial timeouts retry until they recover. Images stage without an
-immediate reboot, performers activate and re-register one at a time, and the
-conductor activates last. The UI exposes broadcast/repair/staging/activation
-phases and leaves pattern, blackout, and power controls available. Install state
-is journaled beside the checksum-pinned artifact, resumes after control-service
-restart, and supports an explicit pause/resume from the verified conductor
-prefix. Native logic, control API fault injection, rolling-order, persistence,
-and canonical field-build checks are green. Full 53-board hardware verification
-is still required before calling the scale behavior field-proven. Because the
-currently deployed conductor does not yet have the new repair/probe/activation
+that board. Serial and radio recovery retry with bounded backoff for up to six
+hours. The operator UI is explicitly two-phase: **Stage on online field** stops
+only after every frozen target has a full-size/full-CRC staged image, then
+**Activate staged field** starts the one-at-a-time performer reboots and activates
+the conductor last. No board reboots merely because staging completed. The UI
+exposes broadcast/repair/staging/activation phases and leaves pattern, blackout,
+and power controls available. Install state is journaled beside the
+checksum-pinned artifact, resumes after control-service restart without changing
+stage-only intent, and supports an explicit pause/resume from the verified
+conductor prefix. Native logic, control API fault injection, rolling-order,
+persistence, and canonical field-build checks are green. Full 53-board hardware
+verification is still required before calling the scale behavior field-proven.
+Because the currently deployed conductor does not yet have the new repair/probe/activation
 serial RPCs, direct-flash that one USB-attached conductor from this release
 before the first live OTA. The control plane detects the legacy command set and
 fails before `ota_begin`, with this instruction, rather than leaving a partial
@@ -46,12 +49,12 @@ both conductor and #23 on clean `v0.7.1` build `a0e58bfc`. Ten performers later
 registered on that build, but the requested 18-performer full-field acceptance
 run is still pending because only ten were radio-visible locally.
 
-The next product step is to split the current automatic activation tail from
-background staging: retain durable per-board progress for a long bounded retry
-window, stop at an explicit `N/N staged` barrier, then expose one operator action
-that activates the staged cohort together. The transport and CRC foundation is
-hardware-proven; the current branch still activates automatically once its
-frozen cohort is staged.
+The next OTA step is the requested 18-performer acceptance run. Do not start it
+until the conductor reports all 18 performers radio-online; it currently reports
+only ten. Stage the clean artifact, record total duration and repairs, verify the
+terminal `18 / 18 staged` state causes zero activation commands, exercise a live
+pattern while staged, then use the single activation action and verify all 18
+performers plus the conductor return on the expected clean build.
 
 Latest on main (2026-08-04): **the multi-board USB flashing station is built.**
 The control plane now has a Flashing screen backed by
@@ -459,11 +462,12 @@ Priority order:
    the same Lantern Locations flow and add a fixture if it exposes a new failure
    mode. Temporal code scoring should ignore constant extra lights; only extra
    lights blinking with the same planned code should remain ambiguous.
-7. **Hardware-verify scale-hardened OTA:** use the 53-board inventory to confirm
-   checkpoint status collection, targeted suffix repair, rolling activation, and
-   live show control under real ESP-NOW contention. The implementation is
-   code-complete and fault-injection tested; record total duration, repair counts,
-   and any nodes requiring a targeted restart.
+7. **Hardware-verify scale-hardened OTA:** first run the requested 18-performer
+   field once all 18 are radio-visible. Confirm checkpoint status collection,
+   targeted suffix repair, the explicit `18 / 18 staged` barrier with no reboots,
+   one-action rolling activation, and live show control under real ESP-NOW
+   contention. Record total duration, repair counts, and any nodes requiring a
+   targeted restart. Later expand the same proof across the 53-board inventory.
 8. **Optional negative OTA-safety check:** if useful, intentionally flash one
    performer with a same-v8 but different build and confirm it appears as
    `Firmware mismatch`; restore all boards to one build afterward. Any

@@ -238,6 +238,11 @@ class DroppingOtaChunkConductor(MockConductor):
         return super().ota_chunk(offset, data)
 
 
+class AlwaysTimingOutOtaProgressConductor(MockConductor):
+    def ota_progress(self) -> dict:
+        raise SerialProtocolError("timeout waiting for ota_progress ack")
+
+
 class PerformerMissedChunkConductor(MockConductor):
     def __init__(self) -> None:
         super().__init__()
@@ -315,6 +320,19 @@ class RecordingActivationConductor(MockConductor):
     def ota_activate(self, mac: str | None = None) -> dict:
         self.activation_order.append(mac)
         return super().ota_activate(mac)
+
+
+class BlockingRecordingActivationConductor(RecordingActivationConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ota_started = threading.Event()
+        self.ota_release = threading.Event()
+
+    def ota_begin(self, size: int, crc32: int) -> dict:
+        self.ota_started.set()
+        if not self.ota_release.wait(timeout=10):
+            raise RuntimeError("test OTA release timed out")
+        return super().ota_begin(size, crc32)
 
 
 class PausableOtaConductor(MockConductor):
@@ -1878,6 +1896,81 @@ def test_ota_install_activates_performers_one_at_a_time_then_conductor(
     assert conductor.activation_order[-1] is None
 
 
+def test_ota_stage_waits_for_explicit_activation(
+    tmp_path, managed_client
+) -> None:
+    conductor = RecordingActivationConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9" + bytes(range(255)) * 2,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    staged_response = client.post("/api/operations/ota-stage")
+    staged = wait_for_ota_terminal(client)
+
+    assert staged_response.status_code == 202
+    assert staged_response.json()["message"] == "OTA staging accepted"
+    assert staged["running"] is False
+    assert staged["complete"] is False
+    assert staged["phase"] == "ready-to-activate"
+    assert staged["activate_after_stage"] is False
+    assert staged["staged_macs"] == sorted(staged["target_macs"])
+    assert conductor.activation_order == []
+
+    activation_response = client.post("/api/operations/ota-activate")
+    activated = wait_for_ota_terminal(client)
+
+    assert activation_response.status_code == 202
+    assert activation_response.json()["message"] == "OTA activation accepted"
+    assert activated["complete"] is True
+    assert activated["activate_after_stage"] is True
+    assert conductor.activation_order[:-1] == sorted(activated["target_macs"])
+    assert conductor.activation_order[-1] is None
+
+
+def test_ota_activate_rejects_when_no_verified_stage_is_waiting(
+    tmp_path, managed_client
+) -> None:
+    client = managed_client(
+        create_app(MockConductor(), ota_store=OtaArtifactStore(tmp_path))
+    )
+
+    response = client.post("/api/operations/ota-activate")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "no verified staged field is ready to activate"
+
+
+def test_ota_staging_stops_after_the_long_retry_window(
+    tmp_path, managed_client, monkeypatch
+) -> None:
+    monkeypatch.setattr(app_module, "OTA_RETRY_TIMEOUT_S", 0.05)
+    conductor = AlwaysTimingOutOtaProgressConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=b"\xe9\x00",
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-stage").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is False
+    assert install["retry_timeout_s"] == 0.05
+    assert install["last_retry"]["error"] == "timeout waiting for ota_progress ack"
+    assert install["error"] == (
+        "OTA retry window expired before every target verified; "
+        "start staging again to resume from verified device progress"
+    )
+
+
 def test_ota_install_verifies_identity_when_conductor_activation_ack_is_lost(
     tmp_path, managed_client
 ) -> None:
@@ -2514,6 +2607,35 @@ def test_ota_graceful_shutdown_persists_running_job_for_resume(tmp_path) -> None
         resumed = wait_for_ota_terminal(client)
         assert resumed["complete"] is True
         assert resumed["message"] == "firmware updated across the online field"
+
+
+def test_ota_stage_resume_after_service_restart_does_not_autoactivate(tmp_path) -> None:
+    conductor = BlockingRecordingActivationConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    conductor.set_ota_mode(True)
+    app = create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+
+    with TestClient(app) as client:
+        client.put(
+            "/api/operations/ota-artifact?filename=firmware.bin",
+            content=b"\xe9\x00",
+            headers={"content-type": "application/octet-stream"},
+        )
+        assert client.post("/api/operations/ota-stage").status_code == 202
+        assert conductor.ota_started.wait(timeout=2)
+        threading.Timer(0.1, conductor.ota_release.set).start()
+
+    assert app.state.ota_install["running"] is True
+    assert app.state.ota_install["activate_after_stage"] is False
+
+    restarted = create_app(conductor, ota_store=OtaArtifactStore(tmp_path))
+    with TestClient(restarted) as client:
+        resumed = wait_for_ota_terminal(client)
+
+    assert resumed["phase"] == "ready-to-activate"
+    assert resumed["complete"] is False
+    assert conductor.activation_order == []
 
 
 def test_ota_abrupt_restart_uses_persisted_artifact_and_live_recovery(
