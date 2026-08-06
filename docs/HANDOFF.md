@@ -8,31 +8,41 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**168 pass**) is green; **394 control tests** are green; all three
+(**169 pass**) is green; **401 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest in this branch (2026-08-05): **field OTA is reliable and remains live
-during operation.** The conductor continues normal beacons and the control plane
+Latest in this branch (2026-08-05): **the running control-plane release and field
+firmware are managed as one release by default.** Its checksum-verified companion
+firmware becomes the desired image automatically; online mismatches and old
+performers that check in later are reconciled without another operator action.
+The Firmware tab has a persistent **Automatic updates** show-safety toggle,
+enabled by default. Turning it off prevents new automatic updates and requests a
+safe pause of an active automatic transfer; explicit manual recovery remains
+available. Known-release selection and manual binary upload are collapsed under
+Development / recovery. The conductor continues normal beacons and the control plane
 interleaves show commands between 128-byte OTA chunks. Every 256 chunks it probes
-the frozen online cohort; a performer that missed data receives its suffix by
-MAC-addressed unicast, while a bad prefix CRC or fatal flash error restarts only
-that board. Serial and radio recovery retry with bounded backoff for up to six
-hours. The operator UI is explicitly two-phase: **Stage on online field** stops
-only after every frozen target has a full-size/full-CRC staged image, then
-**Activate staged field** starts the one-at-a-time performer reboots and activates
-the conductor last. No board reboots merely because staging completed. The UI
+the frozen online cohort. Two or more valid laggards receive one shared suffix
+rebroadcast; a lone laggard receives MAC-addressed unicast, while a bad prefix
+CRC or fatal flash error restarts only that board. Normal chunks use six
+callback-confirmed radio transmissions; control packets and shared repairs use
+eight. An 80 ms pause at each 4 KiB flash boundary prevents a receiver's sector
+write from swallowing the next chunk. A targeted repair uses one
+delivery-confirmed copy, because the checkpoint and final CRC barriers own
+reliability. Serial and radio recovery retry with bounded backoff for up to six
+hours. The normal UI is one operation: it stops at a full-size/full-CRC barrier,
+then starts one-at-a-time performer reboots and activates the conductor last. The
+stage-only and separate activation routes remain recovery APIs. The UI
 exposes broadcast/repair/staging/activation phases and leaves pattern, blackout,
 and power controls available. Install state is journaled beside the
 checksum-pinned artifact, resumes after control-service restart without changing
-stage-only intent, and supports an explicit pause/resume from the verified
+requested intent, and supports an explicit pause/resume from the verified
 conductor prefix. Native logic, control API fault injection, rolling-order,
 persistence, and canonical field-build checks are green. Full 53-board hardware
 verification is still required before calling the scale behavior field-proven.
-Because the currently deployed conductor does not yet have the new repair/probe/activation
-serial RPCs, direct-flash that one USB-attached conductor from this release
-before the first live OTA. The control plane detects the legacy command set and
-fails before `ota_begin`, with this instruction, rather than leaving a partial
-transfer. Performers may transition through OTA after that one conductor update.
+The local USB-attached conductor has been direct-flashed with the new
+repair/probe/activation and shared-rebroadcast RPCs while preserving its NVS.
+Any still-legacy conductor needs that same one-time bootstrap before its first
+live OTA; preflight detects the old command set before `ota_begin`.
 
 Also in this branch: **performer registration no longer forms a synchronized
 return-traffic herd.** A 17-board local field received conductor beacons but only
@@ -62,21 +72,25 @@ reports 17 performers radio-online after directly updating two protocol-v8
 stragglers; #23 is intentionally offline. The full 18-performer acceptance run
 therefore remains pending.
 
-The next OTA step is a 17-performer acceptance run after directly flashing the
-USB-attached conductor with the new scheduler build. Stage the clean artifact,
-record total duration and repairs, verify the terminal `17 / 17 staged` state
-causes zero activation commands, exercise a live pattern while staged, then use
-the single activation action and verify all 17 performers plus the conductor
-return on the expected clean build. Repeat for #23 when it is online to close the
-requested 18-performer gate.
+The 17-performer acceptance run is active on the local conductor. The optimized
+path has repeatedly crossed its 32 KiB CRC barriers and resumed broadcast; at
+the 96 KiB barrier 16 performers were already current and the lone laggard was
+being delivery-confirmed by unicast. Let the automatic run reach terminal
+install, record total duration and repair counts, and verify all performers plus
+the conductor return on the expected clean build. Repeat for #23 when it is
+online to close the requested 18-performer gate. The UI progress regression is
+covered: a partial row such as 224 KiB / 862 KiB cannot render 100%, and the
+green check requires full size plus the expected CRC (or confirmed installed
+firmware).
 
 Latest on main (2026-08-04): **the multi-board USB flashing station is built.**
-The control plane now has a Flashing screen backed by
-a separate same-host provisioner daemon. It detects FireBeetles on macOS and
-Linux, binds USB topology to numbered powered-hub slots, flashes five boards in
-parallel by default (configurable to ten), streams per-board stages over the
-existing WebSocket, supports retry, and persists slot configuration plus the
-last 100 jobs. Factory erase requires an explicit 15-minute session. Production
+The control plane now has a Firmware screen backed by a separate same-host
+provisioner daemon. It detects FireBeetles on macOS and Linux and automatically
+queues every connected board, flashing five boards in parallel by default
+(configurable to ten). Optional USB-topology slot labels persist across port-name
+shuffles and service restarts. Progress streams over the existing WebSocket and
+retry is available for connected failures. Factory erase requires an explicit
+15-minute session. Production
 mode fails closed on blank boards, the configured conductor path is excluded
 before probing, and role verification refuses any conductor. Permanent-ID
 reservation now goes through the conductor's canonical NVS inventory before the
@@ -394,8 +408,8 @@ or verify from post-reboot field firmware consistency. Performers also report
 begin/writing/complete OTA status so future failures expose their offset/error.
 Previous latest: **12 V power monitoring is code-complete in firmware/API/UI** —
 the conductor retains the latest `MSG_POWER` sample per metered MAC and exposes it
-in `/api/state`; Operations estimates field draw and per-node SOC from sparse
-INA228 reference nodes, defaulting to the 384 Wh KUNLUN model 1230 pack. SOC is based
+in `/api/state`; the dedicated Power tab shows top-line SOC and average draw per
+metered performer, defaulting to the 384 Wh KUNLUN model 1230 pack. SOC is based
 on Wh used since a full-charge anchor, not a voltage curve: voltage at or above
 the configured full threshold (default 14.4 V) can auto-anchor a metered node to
 100%, and each metered node has a manual **Sync to 100%** button after charging.
@@ -730,7 +744,7 @@ conductor self-log on the tested scheduler). What landed:
 - Control plane (2026-07-06): `/api/state` includes `power_monitor` summary from
   sparse reference-node samples. Operators can configure battery capacity
   (default 384 Wh) and the full-voltage threshold (default 14.4 V), see
-  estimated field draw / node SOC in Operations, and click **Sync to 100%** per
+  average draw per metered performer and top-line SOC in Power, and click **Sync to 100%** per
   metered node after charging to anchor that node's current Wh as full.
 
 **INA228 bench checklist (Monday, chip in hand):** (1) wire VCC→3V3, GND→GND,
@@ -907,8 +921,8 @@ energy/charge accumulation, wired in series between battery+ and the buck
 input on 1–2 reference nodes. It replaces one-off ET900/DMM snapshots with a
 true continuous Wh integral per night, and instrumented performers report
 accumulated Wh to the conductor over ESP-NOW (`MSG_POWER`) so every overnight
-sync test doubles as a fleet-wide power audit. The Operations UI rolls those
-sparse samples into an estimated field draw and SOC using the configured battery
+sync test doubles as a fleet-wide power audit. The Power UI rolls those sparse
+samples into average performer draw and SOC using the configured battery
 capacity, with auto/manual full-charge anchoring. Awaiting the physical chip
 (Monday's order) for hardware verification — the bench checklist is in the
 section above.

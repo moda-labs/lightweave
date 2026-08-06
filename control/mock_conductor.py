@@ -491,6 +491,27 @@ class MockConductor:
         })
         return {"ok": True, "message": "ota repair chunk sent"}
 
+    def ota_rebroadcast(self, offset: int, data: bytes) -> dict[str, Any]:
+        if self._ota_write is None and self.ota_installed_crc32 is None:
+            return {"ok": False, "error": "ota write is not active"}
+        if offset + len(data) > len(self._ota_write or b""):
+            return {"ok": False, "error": "ota rebroadcast range is invalid"}
+        prefix = bytes(self._ota_write or b"")
+        for node in self._ota_nodes.values():
+            current = int(node.get("offset") or 0)
+            if offset < current and offset + len(data) <= current:
+                continue
+            if offset != current:
+                continue
+            node.update({
+                "phase": "writing",
+                "error": "none",
+                "offset": offset + len(data),
+                "crc32": zlib.crc32(prefix[: offset + len(data)]) & 0xFFFFFFFF,
+                "last_seen_s": 0,
+            })
+        return {"ok": True, "message": "ota repair chunk rebroadcast"}
+
     def ota_restart(self, mac: str) -> dict[str, Any]:
         node = self._ota_nodes.get(mac)
         if node is None:

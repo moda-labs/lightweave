@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Do Baskets Dream Control Plane</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2">
+  <link rel="stylesheet" href="/static/styles.css?v=3">
 </head>
 <body>
   <div class="app">
@@ -21,6 +21,7 @@
         <div class="tile"><div class="label">Placed lights</div><div class="value" id="field-count">-- / --</div></div>
         <div class="tile"><div class="label">Active pattern</div><div class="value" id="show-name">--</div></div>
         <div class="tile"><div class="label">Needs attention</div><div class="value warn" id="attention-count">--</div></div>
+        <div class="tile"><div class="label">Battery SOC</div><div class="value" id="power-monitor-soc">--</div></div>
       </section>
     </header>
 
@@ -28,8 +29,9 @@
       <button class="active" data-view="map">Map</button>
       <button data-view="table">Node List</button>
       <button data-view="show">Patterns</button>
-      <button data-view="flash">Flashing</button>
+      <button data-view="power">Power</button>
       <button data-view="ops">Operations</button>
+      <button data-view="flash">Firmware</button>
     </nav>
 
     <main>
@@ -164,10 +166,66 @@
 
       <section class="view" id="view-flash">
         <div class="panel flash-station">
+          <div class="ops-section">
+            <div class="section-head">
+              <h3>OTA firmware update</h3>
+              <div class="chip" id="ota-mode">--</div>
+            </div>
+            <div class="ota-readiness">
+              <div>
+                <div class="label">Readiness</div>
+                <div class="ops-value" id="ota-readiness">--</div>
+              </div>
+              <div>
+                <div class="label">Retry policy</div>
+                <div class="ops-value" id="ota-timeout">Automatic</div>
+              </div>
+            </div>
+            <p id="ota-blockers">The companion firmware is kept in sync automatically as performers check in.</p>
+            <div class="ota-target">
+              <div>
+                <div class="label">Desired field firmware</div>
+                <div class="ops-value" id="ota-target">Companion firmware</div>
+                <div class="ota-target-note" id="ota-auto-note">Old performers update automatically when they check in.</div>
+              </div>
+              <button class="sync" data-action="toggle-ota-auto-update">Automatic updates: On</button>
+            </div>
+            <div class="ota-artifact" id="ota-artifact">Looking for this control plane's companion firmware.</div>
+            <div class="button-row">
+              <button class="primary" data-action="install-ota" disabled>Update field now</button>
+              <button data-action="pause-ota" hidden>Pause upload</button>
+            </div>
+            <div class="ota-progress" id="ota-progress" hidden>
+              <div class="ota-progress-head">
+                <span id="ota-progress-label">Uploading firmware to field</span>
+                <span id="ota-progress-count" class="mono">0 / 0</span>
+              </div>
+              <div class="ota-progress-meta" id="ota-progress-meta"></div>
+              <div class="ota-progress-bar" aria-hidden="true"><div id="ota-progress-fill"></div></div>
+            </div>
+            <div class="ota-nodes" id="ota-nodes" hidden></div>
+            <details class="advanced-panel ota-advanced">
+              <summary>Development / recovery</summary>
+              <div class="ops-form-grid">
+                <label class="control-label" for="ota-release-select">Release override
+                  <select id="ota-release-select"></select>
+                </label>
+              </div>
+              <div class="button-row">
+                <button data-action="select-ota-release">Use selected release</button>
+              </div>
+              <div class="ops-form-grid">
+                <label class="control-label" for="ota-file">Manual firmware binary
+                  <input id="ota-file" type="file" accept=".bin,application/octet-stream">
+                </label>
+              </div>
+              <p>Selecting a file uploads it immediately and makes it the desired field firmware.</p>
+            </details>
+          </div>
           <div class="section-head">
             <div>
-              <h2>Flashing Station</h2>
-              <p>Plug performers into a calibrated powered USB hub. Each physical slot keeps its identity while up to ten boards flash in parallel.</p>
+              <h2>USB Flashing Station</h2>
+              <p>Start the station, then plug performers into a powered USB hub. Boards appear automatically and flash as workers become available.</p>
             </div>
             <div class="chip" id="provisioning-status">checking</div>
           </div>
@@ -179,7 +237,7 @@
           </div>
 
           <div class="flash-controls">
-            <label class="control-label" for="provisioning-workers">Parallel boards
+            <label class="control-label" for="provisioning-workers">Simultaneous flashes
               <select id="provisioning-workers">
                 <option value="1">1</option>
                 <option value="3">3</option>
@@ -189,14 +247,58 @@
               </select>
             </label>
             <div class="button-row">
-              <button class="primary" data-action="start-provisioning">Arm registered performers</button>
-              <button class="danger" data-action="start-factory-provisioning">Arm new boards for 15 minutes</button>
-              <button data-action="stop-provisioning">Stop accepting boards</button>
+              <button class="primary" data-action="start-provisioning">Start station</button>
+              <button class="danger" data-action="start-factory-provisioning">Start for new boards (15 min)</button>
+              <button data-action="stop-provisioning">Stop station</button>
             </div>
           </div>
 
           <div class="flash-notice" id="provisioning-notice">The local USB provisioner is connecting.</div>
           <div class="flash-jobs" id="provisioning-jobs"></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-power">
+        <div class="panel power-panel">
+          <div class="power-heading">
+            <div>
+              <h2>Power</h2>
+              <p>Live battery health from the performers equipped with power meters.</p>
+            </div>
+          </div>
+          <div class="ops-grid power-summary-grid">
+            <div>
+              <div class="label">Average draw per performer</div>
+              <div class="ops-value" id="power-monitor-draw">--</div>
+            </div>
+            <div>
+              <div class="label">Reporting performers</div>
+              <div class="ops-value" id="power-monitor-status">--</div>
+            </div>
+          </div>
+          <div class="ops-section">
+            <div class="section-head">
+              <h3>Performer meters</h3>
+            </div>
+            <div class="power-samples" id="power-samples"></div>
+          </div>
+          <div class="ops-section">
+            <div class="section-head">
+              <h3>Battery model</h3>
+            </div>
+            <p>SOC is estimated from average energy used since each reporting meter was last synchronized at full.</p>
+            <div class="ops-form-grid">
+              <label class="control-label" for="battery-capacity">Battery capacity (Wh)
+                <input id="battery-capacity" type="number" min="1" max="10000" step="0.1">
+              </label>
+              <label class="control-label" for="battery-full-voltage">Full voltage threshold
+                <input id="battery-full-voltage" type="number" min="1" max="100" step="0.1">
+              </label>
+            </div>
+            <div class="button-row">
+              <button class="primary" data-action="save-power-monitor">Save monitor settings</button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -302,72 +404,6 @@
               <button class="primary" data-action="join-wifi">Join network</button>
               <button data-action="start-hotspot">Start Basketnet</button>
               <button data-action="refresh-wifi">Refresh Wi-Fi</button>
-            </div>
-          </div>
-          <div class="ops-section">
-            <div class="section-head">
-              <h3>Power monitoring</h3>
-              <div class="chip" id="power-monitor-status">--</div>
-            </div>
-            <div class="ops-grid">
-              <div>
-                <div class="label">Estimated SOC</div>
-                <div class="ops-value" id="power-monitor-soc">--</div>
-              </div>
-              <div>
-                <div class="label">Estimated field draw</div>
-                <div class="ops-value" id="power-monitor-draw">--</div>
-              </div>
-            </div>
-            <div class="ops-form-grid">
-              <label class="control-label" for="battery-capacity">Battery capacity (Wh)
-                <input id="battery-capacity" type="number" min="1" max="10000" step="0.1">
-              </label>
-              <label class="control-label" for="battery-full-voltage">Full voltage threshold
-                <input id="battery-full-voltage" type="number" min="1" max="100" step="0.1">
-              </label>
-            </div>
-            <div class="power-samples" id="power-samples"></div>
-            <div class="button-row">
-              <button class="primary" data-action="save-power-monitor">Save monitor settings</button>
-            </div>
-          </div>
-          <div class="ops-section">
-            <div class="section-head">
-              <h3>Firmware update</h3>
-              <div class="chip" id="ota-mode">--</div>
-            </div>
-            <div class="ota-readiness">
-              <div>
-                <div class="label">Readiness</div>
-                <div class="ops-value" id="ota-readiness">--</div>
-              </div>
-              <div>
-                <div class="label">Retry policy</div>
-                <div class="ops-value" id="ota-timeout">Automatic</div>
-              </div>
-            </div>
-            <p id="ota-blockers">Firmware stages in the background while the field remains operational. The field restarts only after an explicit activation.</p>
-            <div class="ops-form-grid">
-              <label class="control-label" for="ota-file">Firmware binary
-                <input id="ota-file" type="file" accept=".bin,application/octet-stream">
-              </label>
-            </div>
-            <div class="ota-artifact" id="ota-artifact">No firmware staged.</div>
-            <div class="ota-progress" id="ota-progress" hidden>
-              <div class="ota-progress-head">
-                <span id="ota-progress-label">Installing firmware</span>
-                <span id="ota-progress-count" class="mono">0 / 0</span>
-              </div>
-              <div class="ota-progress-meta" id="ota-progress-meta"></div>
-              <div class="ota-progress-bar" aria-hidden="true"><div id="ota-progress-fill"></div></div>
-            </div>
-            <div class="ota-nodes" id="ota-nodes" hidden></div>
-            <div class="button-row">
-              <button data-action="stage-ota-artifact" disabled>Stage firmware</button>
-              <button class="primary" data-action="stage-ota" disabled>Stage on online field</button>
-              <button class="primary" data-action="activate-ota" disabled>Activate staged field</button>
-              <button data-action="pause-ota" hidden>Pause update</button>
             </div>
           </div>
           <div class="ops-section">
@@ -542,6 +578,6 @@
     </section>
   </div>
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

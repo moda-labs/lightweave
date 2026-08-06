@@ -246,12 +246,13 @@ GPIO2 blink is the zero-wiring sync check).
 
 ## Multi-board flashing station (control-plane UI)
 
-The normal production workflow is now the **Flashing** screen in the control
+The normal production workflow is now the **Firmware** screen in the control
 plane. A separate local provisioner owns USB discovery and flash subprocesses,
 so closing or refreshing the browser does not interrupt an in-progress board.
-Use a powered USB hub with individually numbered ports; the first time a port is
-seen, map its topology-derived identity to the physical number printed on the
-hub. Those mappings survive port-name shuffles and service restarts.
+Choose the simultaneous-flash limit, start the station, and plug boards into a
+powered USB hub. Each board appears automatically and begins when a worker is
+available. Physical hub-slot mappings are optional metadata; when configured,
+they survive port-name shuffles and service restarts.
 
 The station defaults to five concurrent boards and can be set from one to ten.
 It downloads only the checksum-pinned serial bundle selected by the production
@@ -269,9 +270,9 @@ promote a release built from the station code before using the new Pi workflow.
 
 There are two explicit modes:
 
-- **Arm registered performers** updates recognized Lightweave performers and
+- **Start station** updates recognized Lightweave performers and
   fails closed on blank/factory firmware.
-- **Arm new boards for 15 minutes** temporarily authorizes the one-time full
+- **Start for new boards (15 min)** temporarily authorizes the one-time full
   erase required for previously unseen factory boards. The authorization expires
   automatically and is captured when each job begins.
 

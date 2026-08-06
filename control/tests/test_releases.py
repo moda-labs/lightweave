@@ -14,6 +14,7 @@ from control.releases import (
     parse_release_manifest,
     release_status,
     stage_deployment_firmware,
+    stage_known_release_firmware,
     current_source_commit,
 )
 
@@ -76,6 +77,31 @@ def test_repository_release_catalog_is_valid_and_newest_first() -> None:
     # A release may touch only one side. RELEASING.md calls for an empty list on
     # the side that did not change, so require notes overall rather than both.
     assert catalog[0].control_changes or catalog[0].firmware_changes
+
+
+def test_known_release_download_is_verified_and_staged(tmp_path: Path) -> None:
+    data = b"published firmware"
+    published = manifest(data, "0.7.1")
+    published["repository"] = "https://github.com/moda-labs/lightweave.git"
+    published["firmware"]["url"] = (
+        "https://github.com/moda-labs/lightweave/releases/download/"
+        "v0.7.1/lightweave-field-v0.7.1.bin"
+    )
+    published["serial_flash"]["url"] = (
+        "https://github.com/moda-labs/lightweave/releases/download/"
+        "v0.7.1/lightweave-serial-flash-v0.7.1.zip"
+    )
+
+    def download(url: str, _limit: int) -> bytes:
+        return json.dumps(published).encode() if url.endswith("lightweave-release.json") else data
+
+    store = OtaArtifactStore(tmp_path / "ota")
+    result = stage_known_release_firmware("0.7.1", store, download=download)
+
+    assert result["artifact"]["source"] == "release"
+    assert result["artifact"]["version"] == "0.7.1"
+    assert result["artifact"]["commit"] == "a" * 40
+    assert store.read_verified() == data
 
 
 def test_release_manifest_requires_immutable_tag_commit_and_hashed_firmware() -> None:

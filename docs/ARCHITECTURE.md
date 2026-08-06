@@ -194,8 +194,8 @@ elapsed time.
    accumulated Wh to the conductor as a small ESP-NOW unicast, piggybacking on the
    existing bidirectional-ESP-NOW path used by `MSG_REGISTER` (§7). The conductor
    logs every report and exposes the latest sample in `/api/state`; the control
-   plane rolls sparse reference nodes into an estimated field draw and per-node
-   battery SOC.
+   plane reports average draw per metered performer and estimates battery SOC
+   from the representative samples.
 4. **Future field diagnostic (optional):** expose the current Wh reading over BLE
    for a phone-app spot-check, independent of the conductor link.
 
@@ -313,12 +313,12 @@ browser --HTTPS/tunnel--> Pi (web UI + CV + serial bridge) --USB--> conductor --
 ```
 
 **[done; hardware throughput proof pending] USB flashing station:** a separate
-same-host provisioner daemon discovers FireBeetles, maps USB topology to numbered
-physical hub slots, and runs a bounded pool of checksum-pinned serial flashes
+same-host provisioner daemon discovers FireBeetles automatically and runs a
+bounded pool of checksum-pinned serial flashes
 (five by default, configurable to ten). The control plane proxies a narrow API
 over a private Unix socket and publishes progress on its existing WebSocket; the
 daemon owns jobs, so browser refreshes and control-plane request lifetimes do not
-own flash subprocesses. Job history and slot configuration persist locally.
+own flash subprocesses. Job history and optional slot configuration persist locally.
 Factory erase is a distinct 15-minute session, the configured conductor path is
 excluded before probing, and firmware role verification refuses any conductor.
 Permanent-ID reservation crosses a scoped credential to the control plane and
@@ -343,10 +343,11 @@ deployment record, and untouched commit-specific Python environment. Release
 state is root-owned outside the app-writable data directory, application and
 release-tooling dependencies are transitively hash-locked, firmware build inputs
 are exactly pinned, and a shared operation
-lock defers Pi deployment during field OTA. The promoted firmware is staged but never broadcast by
-the reconciler: ESP32 OTA remains an explicit operator action using the frozen
-online cohort described in §7.1. This keeps Pi GitOps failure separate from show
-runtime and from variable performer availability. See
+lock defers Pi deployment during field OTA. The promoted control-plane release
+stages its checksum-matched companion firmware, and the control plane reconciles
+that desired image onto online performers by default. A persistent show-safety
+toggle disables new automatic work and pauses an automatic transfer at its next
+command boundary; manual recovery remains available. See
 [`RELEASING.md`](RELEASING.md).
 
 Before changing the checkout, the reconciler persists a root-only transaction
@@ -449,7 +450,8 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
 
 ### 7.1 OTA policy, transfer, and recovery **[done; scale hardware verification pending]**
 
-OTA is an explicit operator action and field-wide only. It runs in the background:
+OTA is field-wide only and automatically reconciles the companion firmware by
+default. It runs in the background:
 beacons and normal serial control commands continue between chunks, so pattern,
 blackout, and power operations remain available. The system must never offer
 selected-node firmware updates as a normal workflow. Mixed firmware can still
@@ -471,26 +473,30 @@ This was hardware-verified on the 3-board bench on 2026-07-06, including a
 same-protocol mixed-firmware recovery that restored performer #1 from
 `0.3.0-mismatch` to `0.3.0`. The scale-hardened path now checkpoints every 256
 chunks. Each performer reports its exact written offset and prefix CRC in a
-deterministic status slot; the control plane unicasts only its missing suffix.
-CRC divergence or a fatal flash error restarts and replays only that performer.
+deterministic status slot. Two or more valid laggards receive one shared suffix
+rebroadcast from the earliest missing offset; a lone laggard receives only its
+missing suffix by unicast. CRC divergence or a fatal flash error restarts and
+replays only that performer. Normal chunks use six callback-confirmed broadcast
+transmissions, while control packets and shared repairs use eight; the conductor
+also pauses after each 4 KiB boundary so performer flash writes cannot consume
+the next unique packet. Targeted repairs require one delivery-callback-confirmed
+unicast; checkpoints and the final full-image CRC provide the durable proof.
 Transient serial and radio failures retry with bounded backoff until success or
 the durable six-hour retry deadline. Starting staging again after that deadline
 opens a fresh window and reconciles the conductor plus each performer from its
 verified offset/CRC. Duplicate chunks and finalization are idempotent.
 
-Performers finalize into a staged state without rebooting. The normal operator
-path stops at an explicit full-size/full-CRC `N/N staged` barrier. A separate
-**Activate staged field** action then activates performers one at a time, verifies
-each re-registration, and activates the conductor last; one click starts the
-whole rolling activation while bounding visible disruption to one lantern at a
-time. The legacy `/api/operations/ota-install` endpoint retains its one-shot
-stage-and-activate behavior for compatible automation, but the browser UI never
-uses it. The durable install journal and checksum-pinned artifact survive browser
-disconnects and service restarts; a restarted control plane reconciles the
-conductor's live offset/CRC, resumes the requested phase, and never turns a
-stage-only job into automatic activation. An operator may pause between commands
-and later continue from the verified prefix. Offline inventory rows are deferred
-rather than blocking the online field.
+Performers finalize into a full-size/full-CRC staged state before any rolling
+activation begins. The normal UI and automatic reconciler use one operation:
+upload, verify, activate performers one at a time, verify each re-registration,
+then activate the conductor last. The stage-only and explicit-activation API
+routes remain recovery tools. The durable install journal and checksum-pinned
+artifact survive browser disconnects and service restarts. The control plane
+recognizes already-installed members of a partially migrated legacy cohort so
+they cannot deadlock a resumed staging barrier. Offline inventory rows are
+deferred and automatically catch up when they later check in. Operators can turn
+automatic updates off before a show; doing so prevents new background work and
+pauses an automatic transfer at its next safe command boundary.
 
 The first rollout has one explicit bootstrap seam: the USB-attached conductor
 must be direct-flashed once because the previously deployed firmware cannot

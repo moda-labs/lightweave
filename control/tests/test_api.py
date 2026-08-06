@@ -12,7 +12,7 @@ import pytest
 
 import control.app as app_module
 from control.adapters import SerialProtocolError
-from control.app import create_app
+from control.app import create_app, ota_reconcile_needed
 from control.group_store import GroupStore
 from control.mock_conductor import Lantern, MockConductor
 from control.ota_store import OtaArtifactStore
@@ -275,6 +275,41 @@ class PerformerMissedChunkConductor(MockConductor):
     def ota_restart(self, mac: str) -> dict:
         self.restart_calls += 1
         return super().ota_restart(mac)
+
+
+class PerformersMissedSharedRangeConductor(MockConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.target_macs = [item.mac for item in self._lanterns[:2]]
+        self.stalled_offsets: dict[str, int] = {}
+        self.rebroadcast_calls = 0
+        self.repair_calls = 0
+
+    def ota_chunk(self, offset: int, data: bytes) -> dict:
+        ack = super().ota_chunk(offset, data)
+        if offset > 0 and not self.stalled_offsets:
+            self.stalled_offsets = {mac: offset for mac in self.target_macs}
+        for mac, stalled_offset in self.stalled_offsets.items():
+            node = self._ota_nodes[mac]
+            node.update({
+                "phase": "repairing",
+                "offset": stalled_offset,
+                "crc32": zlib.crc32(bytes(self._ota_write or b"")[:stalled_offset])
+                & 0xFFFFFFFF,
+            })
+        return ack
+
+    def ota_rebroadcast(self, offset: int, data: bytes) -> dict:
+        self.rebroadcast_calls += 1
+        ack = super().ota_rebroadcast(offset, data)
+        if ack.get("ok"):
+            for mac in self.target_macs:
+                self.stalled_offsets[mac] = int(self._ota_nodes[mac]["offset"])
+        return ack
+
+    def ota_repair(self, mac: str, offset: int, data: bytes) -> dict:
+        self.repair_calls += 1
+        return super().ota_repair(mac, offset, data)
 
 
 class LegacyPerformerMissedChunkConductor(PerformerMissedChunkConductor):
@@ -1548,6 +1583,14 @@ def test_power_monitor_settings_and_manual_full_sync() -> None:
     state = client.get("/api/state").json()
     assert state["power_monitor"]["battery_capacity_wh"] == 200.0
     assert state["power_monitor"]["full_voltage"] == 14.4
+    assert (
+        state["power_monitor"]["soc_percent"]
+        == state["power_monitor"]["estimated_node_soc_percent"]
+    )
+    assert (
+        state["power_monitor"]["average_performer_draw_w"]
+        == state["power_monitor"]["avg_node_w"]
+    )
 
     sync = client.post(f"/api/lanterns/{mac}/power-sync-full")
     assert sync.status_code == 200
@@ -1602,6 +1645,83 @@ def test_ota_artifact_upload_stages_firmware_metadata(tmp_path, managed_client) 
     assert artifact["chunks"] == 32
     assert len(artifact["sha256"]) == 64
     assert current["artifact"]["sha256"] == artifact["sha256"]
+
+
+def test_automatic_firmware_updates_default_on_and_persist(tmp_path, managed_client) -> None:
+    store = OtaArtifactStore(tmp_path / "ota")
+    client = managed_client(create_app(MockConductor(), ota_store=store))
+
+    initial = client.get("/api/operations/ota-install").json()["install"]
+    disabled = client.put(
+        "/api/operations/ota-auto-update", json={"enabled": False}
+    )
+
+    assert initial["auto_update_enabled"] is True
+    assert disabled.status_code == 200
+    assert disabled.json()["install"]["auto_update_enabled"] is False
+
+    restarted = managed_client(create_app(MockConductor(), ota_store=store))
+    assert restarted.get("/api/operations/ota-install").json()["install"][
+        "auto_update_enabled"
+    ] is False
+
+
+def test_auto_reconcile_detects_late_old_performer() -> None:
+    artifact = type("Artifact", (), {
+        "sha256": "desired",
+        "version": "0.7.1",
+        "commit": "a0e58bfc" + "0" * 32,
+    })()
+    install = {
+        "auto_update_enabled": True,
+        "desired_artifact_sha256": "desired",
+        "installed_artifact_sha256": "desired",
+    }
+    matching = {
+        "status": "alive",
+        "mac": "AA:00:00:00:00:01",
+        "firmware": {"version": "0.7.1", "build_label": "a0e58bfc", "dirty": False},
+    }
+    old = {
+        "status": "alive",
+        "mac": "AA:00:00:00:00:02",
+        "firmware": {"version": "0.7.0", "build_label": "oldbuild", "dirty": False},
+    }
+
+    assert ota_reconcile_needed({"lanterns": [matching]}, artifact, install) is False
+    assert ota_reconcile_needed({"lanterns": [matching, old]}, artifact, install) is True
+    assert ota_reconcile_needed(
+        {"lanterns": [matching, {**old, "status": "missing"}]}, artifact, install
+    ) is False
+
+
+def test_select_known_release_stages_override(
+    tmp_path, managed_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = OtaArtifactStore(tmp_path / "ota")
+    data = b"release firmware"
+
+    def stage(version, selected_store):
+        assert version == "0.7.1"
+        artifact = selected_store.stage(
+            "lightweave-field-v0.7.1.bin",
+            data,
+            source="release",
+            release="v0.7.1",
+            version="0.7.1",
+            commit="a" * 40,
+        )
+        return {"release": {"version": version}, "artifact": artifact}
+
+    monkeypatch.setattr(app_module, "stage_known_release_firmware", stage)
+    client = managed_client(create_app(MockConductor(), ota_store=store))
+
+    response = client.post("/api/operations/ota-release", json={"version": "0.7.1"})
+
+    assert response.status_code == 200
+    assert response.json()["artifact"]["source"] == "release"
+    assert response.json()["artifact"]["version"] == "0.7.1"
+    assert client.post("/api/operations/ota-release", json={"version": "9.9.9"}).status_code == 404
 
 
 def test_ota_artifact_store_reload_preserves_current_artifact(tmp_path, managed_client) -> None:
@@ -1843,6 +1963,31 @@ def test_ota_install_repairs_a_performer_that_missed_a_chunk_without_restarting_
     assert {node["phase"] for node in install["nodes"]} == {"complete"}
 
 
+def test_ota_install_rebroadcasts_one_shared_range_for_multiple_lagging_performers(
+    tmp_path, managed_client
+) -> None:
+    conductor = PerformersMissedSharedRangeConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    firmware = b"\xe9" + bytes(range(255)) * 3
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin",
+        content=firmware,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.rebroadcast_calls > 0
+    assert conductor.repair_calls == 0
+    assert install["shared_repair_chunks"] == conductor.rebroadcast_calls
+    assert install["repair_chunks"] == conductor.rebroadcast_calls
+    assert {node["phase"] for node in install["nodes"]} == {"complete"}
+
+
 def test_ota_install_restarts_legacy_performer_when_gap_repair_stalls(
     tmp_path, managed_client
 ) -> None:
@@ -1870,6 +2015,7 @@ def test_ota_install_restarts_legacy_performer_when_gap_repair_stalls(
     assert install["delivery_confirmed_offsets"] == {
         conductor.target_mac: len(firmware)
     }
+    assert install["node_offsets"][conductor.target_mac] == len(firmware)
     assert install["full_replay_macs"] == [conductor.target_mac]
     assert conductor.repair_calls > 0
     assert {node["phase"] for node in install["nodes"]} == {"complete"}
@@ -1919,6 +2065,7 @@ def test_ota_stage_waits_for_explicit_activation(
     assert staged["phase"] == "ready-to-activate"
     assert staged["activate_after_stage"] is False
     assert staged["staged_macs"] == sorted(staged["target_macs"])
+    assert staged["completed_at"] == staged["staged_at"]
     assert conductor.activation_order == []
 
     activation_response = client.post("/api/operations/ota-activate")
@@ -2662,7 +2809,11 @@ def test_ota_abrupt_restart_uses_persisted_artifact_and_live_recovery(
     recovery = restarted.get("/api/state").json()["recovery"]
 
     assert artifact["sha256"] == staged["sha256"]
-    assert install == {"running": False, "complete": False, "error": None}
+    assert install["running"] is False
+    assert install["complete"] is False
+    assert install["error"] is None
+    assert install["auto_update_enabled"] is True
+    assert install["desired_artifact_sha256"] == staged["sha256"]
     assert recovery["status"] == "mixed_firmware"
     assert recovery["ready"] is False
 

@@ -35,6 +35,7 @@ enum SerialJsonKind {
   SJ_OTA_MODE,
   SJ_OTA_BEGIN,
   SJ_OTA_CHUNK,
+  SJ_OTA_REBROADCAST,
   SJ_OTA_END,
   SJ_OTA_PROGRESS,
   SJ_OTA_REPAIR,
@@ -398,6 +399,13 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     if (!sjUint(json, "offset", cmd.ota_offset) ||
         !sjString(json, "data", cmd.ota_data_hex, sizeof(cmd.ota_data_hex))) {
       error = "bad ota chunk";
+      return false;
+    }
+  } else if (!strcmp(norm, "otarebroadcast")) {
+    cmd.kind = SJ_OTA_REBROADCAST;
+    if (!sjUint(json, "offset", cmd.ota_offset) ||
+        !sjString(json, "data", cmd.ota_data_hex, sizeof(cmd.ota_data_hex))) {
+      error = "bad ota rebroadcast";
       return false;
     }
   } else if (!strcmp(norm, "otaend")) {

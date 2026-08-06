@@ -23,6 +23,10 @@ class OtaArtifact:
     chunks: int
     uploaded_at: float
     path: Path
+    source: str = "manual"
+    release: str | None = None
+    version: str | None = None
+    commit: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -33,6 +37,10 @@ class OtaArtifact:
             "chunk_size": self.chunk_size,
             "chunks": self.chunks,
             "uploaded_at": self.uploaded_at,
+            "source": self.source,
+            "release": self.release,
+            "version": self.version,
+            "commit": self.commit,
         }
 
 
@@ -69,7 +77,16 @@ class OtaArtifactStore:
             raise OtaArtifactError("staged firmware CRC32 mismatch")
         return data
 
-    def stage(self, filename: str, data: bytes) -> dict[str, Any]:
+    def stage(
+        self,
+        filename: str,
+        data: bytes,
+        *,
+        source: str = "manual",
+        release: str | None = None,
+        version: str | None = None,
+        commit: str | None = None,
+    ) -> dict[str, Any]:
         clean_name = Path(filename or "firmware.bin").name
         if not clean_name.endswith(".bin"):
             raise OtaArtifactError("firmware artifact must be a .bin file")
@@ -91,6 +108,10 @@ class OtaArtifactStore:
             chunks=(len(data) + OTA_CHUNK_BYTES - 1) // OTA_CHUNK_BYTES,
             uploaded_at=time.time(),
             path=path,
+            source=source,
+            release=release,
+            version=version,
+            commit=commit,
         )
         self._artifact = artifact
         self._manifest_path.write_text(json.dumps(artifact.as_dict(), sort_keys=True), encoding="utf-8")
@@ -113,6 +134,10 @@ class OtaArtifactStore:
                 chunks=int(metadata["chunks"]),
                 uploaded_at=float(metadata["uploaded_at"]),
                 path=path,
+                source=str(metadata.get("source") or "manual"),
+                release=str(metadata["release"]) if metadata.get("release") else None,
+                version=str(metadata["version"]) if metadata.get("version") else None,
+                commit=str(metadata["commit"]) if metadata.get("commit") else None,
             )
         except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
             return None

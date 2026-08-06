@@ -933,8 +933,12 @@ void test_ota_hex_decode_rejects_bad_or_oversized_input() {
 }
 
 void test_ota_chunk_decision_accepts_repeated_written_chunks() {
-  TEST_ASSERT_EQUAL_UINT8(8, OTA_RADIO_SEND_COPIES);
+  TEST_ASSERT_EQUAL_UINT8(6, OTA_RADIO_SEND_COPIES);
   TEST_ASSERT_TRUE(OTA_RADIO_SEND_MAX_ATTEMPTS >= OTA_RADIO_SEND_COPIES);
+  TEST_ASSERT_TRUE(OTA_RADIO_STRONG_COPIES > OTA_RADIO_SEND_COPIES);
+  TEST_ASSERT_TRUE(OTA_RADIO_STRONG_MAX_ATTEMPTS >= OTA_RADIO_STRONG_COPIES);
+  TEST_ASSERT_EQUAL_UINT8(1, OTA_RADIO_REPAIR_COPIES);
+  TEST_ASSERT_TRUE(OTA_RADIO_REPAIR_MAX_ATTEMPTS >= OTA_RADIO_REPAIR_COPIES);
   TEST_ASSERT_TRUE(OTA_RADIO_SEND_DELAY_MS >= 4);
   TEST_ASSERT_TRUE(OTA_RADIO_REPAIR_MAX_ATTEMPTS >= OTA_RADIO_REPAIR_COPIES);
 
@@ -958,6 +962,15 @@ void test_ota_expected_chunk_len_uses_full_chunks_until_tail() {
   TEST_ASSERT_EQUAL_UINT16(1000 - (7 * OTA_SERIAL_CHUNK_MAX),
                            otaExpectedChunkLen(1000, 7 * OTA_SERIAL_CHUNK_MAX));
   TEST_ASSERT_EQUAL_UINT16(0, otaExpectedChunkLen(1000, 1000));
+}
+
+void test_ota_flash_settle_only_follows_complete_sector() {
+  TEST_ASSERT_FALSE(otaFlashSettleDue(0, 128));
+  TEST_ASSERT_FALSE(otaFlashSettleDue(3840, 128));
+  TEST_ASSERT_TRUE(otaFlashSettleDue(3968, 128));
+  TEST_ASSERT_FALSE(otaFlashSettleDue(4096, 128));
+  TEST_ASSERT_TRUE(otaFlashSettleDue(8064, 128));
+  TEST_ASSERT_FALSE(otaFlashSettleDue(883200, 112));
 }
 
 void test_ota_status_table_upserts_by_mac() {
@@ -2253,6 +2266,13 @@ void test_serial_json_ota_begin_chunk_and_end_parse() {
   TEST_ASSERT_EQUAL_UINT32(160, cmd.ota_offset);
   TEST_ASSERT_EQUAL_STRING("e90010ff", cmd.ota_data_hex);
 
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":15,\"cmd\":\"ota_rebroadcast\",\"offset\":128,"
+      "\"data\":\"e90010ff\"}", cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_REBROADCAST, cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(128, cmd.ota_offset);
+  TEST_ASSERT_EQUAL_STRING("e90010ff", cmd.ota_data_hex);
+
   TEST_ASSERT_TRUE(serialJsonParse("{\"id\":15,\"cmd\":\"ota_end\"}", cmd, error));
   TEST_ASSERT_EQUAL_INT(SJ_OTA_END, cmd.kind);
 
@@ -2656,6 +2676,7 @@ int main(int, char**) {
   RUN_TEST(test_ota_hex_decode_rejects_bad_or_oversized_input);
   RUN_TEST(test_ota_chunk_decision_accepts_repeated_written_chunks);
   RUN_TEST(test_ota_expected_chunk_len_uses_full_chunks_until_tail);
+  RUN_TEST(test_ota_flash_settle_only_follows_complete_sector);
   RUN_TEST(test_ota_status_table_upserts_by_mac);
   RUN_TEST(test_ota_status_complete_requires_matching_fresh_complete);
   RUN_TEST(test_ota_status_slots_spread_inventory_ids_and_hash_unknown_nodes);

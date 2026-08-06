@@ -25,8 +25,9 @@ or router port forwarding. Stable architecture and operator guidance are in
 [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md); implementation status remains in
 [`plans/remote-administration.md`](../plans/remote-administration.md).
 Production software updates use the reviewed pull-based flow in
-[`RELEASING.md`](RELEASING.md): a Pi release is reconciled automatically, while
-the checksum-verified firmware it stages still requires a manual OTA action.
+[`RELEASING.md`](RELEASING.md): a Pi release and its checksum-verified companion
+firmware are reconciled together. Automatic field updates default on and have a
+persistent show-safety off switch.
 
 ## Architecture principles
 
@@ -245,9 +246,10 @@ The map renders only positioned lanterns.
   blank-board erase for 15 minutes.
 - `DELETE /api/provisioning/session` -> stop accepting new flash jobs; already
   running subprocesses finish independently of the browser request.
-- `PUT /api/provisioning/slots` with `{"port_id":"...","slot":4}` -> bind an
-  opaque USB-topology identity to a physical powered-hub slot. Raw serial device
-  paths are never returned to the browser or stored in job history.
+- `PUT /api/provisioning/slots` with `{"port_id":"...","slot":4}` -> optionally
+  bind an opaque USB-topology identity to a physical powered-hub slot. Slot
+  mapping is not required to detect or flash a board. Raw serial device paths
+  are never returned to the browser or stored in job history.
 - `POST /api/provisioning/jobs/{job_id}/retry` -> retry one connected failed
   job after the operator corrects its cable/board issue.
 - `POST /api/operations/power-monitor` with
@@ -260,6 +262,12 @@ The map renders only positioned lanterns.
 - `GET /api/operations/ota-artifact` -> current staged firmware metadata.
 - `PUT /api/operations/ota-artifact?filename=firmware.bin` with raw
   `application/octet-stream` firmware bytes -> stage a `.bin` artifact.
+- `PUT /api/operations/ota-auto-update` with `{"enabled":true}` or
+  `{"enabled":false}` -> persist automatic companion-firmware reconciliation.
+  Disabling prevents new automatic jobs and requests a safe pause of an active
+  automatic transfer; manual updates remain available.
+- `POST /api/operations/ota-release` with `{"version":"0.7.1"}` -> select and
+  checksum-verify a known release as a development/recovery override.
 - `GET /api/operations/ota-install` -> current/last install progress.
 - `POST /api/operations/ota-install` -> stream the staged artifact to the
   conductor and field during an OTA maintenance window.
@@ -513,10 +521,11 @@ number while showing "Not seen".
 - Power schedule panel: authoritative place for LED on/off hours and
   force-awake debugging. Schedule-driven sleep is the primary field behavior;
   photodiode dusk sensing is optional/fallback, not required for the main path.
-- Power monitoring panel: sparse INA228 reference nodes report Wh/avg-W/voltage
-  through `MSG_POWER`; Operations estimates whole-field draw and per-node SOC
-  from the configured battery capacity. Voltage is used only to detect/full-anchor
-  a charged pack, and each metered node has a manual **Sync to 100%** action.
+- Dedicated Power tab: sparse INA228 reference nodes report Wh/avg-W/voltage
+  through `MSG_POWER`; the top line shows estimated battery SOC and the summary
+  reports average draw per metered performer (not an extrapolated field total).
+  Voltage is used only to detect/full-anchor a charged pack, and each metered
+  node has a manual **Sync to 100%** action.
 - Raw serial console passthrough to the conductor CLI (the playa will
   produce a situation the UI didn't anticipate).
 - Event log: registrations, table edits, errors — timestamped, server-side.
@@ -527,11 +536,13 @@ number while showing "Not seen".
 
 ### 8. OTA (Milestone 5)
 
-- Manual maintenance-mode OTA only. No autonomous/opportunistic updates.
+- The running control-plane release's companion firmware is the default desired
+  image. Automatic reconciliation is enabled by default and catches up old
+  performers when they check in. A persistent UI toggle disables it for shows.
 - Field-wide broadcast only. No operator-selected node OTA. At `ota_begin` the
   conductor freezes every fresh, placed performer into the required cohort;
-  placed performers that are offline are reported as deferred and catch up in a
-  later manual maintenance run. Mixed firmware remains a recovery state, not a
+  placed performers that are offline are reported as deferred and catch up when
+  they next check in. Mixed firmware remains a recovery state, not a
   supported show state.
 - Built foundation: REGISTER reports release version + protocol + build id +
   dirty flag, the control-plane state exposes per-node and conductor firmware
@@ -556,10 +567,13 @@ number while showing "Not seen".
   partition, returns its frozen target MACs to the control plane, and broadcasts
   the same begin/chunk/end packets over ESP-NOW. Each
   performer writes the image into its own OTA partition and reboots after a
-  successful size/CRC/end check. The UI polls install progress and shows chunk
+  successful size/CRC/end check. Normal chunks use callback-confirmed broadcast
+  redundancy and flash-sector pacing. At each 256-chunk checkpoint, performers
+  with valid lagging prefixes share one suffix rebroadcast when possible; only a
+  lone straggler falls back to per-MAC unicast. The UI polls install progress and shows chunk
   counts, elapsed time, transfer rate, and ETA independently of the start request.
   The conductor's `ota_progress` response includes its own write offset plus
-  performer status rows; the API samples it every 64 chunks so the UI can show
+  performer status rows; the API samples it every 256 chunks so the UI can show
   node progress during the transfer, and any performer-reported failure aborts
   before `ota_end`. Serial chunk timeouts and retryable conductor chunk NACKs
   are retried; duplicate already-written chunks are idempotent on both conductor

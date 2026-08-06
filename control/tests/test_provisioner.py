@@ -81,7 +81,7 @@ def manager_for(
     )
 
 
-def test_unmapped_port_waits_until_operator_assigns_physical_slot(tmp_path: Path) -> None:
+def test_detected_port_flashes_without_physical_slot_mapping(tmp_path: Path) -> None:
     discovery = Discovery([PortCandidate("/dev/ttyUSB0", "1-1.2", "USB VID:PID=1A86:7522")])
     calls = []
 
@@ -94,18 +94,15 @@ def test_unmapped_port_waits_until_operator_assigns_physical_slot(tmp_path: Path
     with TestClient(app) as client:
         status = wait_for(client, lambda value: len(value["jobs"]) == 1)
         job = status["jobs"][0]
-        assert job["state"] == "unmapped"
+        assert job["state"] == "queued"
+        assert job["slot"] is None
         assert "/dev/" not in str(status)
 
         client.post("/session", json={"max_workers": 5, "factory": False}).raise_for_status()
-        time.sleep(0.05)
-        assert calls == []
-
-        client.put("/slots", json={"port_id": job["port_id"], "slot": 3}).raise_for_status()
         completed = wait_for(client, lambda value: value["jobs"][0]["state"] == "done")
 
     assert calls == ["/dev/ttyUSB0"]
-    assert completed["jobs"][0]["slot"] == 3
+    assert completed["jobs"][0]["slot"] is None
     assert completed["jobs"][0]["node_id"] == 54
 
 
@@ -270,22 +267,30 @@ def test_job_holds_shared_deployment_lock_for_entire_flash(tmp_path: Path) -> No
         release.set()
 
 
-def test_port_without_topology_fails_closed_and_never_exposes_device_path(
+def test_port_without_topology_can_flash_and_never_exposes_device_path(
     tmp_path: Path,
 ) -> None:
     discovery = Discovery([PortCandidate("/dev/ttyUSB9", None, "wch")])
     calls = []
     app = create_provisioner_app(
-        manager_for(tmp_path, discovery, lambda *_args, **_kwargs: calls.append(True))
+        manager_for(
+            tmp_path,
+            discovery,
+            lambda port, *_args, **_kwargs: (
+                calls.append(port)
+                or "AA:BB:CC:DD:EE:FF flashed; permanent ID #54 verified"
+            ),
+        )
     )
 
     with TestClient(app) as client:
         status = wait_for(client, lambda value: len(value["jobs"]) == 1)
+        assert status["jobs"][0]["state"] == "queued"
+        client.post("/session", json={"max_workers": 1}).raise_for_status()
+        status = wait_for(client, lambda value: value["jobs"][0]["state"] == "done")
 
-    assert status["jobs"][0]["state"] == "failed"
-    assert "topology is unavailable" in status["jobs"][0]["error"]
     assert "/dev/ttyUSB9" not in str(status)
-    assert calls == []
+    assert calls == ["/dev/ttyUSB9"]
 
 
 def test_missing_id_authority_fails_closed(tmp_path: Path) -> None:

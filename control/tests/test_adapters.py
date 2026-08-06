@@ -205,6 +205,7 @@ def test_ota_repair_probe_restart_and_activation_commands_map_to_json() -> None:
         json.dumps({"id": 3, "ok": True}),
         json.dumps({"id": 4, "ok": True}),
         json.dumps({"id": 5, "ok": True}),
+        json.dumps({"id": 6, "ok": True}),
     ])
     conductor = JsonLineSerialConductor(transport)
     mac = "01:02:03:04:05:06"
@@ -214,6 +215,7 @@ def test_ota_repair_probe_restart_and_activation_commands_map_to_json() -> None:
     conductor.ota_probe()
     conductor.ota_activate(mac)
     conductor.ota_activate()
+    conductor.ota_rebroadcast(256, b"\xaa\x55")
 
     assert json.loads(transport.writes[0]) == {
         "id": 1, "cmd": "ota_repair", "mac": mac,
@@ -223,6 +225,9 @@ def test_ota_repair_probe_restart_and_activation_commands_map_to_json() -> None:
     assert json.loads(transport.writes[2]) == {"id": 3, "cmd": "ota_probe"}
     assert json.loads(transport.writes[3]) == {"id": 4, "cmd": "ota_activate", "mac": mac}
     assert json.loads(transport.writes[4]) == {"id": 5, "cmd": "ota_activate", "conductor": True}
+    assert json.loads(transport.writes[5]) == {
+        "id": 6, "cmd": "ota_rebroadcast", "offset": 256, "data": "aa55",
+    }
 
 
 def test_error_ack_returns_adapter_error() -> None:

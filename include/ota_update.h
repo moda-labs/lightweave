@@ -7,14 +7,26 @@
 
 static constexpr uint16_t OTA_SERIAL_CHUNK_MAX = 128;
 static constexpr uint8_t OTA_STATUS_MAX = 64;
-// ESP-NOW broadcast has no per-recipient acknowledgement. Spread redundant
-// copies across a wider window so a short RF-loss burst cannot erase an entire
-// OTA chunk and permanently desynchronize the receiver's write offset.
-static constexpr uint8_t OTA_RADIO_SEND_COPIES = 8;
-static constexpr uint8_t OTA_RADIO_SEND_MAX_ATTEMPTS = 24;
+// The first pass uses moderate redundancy for throughput. Single control
+// packets and checkpoint rebroadcasts use the stronger setting: losing BEGIN
+// is expensive, while a robust shared repair is still cheaper than replaying
+// the same suffix separately to several performers.
+static constexpr uint8_t OTA_RADIO_SEND_COPIES = 6;
+static constexpr uint8_t OTA_RADIO_SEND_MAX_ATTEMPTS = 10;
+static constexpr uint8_t OTA_RADIO_STRONG_COPIES = 8;
+static constexpr uint8_t OTA_RADIO_STRONG_MAX_ATTEMPTS = 12;
 static constexpr uint8_t OTA_RADIO_SEND_DELAY_MS = 4;
-static constexpr uint8_t OTA_RADIO_REPAIR_COPIES = 4;
-static constexpr uint8_t OTA_RADIO_REPAIR_MAX_ATTEMPTS = 12;
+// Arduino Update buffers one flash sector, then performs a comparatively long
+// erase/write while processing the packet that completes that sector. Give all
+// receivers time to leave that critical section before the next unique chunk;
+// otherwise tightly-spaced copies of that next chunk are lost together.
+static constexpr uint16_t OTA_FLASH_SECTOR_BYTES = 4096;
+static constexpr uint16_t OTA_FLASH_SETTLE_MS = 80;
+// Targeted repair is unicast and waits for the ESP-NOW delivery callback, so
+// one confirmed delivery is sufficient. A failed callback is retried here and
+// any remaining gap is caught again by the next CRC checkpoint.
+static constexpr uint8_t OTA_RADIO_REPAIR_COPIES = 1;
+static constexpr uint8_t OTA_RADIO_REPAIR_MAX_ATTEMPTS = 4;
 static constexpr uint16_t OTA_RADIO_UNICAST_ACK_TIMEOUT_MS = 100;
 // Performer status reports are deterministically spread across this many
 // millisecond slots. IDs are unique across the inventoried field, so the
@@ -76,6 +88,10 @@ inline uint16_t otaExpectedChunkLen(uint32_t size, uint32_t offset) {
   return remaining < OTA_SERIAL_CHUNK_MAX
       ? (uint16_t)remaining
       : OTA_SERIAL_CHUNK_MAX;
+}
+
+inline bool otaFlashSettleDue(uint32_t offset, uint16_t len) {
+  return len > 0 && ((offset + len) % OTA_FLASH_SECTOR_BYTES) == 0;
 }
 
 struct OtaNodeStatusEntry {

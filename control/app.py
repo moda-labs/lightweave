@@ -54,11 +54,13 @@ from .remote_config import (
     select_external_scheme,
 )
 from .releases import (
+    ReleaseMetadataError,
     current_source_commit,
     load_deployment_record,
     load_release_catalog,
     release_status,
     stage_deployment_firmware,
+    stage_known_release_firmware,
 )
 from .serial_transport import PySerialTransport
 
@@ -74,6 +76,8 @@ OTA_ACTIVATION_POLL_S = 0.5
 OTA_POST_REBOOT_ATTEMPTS = 31
 OTA_POST_REBOOT_POLL_S = 1.0
 OTA_RETRY_TIMEOUT_S = 6 * 60 * 60
+CONTROL_TICK_INTERVAL_S = 5.0
+OTA_AUTO_RETRY_INTERVAL_S = 60.0
 
 
 class OtaPauseRequested(Exception):
@@ -102,6 +106,46 @@ OTA_CHUNK_RETRYABLE_ERRORS = {
     "ota chunk offset mismatch",
     "ota chunk exceeds image size",
 }
+
+
+def ota_reconcile_needed(
+    state: dict[str, Any],
+    artifact: Any,
+    install: dict[str, Any],
+) -> bool:
+    """Return whether the desired image is missing from any online performer."""
+    if install.get("auto_update_enabled") is not True or artifact is None:
+        return False
+    alive = [
+        item
+        for item in state.get("lanterns") or []
+        if item.get("status") == "alive" and item.get("mac")
+    ]
+    if not alive:
+        return False
+    if install.get("desired_artifact_sha256") != install.get("installed_artifact_sha256"):
+        return True
+
+    if artifact.version and artifact.commit:
+        commit = artifact.commit.lower()
+        return any(
+            str((item.get("firmware") or {}).get("version") or "") != artifact.version
+            or not commit.startswith(
+                str((item.get("firmware") or {}).get("build_label") or "").lower()
+            )
+            or bool((item.get("firmware") or {}).get("dirty"))
+            for item in alive
+        )
+
+    conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
+    comparable = ("version", "proto", "build_id", "dirty")
+    return any(
+        any(
+            (item.get("firmware") or {}).get(key) != conductor_firmware.get(key)
+            for key in comparable
+        )
+        for item in alive
+    )
 
 
 class PatternUpdate(BaseModel):
@@ -163,6 +207,14 @@ class PowerMonitorUpdate(BaseModel):
 
 class OtaModeUpdate(BaseModel):
     enabled: bool
+
+
+class OtaAutoUpdate(BaseModel):
+    enabled: bool
+
+
+class OtaReleaseSelection(BaseModel):
+    version: str = Field(pattern=r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 
 class CalibrationModeUpdate(BaseModel):
@@ -309,10 +361,12 @@ def create_app(
     async def lifespan(app: FastAPI):
         async def ticker() -> None:
             while True:
-                await asyncio.sleep(5)
+                await asyncio.sleep(CONTROL_TICK_INTERVAL_S)
                 try:
                     await conductor_call("tick")
-                    await publish({"type": "state", "action": "tick", "state": await conductor_call("snapshot")})
+                    state = await conductor_call("snapshot")
+                    await publish({"type": "state", "action": "tick", "state": state})
+                    await maybe_start_ota_reconcile(state)
                 except HTTPException as error:
                     if error.status_code != 423:
                         raise
@@ -366,7 +420,13 @@ def create_app(
         app.state.ticker_task = ticker_task
         app.state.session_reaper_task = reaper_task
         app.state.provisioning_task = provisioning_task
-        if app.state.ota_install.get("running") is True:
+        if (
+            app.state.ota_install.get("running") is True
+            and not (
+                app.state.ota_install.get("automatic") is True
+                and app.state.ota_install.get("auto_update_enabled") is not True
+            )
+        ):
             artifact = app.state.ota_store.artifact()
             matches = (
                 artifact is not None
@@ -412,6 +472,13 @@ def create_app(
                             await asyncio.sleep(min(5.0, 0.25 * attempt))
 
                 app.state.ota_task = asyncio.create_task(resume_when_available())
+        elif app.state.ota_install.get("running") is True:
+            app.state.ota_install.update({
+                "running": False,
+                "complete": False,
+                "phase": "paused",
+                "message": "automatic firmware update paused because automatic updates are off",
+            })
         try:
             yield
         finally:
@@ -504,6 +571,21 @@ def create_app(
         app.state.ota_install_store,
         app.state.ota_install_store.load(),
     )
+    current_artifact = app.state.ota_store.artifact()
+    ota_defaults: dict[str, Any] = {}
+    if "auto_update_enabled" not in app.state.ota_install:
+        ota_defaults["auto_update_enabled"] = True
+    if "desired_artifact_sha256" not in app.state.ota_install and current_artifact is not None:
+        ota_defaults["desired_artifact_sha256"] = current_artifact.sha256
+    if (
+        "installed_artifact_sha256" not in app.state.ota_install
+        and app.state.ota_install.get("complete") is True
+        and app.state.ota_install.get("sha256")
+    ):
+        ota_defaults["installed_artifact_sha256"] = app.state.ota_install["sha256"]
+    if ota_defaults:
+        app.state.ota_install.update(ota_defaults)
+    app.state.ota_auto_last_attempt = 0.0
     app.state.ota_reserved = False
     app.state.ota_pause_requested = False
     app.state.ota_task: asyncio.Task[None] | None = None
@@ -799,6 +881,8 @@ def create_app(
             "usable_sample_count": len(usable_w),
             "stale_count": stale_count,
             "implausible_count": implausible_count,
+            "soc_percent": estimated_soc,
+            "average_performer_draw_w": avg_node_w,
             "avg_node_w": avg_node_w,
             "avg_node_wh_used": avg_node_wh,
             "estimated_field_avg_w": avg_node_w * placed_count if avg_node_w is not None else None,
@@ -2156,15 +2240,69 @@ def create_app(
     @app.put("/api/operations/ota-artifact")
     async def stage_ota_artifact(request: Request, filename: str = "firmware.bin") -> dict[str, Any]:
         async with app.state.ota_start_lock:
-            if app.state.ota_reserved:
+            if app.state.ota_reserved or app.state.ota_install.get("phase") == "ready-to-activate":
                 raise HTTPException(status_code=423, detail="OTA install owns the conductor")
             data = await request.body()
             try:
                 artifact = await asyncio.to_thread(app.state.ota_store.stage, filename, data)
             except OtaArtifactError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
+            app.state.ota_install.update({"desired_artifact_sha256": artifact["sha256"]})
         await publish({"type": "ack", "action": "ota-artifact", "artifact": artifact})
-        return {"ok": True, "message": "firmware staged", "artifact": artifact}
+        return {"ok": True, "message": "firmware file uploaded", "artifact": artifact}
+
+    @app.put("/api/operations/ota-auto-update")
+    async def update_ota_auto_update(request: OtaAutoUpdate) -> dict[str, Any]:
+        app.state.ota_install.update({"auto_update_enabled": request.enabled})
+        if (
+            not request.enabled
+            and app.state.ota_install.get("running") is True
+            and app.state.ota_install.get("automatic") is True
+        ):
+            app.state.ota_pause_requested = True
+            message = "automatic updates disabled; the current automatic transfer is pausing"
+        elif request.enabled:
+            app.state.ota_auto_last_attempt = 0.0
+            message = "automatic firmware updates enabled"
+        else:
+            message = "automatic firmware updates disabled"
+        await publish({
+            "type": "ack",
+            "action": "ota-auto-update",
+            "install": ota_install_progress(app.state.ota_install),
+        })
+        return {
+            "ok": True,
+            "message": message,
+            "install": ota_install_progress(app.state.ota_install),
+        }
+
+    @app.post("/api/operations/ota-release")
+    async def select_ota_release(request: OtaReleaseSelection) -> dict[str, Any]:
+        known_versions = {item.version for item in app.state.release_catalog}
+        if request.version not in known_versions:
+            raise HTTPException(status_code=404, detail="unknown firmware release")
+        async with app.state.ota_start_lock:
+            if app.state.ota_reserved or app.state.ota_install.get("phase") == "ready-to-activate":
+                raise HTTPException(status_code=423, detail="OTA install owns the conductor")
+            current = app.state.ota_store.current()
+            if current and current.get("source") == "release" and current.get("version") == request.version:
+                result = {"release": None, "artifact": current}
+            else:
+                try:
+                    result = await asyncio.to_thread(
+                        stage_known_release_firmware,
+                        request.version,
+                        app.state.ota_store,
+                    )
+                except ReleaseMetadataError as error:
+                    raise HTTPException(status_code=502, detail=str(error)) from error
+            app.state.ota_install.update({
+                "desired_artifact_sha256": result["artifact"]["sha256"],
+            })
+            app.state.ota_auto_last_attempt = 0.0
+        await publish({"type": "ack", "action": "ota-release", **result})
+        return {"ok": True, "message": f"firmware v{request.version} selected", **result}
 
     @app.get("/api/operations/ota-install")
     async def get_ota_install() -> dict[str, Any]:
@@ -2194,6 +2332,32 @@ def create_app(
         }
         expected_lanterns = expected_ota_lanterns(state)
         expected_macs = set(str(mac) for mac in app.state.ota_install.get("target_macs") or [])
+        conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
+
+        def already_installed(item: dict[str, Any]) -> bool:
+            firmware = item.get("firmware") or {}
+            if artifact.version and artifact.commit:
+                label = str(firmware.get("build_label") or "").lower()
+                return (
+                    firmware.get("version") == artifact.version
+                    and len(label) >= 7
+                    and artifact.commit.lower().startswith(label)
+                    and not bool(firmware.get("dirty"))
+                )
+            comparable = ("version", "proto", "build_id", "dirty")
+            return bool(conductor_firmware) and all(
+                firmware.get(key) == conductor_firmware.get(key) for key in comparable
+            )
+
+        legacy_delivery_macs = {
+            str(mac)
+            for mac in app.state.ota_install.get("delivery_confirmed_macs") or []
+        }
+        installed_macs = {
+            mac
+            for mac, item in all_lanterns.items()
+            if mac in legacy_delivery_macs and already_installed(item)
+        }
         missing_rounds: dict[str, int] = {}
         repair_offsets: dict[str, int] = {}
         repair_stalls: dict[str, int] = {}
@@ -2201,6 +2365,12 @@ def create_app(
             str(mac): int(offset)
             for mac, offset in dict(
                 app.state.ota_install.get("delivery_confirmed_offsets") or {}
+            ).items()
+        }
+        node_offsets = {
+            str(mac): int(offset)
+            for mac, offset in dict(
+                app.state.ota_install.get("node_offsets") or {}
             ).items()
         }
         full_replay_macs = set(
@@ -2286,7 +2456,16 @@ def create_app(
             settle_s = max(0.0, float(ack.get("settle_s", OTA_STATUS_SETTLE_S)))
             if settle_s:
                 await asyncio.sleep(settle_s)
-            return await progress()
+            value = await progress()
+            for node in fresh_ota_nodes(value.get("nodes") or []):
+                mac = str(node.get("mac") or "")
+                offset = int(node.get("offset") or 0)
+                if mac:
+                    node_offsets[mac] = max(0, min(offset, artifact.size))
+            app.state.ota_install.update_volatile({
+                "node_offsets": dict(sorted(node_offsets.items())),
+            })
+            return value
 
         async def repair_checkpoint(frontier: int) -> list[dict[str, Any]]:
             repair_round = 0
@@ -2299,6 +2478,45 @@ def create_app(
                 current = await probe()
                 nodes = fresh_ota_nodes(current.get("nodes") or [])
                 by_mac = {str(node.get("mac")): node for node in nodes if node.get("mac")}
+                shared_repair_offsets: dict[str, int] = {}
+                for mac in sorted(expected_macs):
+                    node = by_mac.get(mac)
+                    if node is None:
+                        continue
+                    offset = int(node.get("offset") or 0)
+                    crc32 = int(node.get("crc32") or 0)
+                    if (
+                        0 <= offset < frontier
+                        and crc32 == checkpoint_crc(offset)
+                        and str(node.get("phase") or "") != "failed"
+                    ):
+                        shared_repair_offsets[mac] = offset
+
+                if len(shared_repair_offsets) >= 2:
+                    replay_offset = min(shared_repair_offsets.values())
+                    app.state.ota_install.update({
+                        "phase": "repairing",
+                        "repair_round": repair_round,
+                        "repairing_macs": sorted(shared_repair_offsets),
+                        "nodes": nodes,
+                        "shared_repair_from": replay_offset,
+                    })
+                    shared_chunks = 0
+                    while replay_offset < frontier:
+                        chunk = data[
+                            replay_offset : min(frontier, replay_offset + artifact.chunk_size)
+                        ]
+                        await call_until_ok("ota_rebroadcast", replay_offset, chunk)
+                        replay_offset += len(chunk)
+                        shared_chunks += 1
+                    app.state.ota_install.update({
+                        "repair_chunks": int(app.state.ota_install.get("repair_chunks") or 0)
+                        + shared_chunks,
+                        "shared_repair_chunks": int(
+                            app.state.ota_install.get("shared_repair_chunks") or 0
+                        ) + shared_chunks,
+                    })
+                    continue
                 pending: list[str] = []
                 repaired_chunks = 0
 
@@ -2319,6 +2537,10 @@ def create_app(
                             continue
                         offset = 0
                         await call_until_ok("ota_restart", mac)
+                        node_offsets[mac] = 0
+                        app.state.ota_install.update_volatile({
+                            "node_offsets": dict(sorted(node_offsets.items())),
+                        })
                         replayed_from_zero = True
                         repair_offsets[mac] = 0
                         repair_stalls[mac] = 0
@@ -2367,6 +2589,10 @@ def create_app(
                                 continue
                             await call_until_ok("ota_restart", mac)
                             offset = 0
+                            node_offsets[mac] = 0
+                            app.state.ota_install.update_volatile({
+                                "node_offsets": dict(sorted(node_offsets.items())),
+                            })
                             replayed_from_zero = True
                             repair_offsets[mac] = 0
                             repair_stalls[mac] = 0
@@ -2388,6 +2614,10 @@ def create_app(
                         await call_until_ok("ota_repair", mac, offset, chunk)
                         offset += len(chunk)
                         repaired_chunks += 1
+                        node_offsets[mac] = offset
+                        app.state.ota_install.update_volatile({
+                            "node_offsets": dict(sorted(node_offsets.items())),
+                        })
                     if replayed_from_zero:
                         # Legacy performers predate OTA_QUERY and abort their
                         # writer on the first broadcast gap. A targeted begin +
@@ -2454,12 +2684,49 @@ def create_app(
                     # writer while resuming for explicit activation.
                     written = artifact.size
 
+            # A previous legacy activation may already have rebooted part of
+            # this cohort. Those performers no longer retain an OTA writer,
+            # so requiring them to report `staged` again deadlocks the safety
+            # barrier even though their live firmware identity proves success.
+            expected_macs -= installed_macs
+            cohort_macs = expected_macs | installed_macs
+
             if not expected_macs:
-                raise HTTPException(status_code=400, detail="no performers online")
+                await call_until_ok("set_ota_mode", False)
+                nodes = [
+                    {
+                        "mac": mac,
+                        "phase": "complete",
+                        "error": "none",
+                        "offset": artifact.size,
+                        "crc32": artifact.crc32,
+                        "source": "live_firmware_identity",
+                    }
+                    for mac in sorted(installed_macs)
+                ]
+                app.state.ota_install.update({
+                    "running": False,
+                    "complete": True,
+                    "phase": "complete",
+                    "error": None,
+                    "message": "firmware already installed across the online field",
+                    "nodes": nodes,
+                    "target_macs": sorted(installed_macs),
+                    "target_count": len(installed_macs),
+                    "completed_at": time.time(),
+                    "installed_artifact_sha256": artifact.sha256,
+                })
+                return {
+                    "ok": True,
+                    "message": "firmware already installed across the online field",
+                    "artifact": artifact.as_dict(),
+                }
             expected_lanterns = {
                 mac: all_lanterns.get(mac, {"mac": mac, "label": mac})
                 for mac in expected_macs
             }
+            for mac in expected_macs:
+                node_offsets.setdefault(mac, 0)
             deferred = [
                 {"mac": mac, "label": item.get("label") or mac}
                 for mac, item in sorted(all_lanterns.items())
@@ -2467,8 +2734,10 @@ def create_app(
             ]
             app.state.ota_install.update({
                 "phase": "broadcasting" if not staged else "staged",
-                "target_macs": sorted(expected_macs),
-                "target_count": len(expected_macs),
+                "target_macs": sorted(cohort_macs),
+                "target_count": len(cohort_macs),
+                "already_installed_macs": sorted(installed_macs),
+                "node_offsets": dict(sorted(node_offsets.items())),
                 "deferred": deferred,
                 "deferred_count": len(deferred),
                 "resumed": resume,
@@ -2516,6 +2785,7 @@ def create_app(
                 await repair_checkpoint(artifact.size)
 
             if not activate:
+                staged_at = time.time()
                 app.state.ota_install.update({
                     "running": False,
                     "complete": False,
@@ -2523,7 +2793,8 @@ def create_app(
                     "error": None,
                     "message": "firmware staged and verified; activation is waiting for the operator",
                     "nodes": nodes,
-                    "staged_at": time.time(),
+                    "staged_at": staged_at,
+                    "completed_at": staged_at,
                 })
                 ack = {
                     "ok": True,
@@ -2596,6 +2867,17 @@ def create_app(
                 nodes = append_unverified_ota_failures(nodes, expected_lanterns, verified_macs)
                 app.state.ota_install.update({"nodes": nodes})
                 raise HTTPException(status_code=503, detail=error)
+            nodes.extend(
+                {
+                    "mac": mac,
+                    "phase": "complete",
+                    "error": "none",
+                    "offset": artifact.size,
+                    "crc32": artifact.crc32,
+                    "source": "live_firmware_identity",
+                }
+                for mac in sorted(installed_macs)
+            )
             await call_until_ok("set_ota_mode", False)
         except asyncio.CancelledError:
             app.state.ota_install.update({
@@ -2617,6 +2899,7 @@ def create_app(
             "message": "firmware updated across the online field",
             "nodes": nodes,
             "completed_at": time.time(),
+            "installed_artifact_sha256": artifact.sha256,
         })
         ack = {"ok": True, "message": "firmware updated across the online field", "nodes": nodes}
         await publish({"type": "ack", "action": "ota-install", "artifact": artifact.as_dict(), "ack": ack})
@@ -2666,7 +2949,7 @@ def create_app(
             app.state.ota_reserved = False
             release_ota_operation_lock()
 
-    async def start_ota_install(*, activate: bool) -> dict[str, Any]:
+    async def start_ota_install(*, activate: bool, automatic: bool = False) -> dict[str, Any]:
         async with app.state.ota_start_lock:
             if app.state.ota_reserved:
                 raise HTTPException(status_code=409, detail="OTA install already running")
@@ -2706,7 +2989,18 @@ def create_app(
             app.state.ota_pause_requested = False
 
             started_at = time.time()
-            app.state.ota_install.reset({
+            resuming = (
+                app.state.ota_install.get("phase") == "paused"
+                and app.state.ota_install.get("sha256") == artifact.sha256
+            )
+            persistent_settings = {
+                "auto_update_enabled": app.state.ota_install.get("auto_update_enabled") is True,
+                "desired_artifact_sha256": app.state.ota_install.get("desired_artifact_sha256")
+                or artifact.sha256,
+                "installed_artifact_sha256": app.state.ota_install.get("installed_artifact_sha256"),
+            }
+            job = {
+                **persistent_settings,
                 "running": True,
                 "complete": False,
                 "error": None,
@@ -2716,15 +3010,20 @@ def create_app(
                 "sha256": artifact.sha256,
                 "size": artifact.size,
                 "crc32": artifact.crc32,
-                "bytes_sent": 0,
-                "chunks_sent": 0,
+                "bytes_sent": int(app.state.ota_install.get("bytes_sent") or 0) if resuming else 0,
+                "chunks_sent": int(app.state.ota_install.get("chunks_sent") or 0) if resuming else 0,
                 "chunks_total": artifact.chunks,
-                "started_at": started_at,
+                "started_at": app.state.ota_install.get("started_at") if resuming else started_at,
                 "retry_timeout_s": OTA_RETRY_TIMEOUT_S,
                 "retry_deadline_at": started_at + OTA_RETRY_TIMEOUT_S,
-            })
+                "automatic": automatic,
+            }
+            if resuming:
+                app.state.ota_install.update(job)
+            else:
+                app.state.ota_install.reset(job)
             task = asyncio.create_task(
-                ota_install_worker(artifact, state, activate=activate)
+                ota_install_worker(artifact, state, resume=resuming, activate=activate)
             )
             app.state.ota_task = task
             return {
@@ -2733,18 +3032,7 @@ def create_app(
                 "install": ota_install_progress(app.state.ota_install),
             }
 
-    @app.post("/api/operations/ota-install", status_code=202)
-    async def install_ota_artifact() -> dict[str, Any]:
-        # Backward-compatible one-shot API. The operator UI uses ota-stage plus
-        # ota-activate so distribution and field reboot are separate decisions.
-        return await start_ota_install(activate=True)
-
-    @app.post("/api/operations/ota-stage", status_code=202)
-    async def stage_ota_artifact_on_field() -> dict[str, Any]:
-        return await start_ota_install(activate=False)
-
-    @app.post("/api/operations/ota-activate", status_code=202)
-    async def activate_staged_ota() -> dict[str, Any]:
+    async def start_ota_activation(*, automatic: bool = False) -> dict[str, Any]:
         async with app.state.ota_start_lock:
             if app.state.ota_reserved:
                 raise HTTPException(status_code=409, detail="OTA operation already running")
@@ -2777,7 +3065,9 @@ def create_app(
                 "complete": False,
                 "phase": "preparing-activation",
                 "activate_after_stage": True,
+                "automatic": automatic,
                 "error": None,
+                "completed_at": None,
                 "activation_requested_at": time.time(),
                 "retry_timeout_s": OTA_RETRY_TIMEOUT_S,
                 "retry_deadline_at": time.time() + OTA_RETRY_TIMEOUT_S,
@@ -2791,6 +3081,41 @@ def create_app(
                 "message": "OTA activation accepted",
                 "install": ota_install_progress(app.state.ota_install),
             }
+
+    async def maybe_start_ota_reconcile(state: dict[str, Any]) -> None:
+        if app.state.ota_reserved or app.state.ota_install.get("running") is True:
+            return
+        artifact = app.state.ota_store.artifact()
+        if not ota_reconcile_needed(state, artifact, app.state.ota_install):
+            return
+        now = time.monotonic()
+        if now - app.state.ota_auto_last_attempt < OTA_AUTO_RETRY_INTERVAL_S:
+            return
+        app.state.ota_auto_last_attempt = now
+        try:
+            if app.state.ota_install.get("phase") == "ready-to-activate":
+                await start_ota_activation(automatic=True)
+            else:
+                await start_ota_install(activate=True, automatic=True)
+        except (HTTPException, SerialProtocolError) as error:
+            app.state.ota_install.update({
+                "auto_update_last_error": str(getattr(error, "detail", error)),
+                "auto_update_last_attempt_at": time.time(),
+            })
+
+    @app.post("/api/operations/ota-install", status_code=202)
+    async def install_ota_artifact() -> dict[str, Any]:
+        # Normal operator path: verify the full frozen cohort, then roll through
+        # activation automatically. Stage-only remains available to API clients.
+        return await start_ota_install(activate=True)
+
+    @app.post("/api/operations/ota-stage", status_code=202)
+    async def stage_ota_artifact_on_field() -> dict[str, Any]:
+        return await start_ota_install(activate=False)
+
+    @app.post("/api/operations/ota-activate", status_code=202)
+    async def activate_staged_ota() -> dict[str, Any]:
+        return await start_ota_activation()
 
     @app.delete("/api/operations/ota-install")
     async def pause_ota_install() -> dict[str, Any]:

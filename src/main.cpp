@@ -172,7 +172,8 @@ static void otaRadioChunk(const OtaChunkMsg& msg);
 static void otaRadioEnd();
 static void otaFinalizePending();
 static void otaBroadcastBegin(uint32_t size, uint32_t crc32);
-static void otaBroadcastChunk(uint32_t offset, const uint8_t* data, uint8_t len);
+static void otaBroadcastChunk(uint32_t offset, const uint8_t* data, uint8_t len,
+                              bool strong = false);
 static void otaBroadcastEnd();
 static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
                             const uint8_t* data, uint8_t len);
@@ -1635,13 +1636,41 @@ static void otaFinalizePending() {
                     g_ota_write_written, g_ota_write_crc);
 }
 
-static void otaSendRepeated(const uint8_t* data, size_t len) {
+static void otaSendRepeated(const uint8_t* data, size_t len, uint8_t copies,
+                            uint8_t max_attempts) {
+  // ESP_OK means only that ESP-NOW accepted the packet into its asynchronous
+  // queue. Wait for the completion callback before counting a copy or queuing
+  // another one; otherwise a burst can report several accepted copies while
+  // putting few (or none) on air.
+  delay(OTA_RADIO_SEND_DELAY_MS);
   uint8_t accepted = 0;
   for (uint8_t attempt = 0;
-       accepted < OTA_RADIO_SEND_COPIES &&
-       attempt < OTA_RADIO_SEND_MAX_ATTEMPTS;
+       accepted < copies && attempt < max_attempts;
        attempt++) {
-    if (esp_now_send(BROADCAST_ADDR, data, len) == ESP_OK) accepted++;
+    portENTER_CRITICAL(&g_ota_send_ack_mux);
+    otaSendAckBegin(g_ota_send_ack, BROADCAST_ADDR);
+    portEXIT_CRITICAL(&g_ota_send_ack_mux);
+    if (esp_now_send(BROADCAST_ADDR, data, len) != ESP_OK) {
+      portENTER_CRITICAL(&g_ota_send_ack_mux);
+      otaSendAckInit(g_ota_send_ack);
+      portEXIT_CRITICAL(&g_ota_send_ack_mux);
+      delay(OTA_RADIO_SEND_DELAY_MS);
+      continue;
+    }
+
+    int64_t deadline = now_us() +
+        (int64_t)OTA_RADIO_UNICAST_ACK_TIMEOUT_MS * 1000LL;
+    uint8_t state = OTA_SEND_ACK_PENDING;
+    while (state == OTA_SEND_ACK_PENDING && now_us() < deadline) {
+      delay(1);
+      portENTER_CRITICAL(&g_ota_send_ack_mux);
+      state = g_ota_send_ack.state;
+      portEXIT_CRITICAL(&g_ota_send_ack_mux);
+    }
+    portENTER_CRITICAL(&g_ota_send_ack_mux);
+    if (g_ota_send_ack.state == OTA_SEND_ACK_SUCCESS) accepted++;
+    otaSendAckInit(g_ota_send_ack);
+    portEXIT_CRITICAL(&g_ota_send_ack_mux);
     delay(OTA_RADIO_SEND_DELAY_MS);
   }
 }
@@ -1649,20 +1678,27 @@ static void otaSendRepeated(const uint8_t* data, size_t len) {
 static void otaBroadcastBegin(uint32_t size, uint32_t crc32) {
   if (!isConductor()) return;
   OtaBeginMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_BEGIN}, size, crc32};
-  otaSendRepeated((const uint8_t*)&msg, sizeof(msg));
+  otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
+                  OTA_RADIO_STRONG_MAX_ATTEMPTS);
 }
 
-static void otaBroadcastChunk(uint32_t offset, const uint8_t* data, uint8_t len) {
+static void otaBroadcastChunk(uint32_t offset, const uint8_t* data, uint8_t len,
+                              bool strong) {
   if (!isConductor() || len == 0 || len > OTA_SERIAL_CHUNK_MAX) return;
   OtaChunkMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_CHUNK}, offset, len, {0}};
   memcpy(msg.data, data, len);
-  otaSendRepeated((const uint8_t*)&msg, offsetof(OtaChunkMsg, data) + len);
+  otaSendRepeated((const uint8_t*)&msg, offsetof(OtaChunkMsg, data) + len,
+                  strong ? OTA_RADIO_STRONG_COPIES : OTA_RADIO_SEND_COPIES,
+                  strong ? OTA_RADIO_STRONG_MAX_ATTEMPTS
+                         : OTA_RADIO_SEND_MAX_ATTEMPTS);
+  if (otaFlashSettleDue(offset, len)) delay(OTA_FLASH_SETTLE_MS);
 }
 
 static void otaBroadcastEnd() {
   if (!isConductor()) return;
   OtaEndMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_END}};
-  otaSendRepeated((const uint8_t*)&msg, sizeof(msg));
+  otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
+                  OTA_RADIO_STRONG_MAX_ATTEMPTS);
 }
 
 static bool otaUnicastRepeated(const uint8_t mac[6], const uint8_t* data,
@@ -1821,6 +1857,26 @@ static void handleOtaChunk(const SerialJsonCommand& cmd) {
   jsonOk(cmd.id, "ota chunk written");
 }
 
+static void handleOtaRebroadcast(const SerialJsonCommand& cmd) {
+  if (!g_ota_write_active && !g_ota_local_staged) {
+    jsonError(cmd.id, "ota write is not active");
+    return;
+  }
+  uint8_t bytes[OTA_SERIAL_CHUNK_MAX];
+  size_t len = 0;
+  if (!otaHexDecode(cmd.ota_data_hex, bytes, sizeof(bytes), len) || len == 0) {
+    jsonError(cmd.id, "bad ota rebroadcast data");
+    return;
+  }
+  if (len != otaExpectedChunkLen(g_ota_write_size, cmd.ota_offset) ||
+      cmd.ota_offset + len > g_ota_write_written) {
+    jsonError(cmd.id, "ota rebroadcast range is invalid");
+    return;
+  }
+  otaBroadcastChunk(cmd.ota_offset, bytes, (uint8_t)len, /*strong=*/true);
+  jsonOk(cmd.id, "ota repair chunk rebroadcast");
+}
+
 static void handleOtaEnd(const SerialJsonCommand& cmd) {
   if (!g_ota_write_active && !g_ota_local_staged) {
     jsonError(cmd.id, "ota write is not active");
@@ -1927,7 +1983,8 @@ static void handleOtaProbe(const SerialJsonCommand& cmd) {
     return;
   }
   OtaQueryMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_QUERY}};
-  otaSendRepeated((const uint8_t*)&msg, sizeof(msg));
+  otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
+                  OTA_RADIO_STRONG_MAX_ATTEMPTS);
   jsonOk(cmd.id, "ota status requested");
 }
 
@@ -2354,6 +2411,8 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     handleOtaBegin(cmd);
   } else if (cmd.kind == SJ_OTA_CHUNK) {
     handleOtaChunk(cmd);
+  } else if (cmd.kind == SJ_OTA_REBROADCAST) {
+    handleOtaRebroadcast(cmd);
   } else if (cmd.kind == SJ_OTA_END) {
     handleOtaEnd(cmd);
   } else if (cmd.kind == SJ_OTA_PROGRESS) {

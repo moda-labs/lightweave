@@ -351,21 +351,10 @@ class ProvisioningManager:
                         prior.state = "disconnected"
                         prior.message = "Board disconnected before flashing"
                 now = self.clock()
-                try:
-                    key = self._identity_key(port)
-                    slot = self._slot_map.get(key)
-                    state = "queued" if slot is not None else "unmapped"
-                    message = (
-                        "Waiting to flash"
-                        if slot is not None
-                        else "Assign this hub port to a slot"
-                    )
-                    error = None
-                except ValueError as failure:
-                    slot = None
-                    state = "failed"
-                    message = str(failure)
-                    error = str(failure)
+                slot = self._slot_map.get(port.location) if port.location else None
+                state = "queued"
+                message = "Waiting to flash"
+                error = None
                 job = ProvisioningJob(
                     id=uuid4().hex,
                     port_id=self._port_id(port),
