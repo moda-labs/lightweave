@@ -135,7 +135,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=11"' in index_html
+    assert 'src="/static/app.js?v=12"' in index_html
     assert 'href="/static/styles.css?v=3"' in index_html
     assert 'data-view="power"' in index_html
     assert 'id="view-power"' in index_html
@@ -372,6 +372,55 @@ if (!box.innerHTML.includes("250 B / 1000 B")) process.exit(3);
 if (!box.innerHTML.includes("Installed · 100%")) process.exit(4);
 if ((box.innerHTML.match(/aria-label="verified">✓/g) || []).length !== 1) process.exit(4);
 if ((box.innerHTML.match(/ota-node-row /g) || []).length !== 2) process.exit(5);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_ota_dashboard_background_poll_detects_automatic_updates() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("async function refreshOtaInstall()")
+    end = app_js.index("\nasync function refreshWifiStatus", start)
+    function_source = app_js[start:end]
+    script = f"""
+let otaInstall = {{running: false}};
+let otaInstallRefreshPromise = null;
+let otaInstallPollTimer = null;
+let scheduled = null;
+let requests = 0;
+const responses = [{{running: true}}, {{running: false, complete: true}}];
+const window = {{
+  setTimeout(callback, delay) {{
+    scheduled = {{callback, delay}};
+    return requests + 1;
+  }},
+}};
+async function api(path) {{
+  if (path !== "/api/operations/ota-install") process.exit(1);
+  const install = responses[requests++];
+  return {{install}};
+}}
+function renderOta() {{}}
+{function_source}
+startOtaInstallPolling();
+if (!scheduled || scheduled.delay !== 3000) process.exit(2);
+let callback = scheduled.callback;
+scheduled = null;
+await callback();
+if (requests !== 1 || !otaInstall.running) process.exit(3);
+if (!scheduled || scheduled.delay !== 750) process.exit(4);
+callback = scheduled.callback;
+scheduled = null;
+await callback();
+if (requests !== 2 || otaInstall.running || !otaInstall.complete) process.exit(5);
+if (!scheduled || scheduled.delay !== 3000) process.exit(6);
 """
     completed = subprocess.run(
         ["node", "--input-type=module", "-e", script],

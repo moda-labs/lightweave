@@ -18,6 +18,8 @@ let powerBaseline = null;
 let otaArtifact = null;
 let otaArtifactUploading = false;
 let otaInstall = null;
+let otaInstallRefreshPromise = null;
+let otaInstallPollTimer = null;
 let savedPatterns = [];
 let calibrationFrames = [];
 let calibrationProposal = null;
@@ -2264,8 +2266,37 @@ async function refreshSavedPatterns() {
 }
 
 async function refreshOtaInstall() {
-  otaInstall = (await api("/api/operations/ota-install")).install;
-  renderOta();
+  if (!otaInstallRefreshPromise) {
+    otaInstallRefreshPromise = (async () => {
+      otaInstall = (await api("/api/operations/ota-install")).install;
+      renderOta();
+      return otaInstall;
+    })();
+  }
+  const refreshPromise = otaInstallRefreshPromise;
+  try {
+    return await refreshPromise;
+  } finally {
+    if (otaInstallRefreshPromise === refreshPromise) otaInstallRefreshPromise = null;
+  }
+}
+
+function scheduleOtaInstallPoll(delayMs) {
+  if (otaInstallPollTimer !== null) return;
+  otaInstallPollTimer = window.setTimeout(async () => {
+    otaInstallPollTimer = null;
+    try {
+      await refreshOtaInstall();
+    } catch (_error) {
+      // The WebSocket connection indicator owns transient connectivity errors.
+    } finally {
+      scheduleOtaInstallPoll(otaInstall?.running ? 750 : 3000);
+    }
+  }, delayMs);
+}
+
+function startOtaInstallPolling() {
+  scheduleOtaInstallPoll(otaInstall?.running ? 750 : 3000);
 }
 
 async function refreshWifiStatus({ quiet = false } = {}) {
@@ -3085,4 +3116,7 @@ window.setInterval(() => {
   if (provisioning?.session?.factory_armed) renderProvisioning();
 }, 1000);
 
-refresh().then(connectWebSocket).catch((error) => toast(error.message, true));
+refresh().then(() => {
+  connectWebSocket();
+  startOtaInstallPolling();
+}).catch((error) => toast(error.message, true));
