@@ -18,6 +18,7 @@ struct RegistrationConfig {
   int64_t slot_spread_us;
   int64_t retry_base_us;
   int64_t retry_max_us;
+  int64_t repair_wait_us;
 };
 
 struct RegistrationSchedule {
@@ -26,6 +27,8 @@ struct RegistrationSchedule {
   uint8_t failures;
   bool slot_pending;
   bool in_flight;
+  bool repair_waiting;
+  int64_t repair_deadline_us;
 };
 
 inline uint32_t registrationHash(const uint8_t mac[6], uint32_t salt) {
@@ -53,6 +56,8 @@ inline void registrationInit(RegistrationSchedule& schedule) {
   schedule.failures = 0;
   schedule.slot_pending = false;
   schedule.in_flight = false;
+  schedule.repair_waiting = false;
+  schedule.repair_deadline_us = 0;
 }
 
 // Called only while the performer radio is up. The first due poll chooses a
@@ -106,16 +111,26 @@ inline void registrationSendResult(RegistrationSchedule& schedule,
   schedule.slot_pending = false;
   if (delivered) {
     schedule.failures = 0;
+    schedule.repair_waiting = config.repair_wait_us > 0;
+    schedule.repair_deadline_us = now_us + config.repair_wait_us;
     schedule.next_due_us = now_us + config.interval_us +
         registrationJitter(mac, 0x1a7e4a1u, config.interval_jitter_us);
     return;
   }
+  schedule.repair_waiting = false;
+  schedule.repair_deadline_us = 0;
   if (schedule.failures < UINT8_MAX) schedule.failures++;
   schedule.next_due_us = now_us +
       registrationRetryDelay(mac, schedule.failures, config);
 }
 
+inline void registrationRepairReceived(RegistrationSchedule& schedule) {
+  schedule.repair_waiting = false;
+  schedule.repair_deadline_us = 0;
+}
+
 inline bool registrationKeepsRadioAwake(
-    const RegistrationSchedule& schedule) {
-  return schedule.slot_pending || schedule.in_flight;
+    const RegistrationSchedule& schedule, int64_t now_us) {
+  return schedule.slot_pending || schedule.in_flight ||
+      (schedule.repair_waiting && now_us < schedule.repair_deadline_us);
 }

@@ -27,6 +27,7 @@ class OtaArtifact:
     release: str | None = None
     version: str | None = None
     commit: str | None = None
+    protocol: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +42,7 @@ class OtaArtifact:
             "release": self.release,
             "version": self.version,
             "commit": self.commit,
+            "protocol": self.protocol,
         }
 
 
@@ -86,6 +88,7 @@ class OtaArtifactStore:
         release: str | None = None,
         version: str | None = None,
         commit: str | None = None,
+        protocol: int | None = None,
     ) -> dict[str, Any]:
         clean_name = Path(filename or "firmware.bin").name
         if not clean_name.endswith(".bin"):
@@ -94,6 +97,8 @@ class OtaArtifactStore:
             raise OtaArtifactError("firmware artifact is empty")
         if len(data) > MAX_FIRMWARE_BYTES:
             raise OtaArtifactError(f"firmware artifact exceeds {MAX_FIRMWARE_BYTES} bytes")
+        if protocol is not None and (isinstance(protocol, bool) or not 1 <= protocol <= 255):
+            raise OtaArtifactError("firmware protocol must be an integer from 1 to 255")
 
         sha256 = hashlib.sha256(data).hexdigest()
         crc32 = zlib.crc32(data) & 0xFFFFFFFF
@@ -112,6 +117,7 @@ class OtaArtifactStore:
             release=release,
             version=version,
             commit=commit,
+            protocol=protocol,
         )
         self._artifact = artifact
         self._manifest_path.write_text(json.dumps(artifact.as_dict(), sort_keys=True), encoding="utf-8")
@@ -138,6 +144,7 @@ class OtaArtifactStore:
                 release=str(metadata["release"]) if metadata.get("release") else None,
                 version=str(metadata["version"]) if metadata.get("version") else None,
                 commit=str(metadata["commit"]) if metadata.get("commit") else None,
+                protocol=int(metadata["protocol"]) if metadata.get("protocol") is not None else None,
             )
         except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
             return None

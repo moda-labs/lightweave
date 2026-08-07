@@ -11,10 +11,11 @@
 
 // ---- Role --------------------------------------------------------------------
 // Every node runs identical firmware; role is a runtime value stored in NVS and
-// set once over serial (`role conductor|performer`). Default is performer so a
+// set once over serial (`role conductor|performer|relay`). Default is performer so a
 // fresh board never accidentally becomes a second conductor. See src/main.cpp.
 static constexpr uint8_t ROLE_PERFORMER = 0;
 static constexpr uint8_t ROLE_CONDUCTOR = 1;
+static constexpr uint8_t ROLE_RELAY     = 2;
 static constexpr uint8_t DEFAULT_ROLE   = ROLE_PERFORMER;
 
 // ---- LEDs --------------------------------------------------------------------
@@ -72,6 +73,13 @@ static constexpr int64_t BEACON_INTERVAL_US = 250000;
 // diagnostics — it keeps free-running regardless (no blanking on missed beacons).
 static constexpr int64_t BEACON_STALE_US = 2000000;  // 2s
 
+// A performer keeps one physical parent while that parent is healthy. This is
+// deliberately longer than two complete 4.6 s duty-cycle periods, so overlapping
+// direct and relayed beacons cannot make a node flap routes merely because one
+// listen window missed. After the timeout it may choose another direct/one-hop
+// path carrying the same primary conductor identity.
+static constexpr int64_t ROUTE_PARENT_STALE_US = 12000000;  // 12s
+
 // ---- Registration / roster ---------------------------------------------------
 // A performer re-announces itself (REGISTER) to the conductor this often, so the
 // conductor's roster self-heals after a conductor restart. Cheap: one tiny packet
@@ -85,6 +93,10 @@ static constexpr int64_t REGISTER_INTERVAL_JITTER_US = 2000000;  // 0–2s
 static constexpr int64_t REGISTER_SLOT_SPREAD_US = 500000;       // 0–500ms
 static constexpr int64_t REGISTER_RETRY_BASE_US = 200000;        // first <=200ms
 static constexpr int64_t REGISTER_RETRY_MAX_US = 2000000;        // cap 2s
+// Delivery to a relay proves only the first leg. Hold the child's current radio
+// window long enough for the primary's immediate table-row repair to traverse
+// the return queue; receiving that row releases the hold early.
+static constexpr int64_t REGISTER_REPAIR_WAIT_US = 750000;       // max 750ms
 
 // The conductor re-broadcasts its inventory this often. IDs and positions are
 // cached in node NVS, so this is a slow backstop. REGISTER drives immediate ID

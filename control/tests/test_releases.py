@@ -101,6 +101,7 @@ def test_known_release_download_is_verified_and_staged(tmp_path: Path) -> None:
     assert result["artifact"]["source"] == "release"
     assert result["artifact"]["version"] == "0.7.1"
     assert result["artifact"]["commit"] == "a" * 40
+    assert result["artifact"]["protocol"] == 10
     assert store.read_verified() == data
 
 
@@ -111,6 +112,7 @@ def test_release_manifest_requires_immutable_tag_commit_and_hashed_firmware() ->
     assert parsed.ref == "refs/tags/v0.3.0"
     assert parsed.commit == "a" * 40
     assert parsed.firmware["size"] == 8
+    assert parsed.firmware["protocol"] == 6
     assert parsed.serial_flash["filename"].endswith(".zip")
 
     bad = manifest()
@@ -127,6 +129,20 @@ def test_release_manifest_requires_immutable_tag_commit_and_hashed_firmware() ->
     bad["serial_flash"]["filename"] = "serial.zip"
     with pytest.raises(ReleaseMetadataError, match="serial flash filename is not canonical"):
         parse_release_manifest(bad)
+
+
+def test_release_manifest_preserves_explicit_firmware_protocol() -> None:
+    document = manifest(version="0.8.1")
+    document["firmware"]["protocol"] = 11
+
+    parsed = parse_release_manifest(document)
+
+    assert parsed.firmware["protocol"] == 11
+
+
+def test_release_manifest_rejects_unknown_legacy_protocol() -> None:
+    with pytest.raises(ReleaseMetadataError, match="firmware protocol"):
+        parse_release_manifest(manifest(version="0.8.1"))
 
 
 def test_release_channel_is_disabled_or_points_to_one_hashed_https_manifest() -> None:
@@ -170,6 +186,27 @@ def test_deployment_firmware_is_verified_and_staged_idempotently(tmp_path: Path)
 
     assert store.current()["sha256"] == hashlib.sha256(data).hexdigest()
     assert store.current()["uploaded_at"] == uploaded_at
+
+
+def test_deployment_firmware_backfills_protocol_on_a_legacy_cache_hit(
+    tmp_path: Path,
+) -> None:
+    data = b"firmware"
+    record = deployment_record(tmp_path, data)
+    store = OtaArtifactStore(tmp_path / "ota")
+    store.stage(
+        "lightweave-field-v0.3.0.bin",
+        data,
+        source="release",
+        release="v0.3.0",
+        version="0.3.0",
+        commit="a" * 40,
+    )
+    assert store.current()["protocol"] is None
+
+    stage_deployment_firmware(store, record)
+
+    assert store.current()["protocol"] == 6
 
 
 def test_corrupt_cached_firmware_is_reverified_and_restaged(tmp_path: Path) -> None:

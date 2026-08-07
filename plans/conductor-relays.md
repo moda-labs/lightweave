@@ -1,6 +1,6 @@
 # One-hop conductor relays
 
-> **Status:** Building
+> **Status:** Reviewing
 > **Created:** 2026-08-06
 >
 > Markers: `[ ]` idle | `[wip]` in progress | `[x]` done | `[f]` failed/blocked
@@ -38,7 +38,8 @@ Protocol v11 adds routing metadata to the common packed message header:
 - hop count, limited to one relay hop.
 
 The largest existing table packet becomes exactly 250 bytes, the ESP-NOW v1
-payload limit, so no application payload or table chunk count changes. All
+payload limit, so no table payload or chunk count changes. The calibration
+roster carries 37 rather than 39 MACs per chunk. All
 message types use the same routed header, keeping OTA packets inside the same
 transport boundary as beacons and inventory traffic.
 
@@ -63,7 +64,9 @@ Targeted OTA repairs and activations go to that next hop while retaining the
 performer destination. The machine state exposes each online node's role and
 route. The control plane activates ordinary performers before relay nodes, then
 activates the primary last. With one-hop routing, that is the complete dependency
-order.
+order. For a relayed activation, the relay sends a delivery receipt only after
+its queued downstream copies finish; the primary does not acknowledge the serial
+activation command before that end-to-end boundary is proven.
 
 Relay forwarding is queued outside the ESP-NOW receive callback. Queueing,
 parent selection, route learning, hop validation, and relay activation ordering
@@ -80,7 +83,7 @@ In scope:
 - direct and relayed performer coexistence;
 - sticky parent selection with stale failover;
 - relay route diagnostics in serial machine state;
-- relay-last performer activation order;
+- performer-before-relay activation order;
 - host tests, control tests, device builds, and operator documentation.
 
 Out of scope:
@@ -138,19 +141,20 @@ Out of scope:
 ## Release hygiene
 
 This feature intentionally bumps only `PROTO_VERSION` to 11. It does not bump
-the product version or edit the changelog. Primary, relays, and performers must
-move to protocol v11 as one coordinated field firmware rollout; the primary and
-new relay boards require direct USB bootstrap before they can carry routed OTA.
+the product version or edit the changelog. Primary and performers move to v11
+in one coordinated staged migration: the v10 primary dispatches every performer
+activation, then activates itself, and the control plane verifies the field
+after v11 connectivity returns. New relay boards require direct USB bootstrap.
 
 ```checklist
 - [x] Create `feat/conductor-relays` from fresh `origin/main` in a dedicated worktree. (verify: `git status --short --branch`)
 - [x] Record the protocol-v11 architecture, scope, acceptance criteria, proof plan, and rollout seam in this living plan. (verify: plan review against the Ready rubric)
-- [ ] Add dependency-free routed-header, parent-selection, relay-forwarding, and primary-route logic. (verify: focused native tests)
-- [ ] Integrate the relay runtime role, NVS provisioning, forwarding queue, and one-hop ESP-NOW sends. (verify: device builds and message-path audit)
-- [ ] Route all current upstream and downstream message types without changing OTA state semantics. (verify: MsgType/send-site matrix and native tests)
-- [ ] Expose node role and next hop in roster/machine state and activate performers before relays. (verify: control API tests)
-- [ ] Update architecture, handoff, README, and protocol comments with deployment and bootstrap instructions. (verify: documentation cross-check)
-- [ ] Run native tests, the full control suite, and all firmware builds. (verify: captured command results)
-- [ ] Perform the required adversarial review, fix confirmed findings, and rerun affected proof. (verify: clean review verdict)
+- [x] Add dependency-free routed-header, parent-selection, relay-forwarding, and primary-route logic. (verify: focused native tests)
+- [x] Integrate the relay runtime role, NVS provisioning, forwarding queue, and one-hop ESP-NOW sends. (verify: device builds and message-path audit)
+- [x] Route all current upstream and downstream message types without changing OTA state semantics. (verify: MsgType/send-site matrix and native tests)
+- [x] Expose node role and next hop in roster/machine state and activate performers before relays. (verify: control API tests)
+- [x] Update architecture, handoff, README, and protocol comments with deployment and bootstrap instructions. (verify: documentation cross-check)
+- [x] Run native tests, the full control suite, and all firmware builds. (verify: 180 native tests, 446 control tests, and three device builds)
+- [x] Perform the required adversarial review, fix confirmed findings, and rerun affected proof. (verify: all confirmed findings fixed; affected native/device/static proof green)
 - [ ] Commit implementation, push the feature branch, and open a pull request without merging. (verify: PR URL and clean worktree)
 ```

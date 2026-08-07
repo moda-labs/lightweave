@@ -4,15 +4,16 @@ Firmware and local control software for a synchronized field of battery-powered
 ESP32 LED lanterns.
 
 LightWeave turns many independent lanterns into one coordinated light
-installation. A single conductor broadcasts time and show settings over ESP-NOW;
-each performer lantern renders the current pattern locally from its stored field
-position. The result is a wireless field that can play pulses, waves, palette
+installation. One primary conductor broadcasts time and show settings over
+ESP-NOW; optional one-hop relays extend that same authority across long field
+distances, and each performer lantern renders the current pattern locally from
+its stored field position. The result is a wireless field that can play pulses, waves, palette
 drifts, and calm glows without pushing per-lantern frames or depending on a router.
 
 ## Why adopt this project
 
 - **One firmware image for the whole fleet.** Every ESP32 runs the same image.
-  Runtime NVS settings decide whether a board is the conductor or a performer.
+  Runtime NVS settings decide whether a board is the conductor, a relay, or a performer.
 - **Wireless by design.** Lanterns coordinate over ESP-NOW, so there is no data
   wiring across the field and no Wi-Fi infrastructure dependency during the show.
 - **Resilient synchronization.** Performers lock to the conductor clock, then
@@ -42,7 +43,9 @@ station for automatically detecting and provisioning up to ten USB-connected
 FireBeetles in parallel, with permanent performer-ID assignment for physical
 labeling. Field-wide OTA runs in the background with checkpoint repair, a
 six-hour retry window, durable resume, and independent per-performer activation
-as each board verifies; the earlier transfer path has
+as each board verifies. Protocol migrations instead stage the whole reachable
+cohort, dispatch every node activation while the old primary can still address
+it, then activate and verify the primary last; the earlier transfer path has
 completed successful bench installs, including same-protocol mixed-firmware
 recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
 the exact latest state and the pending scale hardware gate.
@@ -69,7 +72,10 @@ FastAPI control plane
     v
 conductor ESP32
     |
-    | ESP-NOW beacons: clock + 8 group patterns + power policy + layout updates
+    | routed ESP-NOW: clock + show + inventory + OTA
+    v
+optional relay ESP32s (one hop, no election)
+    |
     v
 performer ESP32 lanterns
     |
@@ -78,7 +84,7 @@ performer ESP32 lanterns
 SK6812 RGBW rings
 ```
 
-The conductor is authoritative for permanent board identity, the field layout,
+The primary conductor is authoritative for permanent board identity, the field layout,
 and live show settings. The control server is an admin surface, not a runtime
 dependency: once settings are saved to the conductor, the field keeps running if
 the laptop or Pi is unplugged.
@@ -154,7 +160,7 @@ batch notes.
 
 ### Firmware
 
-- ESP-NOW conductor/performer roles with one image and runtime role selection.
+- ESP-NOW primary/relay/performer roles with one image and runtime role selection.
 - 64-bit microsecond clock sync with free-run behavior on missed beacons.
 - Eight independent lantern-group pattern configs in each beacon, with
   `pattern_id`, brightness, palette/params, and sequence tracking.
@@ -169,7 +175,8 @@ batch notes.
 - Optional INA228 energy telemetry from reference nodes back to the conductor.
 - Two-phase background field-wide OTA over serial and ESP-NOW with per-performer
   repair, a durable six-hour retry window, an explicit verified staging barrier,
-  and one-action rolling activation while show controls remain available.
+  one-action rolling activation for same-protocol updates, and coordinated
+  stage-then-activate migration when the wire protocol changes.
 - Human serial CLI plus newline-delimited JSON serial protocol for the web UI.
 
 ### Control plane
@@ -211,7 +218,7 @@ Useful serial commands:
 
 ```text
 info
-role conductor|performer
+role conductor|performer|relay
 roster
 table
 assign <mac> <x> <y>

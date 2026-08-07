@@ -13,8 +13,10 @@
 #include <string.h>
 
 #include "firmware_version.h"
+#include "config.h"
 
-// Max nodes the conductor tracks. 60-node field + headroom; ~24 bytes/entry.
+// Max nodes the conductor tracks. 60-node field + headroom; route metadata is
+// retained per entry so targeted replies can select the immediate next hop.
 static constexpr uint8_t ROSTER_MAX = 64;
 
 struct RosterEntry {
@@ -23,6 +25,9 @@ struct RosterEntry {
   uint8_t  fw;       // node's PROTO_VERSION (spot a stale wire protocol)
   uint32_t build;    // node's firmware build id (spot same-protocol stragglers)
   uint8_t  dirty;    // node was built from an uncommitted firmware tree
+  uint8_t  role;     // runtime performer/conductor/relay role
+  uint8_t  via[6];   // primary's immediate ESP-NOW next hop for this node
+  uint8_t  hops;     // 0 direct, 1 through via relay
   char     version[FIRMWARE_VERSION_MAX];  // human release version
   int64_t  last_us;  // local time of this node's most recent REGISTER
 };
@@ -48,7 +53,8 @@ inline int rosterFind(const Roster& r, const uint8_t mac[6]) {
 // updates even when full).
 inline bool rosterUpsert(Roster& r, const uint8_t mac[6], uint16_t id, uint8_t fw,
                          uint32_t build, uint8_t dirty, const char* version,
-                         int64_t t) {
+                         int64_t t, uint8_t role = ROLE_PERFORMER,
+                         const uint8_t via[6] = nullptr, uint8_t hops = 0) {
   int i = rosterFind(r, mac);
   if (i < 0) {
     if (r.count >= ROSTER_MAX) return false;
@@ -59,6 +65,9 @@ inline bool rosterUpsert(Roster& r, const uint8_t mac[6], uint16_t id, uint8_t f
   r.entries[i].fw = fw;
   r.entries[i].build = build;
   r.entries[i].dirty = dirty;
+  r.entries[i].role = role <= ROLE_RELAY ? role : ROLE_PERFORMER;
+  memcpy(r.entries[i].via, via ? via : mac, 6);
+  r.entries[i].hops = hops <= 1 ? hops : 1;
   firmwareCopyVersion(r.entries[i].version, version);
   r.entries[i].last_us = t;
   return true;

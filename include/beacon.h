@@ -1,13 +1,13 @@
 // Wire protocol for the ESP-NOW messages nodes exchange.
 //
-// Every packet starts with a common MsgHeader {magic, version, type}. The
+// Every packet starts with a common routed MsgHeader. The
 // receiver validates magic + version, then dispatches on `type` to the matching
 // payload struct. The clock beacon (MSG_BEACON) is the hot path — broadcast a few
 // times a second and followed by every performer — so it stays small. Everything
 // else (REGISTER, and later ROSTER/TABLE) is occasional control traffic.
 //
 // All structs are packed so the wire layout is identical on every node
-// regardless of compiler padding, and every message stays well under the
+// regardless of compiler padding, and every message stays at or below the
 // 250-byte ESP-NOW payload limit. The magic constant lives in config.h
 // (BEACON_MAGIC); the version is bumped here whenever the layout changes.
 #pragma once
@@ -34,9 +34,11 @@
 // v9: TableRow and REGISTER carry group membership; BeaconMsg carries one
 //     independent pattern config for each of eight lantern groups.
 // v10: TableRow and REGISTER carry each board's 16/32/64 LED-count profile.
+// v11: MsgHeader carries logical origin/destination plus a one-hop route count;
+//      REGISTER reports performer/conductor/relay role.
 // MSG_ROSTER was added without a protocol bump: it is a new optional message
 // type, and older receivers safely ignore unknown types.
-static constexpr uint8_t PROTO_VERSION = 10;
+static constexpr uint8_t PROTO_VERSION = 11;
 
 // A field has eight fixed group slots. Group ids are zero-based on the wire and
 // in NVS (the operator UI labels them Group 1..8). Fixed slots avoid a second
@@ -57,7 +59,7 @@ enum MsgType : uint8_t {
   MSG_REGISTER = 1,  // performer -> conductor: announce my MAC + firmware
   MSG_ROSTER   = 2,  // conductor -> all: finalized roster        (Half 2)
   MSG_TABLE    = 3,  // conductor -> all: MAC->ID+position+group inventory
-  MSG_ACK      = 4,  // generic acknowledgement                   (Half 2)
+  MSG_ACK      = 4,  // relay -> primary: downstream delivery receipt
   MSG_POWER    = 5,  // performer -> conductor: INA228 energy telemetry
   MSG_OTA_BEGIN = 6, // conductor -> all: begin field firmware OTA
   MSG_OTA_CHUNK = 7, // conductor -> all: firmware OTA chunk
@@ -71,7 +73,12 @@ typedef struct __attribute__((packed)) {
   uint32_t magic;    // BEACON_MAGIC — reject anything else
   uint8_t  version;  // PROTO_VERSION — reject a mismatch
   uint8_t  type;     // MsgType
+  uint8_t  origin[6];       // logical sender, preserved across a relay
+  uint8_t  destination[6];  // logical recipient or FF:FF:FF:FF:FF:FF
+  uint8_t  hops;            // 0 direct, 1 relayed; larger values are rejected
 } MsgHeader;
+
+static_assert(sizeof(MsgHeader) == 19, "MsgHeader v11 wire layout changed");
 
 // One group's pattern configuration. Kept as a separate packed wire type so a
 // performer can select its own group without copying or interpreting the other
@@ -101,15 +108,16 @@ inline const PatternConfig& beaconPattern(const BeaconMsg& b,
   return b.patterns[groupIdSafe(group_id)];
 }
 
-static_assert(sizeof(BeaconMsg) == 136, "BeaconMsg v10 wire layout changed");
+static_assert(sizeof(BeaconMsg) == 149, "BeaconMsg v11 wire layout changed");
 static_assert(sizeof(BeaconMsg) <= 250, "BeaconMsg exceeds ESP-NOW payload cap");
 
 // type = MSG_ROSTER. During camera calibration the conductor broadcasts the
 // sorted alive MAC roster in chunks. Each performer finds its own MAC and uses
 // `base_rank + row_index + 1` as the dense, collision-free calibration identity.
 // This lets brand-new id=0 nodes blink unique locator codes without serial
-// provisioning. ESP-NOW caps payloads at 250 B; 39 MACs gives a 245 B packet.
-static constexpr uint8_t ROSTER_MACS_PER_MSG = 39;
+// provisioning. ESP-NOW caps payloads at 250 B; v11's routed header leaves room
+// for 37 MACs in a 246 B packet.
+static constexpr uint8_t ROSTER_MACS_PER_MSG = 37;
 
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;
@@ -119,6 +127,18 @@ typedef struct __attribute__((packed)) {
   uint16_t  base_rank;  // zero-based rank of macs[0] in the full sorted roster
   uint8_t   macs[ROSTER_MACS_PER_MSG][6];
 } RosterMsg;
+
+// A relay emits this only after every queued copy of a targeted packet has
+// completed downstream. The header origin is the logical child named by the
+// original packet, while the immediate ESP-NOW sender remains the relay. This
+// gives the primary end-to-end delivery evidence before it reboots that relay.
+typedef struct __attribute__((packed)) {
+  MsgHeader hdr;
+  uint8_t   acked_type;
+  uint8_t   delivered;
+} AckMsg;
+
+static_assert(sizeof(AckMsg) == 21, "AckMsg v11 wire layout changed");
 
 inline uint16_t rosterMsgFindRank(const RosterMsg& msg, const uint8_t mac[6]) {
   for (uint8_t i = 0; i < msg.n && i < ROSTER_MACS_PER_MSG; i++) {
@@ -143,6 +163,7 @@ typedef struct __attribute__((packed)) {
   uint16_t  id;      // human label (0 if unprovisioned)
   uint8_t   group_id;  // cached table group; lets conductor repair a missed edit
   uint8_t   led_count;  // cached 16/32/64 hardware profile
+  uint8_t   role;     // ROLE_PERFORMER / ROLE_CONDUCTOR / ROLE_RELAY
   uint8_t   fw;      // sender's PROTO_VERSION (wire compatibility marker)
   uint32_t  build;   // sender's firmware build id (git-derived)
   uint8_t   dirty;   // sender was built from uncommitted firmware changes
@@ -162,8 +183,8 @@ typedef struct __attribute__((packed)) {
   float    y;
 } TableRow;  // 19 bytes
 
-// Rows per MSG_TABLE packet. ESP-NOW caps the payload at 250 B; the header + chunk
-// fields are 9 B, so (250 - 9) / 19 = 12 rows fit (a 237 B packet at full).
+// Rows per MSG_TABLE packet. ESP-NOW caps the payload at 250 B; the routed header
+// plus chunk fields are 22 B, so (250 - 22) / 19 = 12 rows fit (250 B full).
 static constexpr uint8_t TABLE_ROWS_PER_MSG = 12;
 
 // type = MSG_TABLE. The conductor's authoritative inventory, broadcast in
@@ -229,3 +250,6 @@ typedef struct __attribute__((packed)) {
   uint32_t  offset;  // bytes accepted so far
   uint32_t  crc32;   // running CRC32 at offset
 } OtaStatusMsg;
+
+static_assert(sizeof(TableMsg) == 250, "TableMsg must fit ESP-NOW v1 exactly");
+static_assert(sizeof(TableMsg) <= 250, "TableMsg exceeds ESP-NOW payload cap");

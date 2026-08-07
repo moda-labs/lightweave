@@ -261,6 +261,21 @@ Development / recovery. Once selected as desired, it follows the same automatic
 or explicitly started OTA path; rolling back only the control-plane channel does
 not silently select an older field artifact.
 
+Release manifests bind the field image's wire `protocol` alongside its hashes.
+The control plane compares that target with the attached primary's live protocol
+and uses the coordinated stage-then-activate barrier for either an upgrade or a
+downgrade. Immutable v0.3.0-v0.8.0 manifests predate that field, so their audited
+protocol versions remain in the control plane's legacy release registry.
+
+A protocol downgrade below v11 is rejected while the inventory contains a relay
+role, a one-hop route, or an offline row whose route cannot be proven direct.
+Pre-v11 firmware cannot forward routed traffic, so rebooting that topology would
+strand the relayed performers. Move those performers into direct primary range,
+return relay boards to performer role, and bring every offline board online for
+route verification—or recover them individually over USB—before selecting a
+pre-v11 artifact. Artifacts without protocol metadata also fail closed; selecting
+a trusted release again backfills legacy caches from its immutable manifest.
+
 Do not manually edit `/opt/lightweave`, a deployment record, or a downloaded
 firmware artifact to simulate rollback. Those changes break the integrity chain
 and will be replaced or rejected by reconciliation.
