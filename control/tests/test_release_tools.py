@@ -176,6 +176,63 @@ autoflash = load_script("firebeetle_autoflash")
 promote = load_script("promote_release")
 
 
+def test_firmware_version_is_plain_only_for_clean_exact_release() -> None:
+    identity = load_script("firmware_identity")
+
+    assert identity.reported_version("0.7.1", "v0.7.1\n", dirty=False) == "0.7.1"
+    assert identity.reported_version("0.7.1", "v0.7.0\n", dirty=False) == "0.7.1-dev"
+    assert identity.reported_version("0.7.1", "", dirty=False) == "0.7.1-dev"
+    assert identity.reported_version("0.7.1", "v0.7.1\n", dirty=True) == "0.7.1-dev"
+
+
+def test_firmware_version_rejects_values_that_do_not_fit_wire_format() -> None:
+    identity = load_script("firmware_identity")
+
+    with pytest.raises(ValueError, match="wire format"):
+        identity.reported_version("123456789012", "", dirty=False)
+
+
+def test_firmware_build_hook_loads_in_platformio_isolated_path() -> None:
+    hook = REPO_ROOT / "scripts" / "firmware_build_id.py"
+    program = """
+import sys
+from pathlib import Path
+
+class FakeEnv:
+    def __init__(self):
+        self.defines = None
+
+    def Append(self, *, CPPDEFINES):
+        self.defines = CPPDEFINES
+
+    def subst(self, value):
+        assert value == "$PROJECT_DIR"
+        return str(Path.cwd())
+
+env = FakeEnv()
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+exec(
+    compile(source, sys.argv[1], "exec"),
+    {"Import": lambda _name: None, "env": env},
+)
+assert env.defines
+assert {item[0] for item in env.defines} == {
+    "FIRMWARE_BUILD_ID",
+    "FIRMWARE_BUILD_DIRTY",
+    "FIRMWARE_VERSION",
+}
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", program, str(hook)],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def autoflash_manifest(bundle_data: bytes) -> dict:
     filename = f"lightweave-serial-flash-{TAG}.zip"
     return {
@@ -200,6 +257,7 @@ def fake_esptool(tmp_path: Path) -> tuple[Path, Path]:
     package = tmp_path / "fake-tool" / "esptool"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(
+        "from intelhex import IntelHex\n"
         "def _main():\n"
         "    import sys\n"
         "    if sys.argv[1:] != ['version']:\n"
@@ -210,6 +268,12 @@ def fake_esptool(tmp_path: Path) -> tuple[Path, Path]:
     (package / "targets.json").write_text('{"chip": "esp32"}\n')
     license_path = tmp_path / "fake-tool" / "LICENSE"
     license_path.write_text("Fake esptool test license\n")
+    intelhex = tmp_path / "fake-tool" / "_contrib" / "intelhex"
+    intelhex.mkdir(parents=True)
+    (intelhex / "__init__.py").write_text("class IntelHex:\n    pass\n")
+    intelhex_metadata = intelhex.parent / "intelhex-2.3.0.dist-info"
+    intelhex_metadata.mkdir()
+    (intelhex_metadata / "LICENSE.txt").write_text("Fake IntelHex test license\n")
     return package, license_path
 
 
@@ -245,9 +309,12 @@ def test_serial_flash_bundle_is_deterministic_and_self_verifying(tmp_path: Path)
 
     assert first.read_bytes() == second.read_bytes()
     plan = autoflash.extract_bundle(first, tmp_path / "extracted")
+    assert plan["schema_version"] == 3
     assert {item["offset"] for item in plan["segments"]} == set(autoflash.EXPECTED_SEGMENTS)
     assert (tmp_path / "extracted" / "esptool.py").is_file()
     assert (tmp_path / "extracted" / "esptool" / "__main__.py").is_file()
+    assert (tmp_path / "extracted" / "intelhex" / "__init__.py").is_file()
+    assert (tmp_path / "extracted" / "intelhex-LICENSE").is_file()
     bundle.verify_bundle_runtime(first)
 
 
@@ -1016,6 +1083,34 @@ def test_autoflash_discovers_wch_performers_on_macos_and_linux(monkeypatch) -> N
         "/dev/cu.wchusbserial1",
         "/dev/ttyUSB0",
     ]
+
+
+def test_autoflash_device_instance_ignores_ctime_changes_from_serial_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from serial.tools import list_ports
+
+    device = SimpleNamespace(
+        device="/dev/cu.wchusbserial1",
+        location="1-1.1",
+        hwid="wch mac",
+        vid=autoflash.WCH_VID,
+        pid=autoflash.WCH_PID,
+    )
+    stats = iter(
+        [
+            SimpleNamespace(st_rdev=123, st_ino=456, st_ctime_ns=1000),
+            SimpleNamespace(st_rdev=123, st_ino=456, st_ctime_ns=2000),
+        ]
+    )
+    monkeypatch.setattr(list_ports, "comports", lambda: [device])
+    monkeypatch.setattr(autoflash.os, "stat", lambda _device: next(stats))
+
+    first = autoflash.candidate_port_infos()[0]
+    second = autoflash.candidate_port_infos()[0]
+
+    assert first.instance_id == "123:456"
+    assert second.instance_id == first.instance_id
 
 
 def test_autoflash_honors_disabled_production_channel(

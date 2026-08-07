@@ -22,7 +22,15 @@ class RemoteSettings:
 
     @property
     def serial_mode(self) -> bool:
+        return self.conductor_mode in {"serial", "local-serial"}
+
+    @property
+    def remote_serial_mode(self) -> bool:
         return self.conductor_mode == "serial"
+
+    @property
+    def local_serial_mode(self) -> bool:
+        return self.conductor_mode == "local-serial"
 
 
 def _parse_bool(name: str, value: str | None, *, default: bool) -> bool:
@@ -71,20 +79,23 @@ def _parse_origins(value: str | None) -> frozenset[str]:
 
 def load_remote_settings(environ: Mapping[str, str]) -> RemoteSettings:
     conductor_mode = environ.get("CONTROL_CONDUCTOR", "mock").strip().lower()
-    if conductor_mode not in {"mock", "serial"}:
+    if conductor_mode not in {"mock", "serial", "local-serial"}:
         raise RuntimeError(f"unknown CONTROL_CONDUCTOR={conductor_mode!r}")
 
-    serial_mode = conductor_mode == "serial"
+    remote_serial_mode = conductor_mode == "serial"
+    serial_mode = conductor_mode in {"serial", "local-serial"}
     password_hash = environ.get("CONTROL_PASSWORD_HASH")
     if password_hash is not None and not password_hash:
         raise RuntimeError("CONTROL_PASSWORD_HASH must not be empty")
-    if serial_mode and password_hash is None:
+    if remote_serial_mode and password_hash is None:
         raise RuntimeError("CONTROL_PASSWORD_HASH is required when CONTROL_CONDUCTOR=serial")
 
     allowed_origins = _parse_origins(environ.get("CONTROL_ALLOWED_ORIGINS"))
-    if serial_mode and not allowed_origins:
+    if remote_serial_mode and not allowed_origins:
         raise RuntimeError("CONTROL_ALLOWED_ORIGINS is required when CONTROL_CONDUCTOR=serial")
-    if serial_mode and any(not origin.startswith("https://") for origin in allowed_origins):
+    if remote_serial_mode and any(
+        not origin.startswith("https://") for origin in allowed_origins
+    ):
         raise RuntimeError("serial-mode CONTROL_ALLOWED_ORIGINS must use https")
 
     allow_network_changes = _parse_bool(
@@ -93,14 +104,14 @@ def load_remote_settings(environ: Mapping[str, str]) -> RemoteSettings:
         default=not serial_mode,
     )
     raw_require_https = environ.get("CONTROL_REQUIRE_HTTPS")
-    if serial_mode and raw_require_https is None:
+    if remote_serial_mode and raw_require_https is None:
         raise RuntimeError("CONTROL_REQUIRE_HTTPS=true is required when CONTROL_CONDUCTOR=serial")
     require_https = _parse_bool(
         "CONTROL_REQUIRE_HTTPS",
         raw_require_https,
-        default=serial_mode,
+        default=remote_serial_mode,
     )
-    if serial_mode and not require_https:
+    if remote_serial_mode and not require_https:
         raise RuntimeError("CONTROL_REQUIRE_HTTPS cannot be false when CONTROL_CONDUCTOR=serial")
 
     raw_data_dir = environ.get("CONTROL_DATA_DIR")

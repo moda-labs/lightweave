@@ -34,19 +34,24 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   native unit tests, so sync math, pattern math, roster/table logic, power policy,
   and OTA helpers can be tested without hardware.
 
-Current release: `0.7.0`. The bench system has been verified with one conductor
+Current release: `0.8.0`. The bench system has been verified with one conductor
 and mixed 16/64-LED performers for sync, layout and pre-placement group assignment,
 independent group pattern control, reversible blackout, runtime power policy, and
 the local web control plane. The control plane now includes a same-host flashing
 station for automatically detecting and provisioning up to ten USB-connected
 FireBeetles in parallel, with permanent performer-ID assignment for physical
-labeling. Field-wide OTA is implemented and has completed successful bench
-installs, including same-protocol mixed-firmware recovery back to a consistent
-field. See [docs/HANDOFF.md](docs/HANDOFF.md) for the exact latest state.
+labeling. Field-wide OTA runs in the background with checkpoint repair, a
+six-hour retry window, durable resume, and independent per-performer activation
+as each board verifies; the earlier transfer path has
+completed successful bench installs, including same-protocol mixed-firmware
+recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
+the exact latest state and the pending scale hardware gate.
 
 Production Pi updates use a pull-based, hash-pinned release channel with health
 checks and automatic code rollback. Each promoted release stages its immutable
-firmware artifact, but an operator still explicitly starts field OTA. The UI
+firmware artifact and, by default, reconciles online mismatched performers in
+the background. The Firmware tab's persistent Automatic updates switch can pause
+that behavior before a high-visibility show. The UI
 shows separate web-control and field-firmware versions and changelogs. See
 [docs/RELEASING.md](docs/RELEASING.md) for the release procedure and
 [docs/SSH_ACCESS.md](docs/SSH_ACCESS.md) for Raspberry Pi shell access.
@@ -162,8 +167,9 @@ batch notes.
 - Radio duty cycling, CPU light-sleep support, and schedule-driven deep-sleep
   policy.
 - Optional INA228 energy telemetry from reference nodes back to the conductor.
-- Manual maintenance-mode OTA transport over serial to conductor, then ESP-NOW to
-  performers.
+- Two-phase background field-wide OTA over serial and ESP-NOW with per-performer
+  repair, a durable six-hour retry window, an explicit verified staging barrier,
+  and one-action rolling activation while show controls remain available.
 - Human serial CLI plus newline-delimited JSON serial protocol for the web UI.
 
 ### Control plane
@@ -175,7 +181,7 @@ batch notes.
 - Node actions: identify, move/place, assign group, forget, and replace.
 - Per-group pattern controls with conductor acknowledgements before writes are
   treated as saved.
-- Operations view for firmware consistency, recovery state, OTA staging/install,
+- Operations view for firmware consistency, recovery state, OTA staging/activation,
   runtime power policy, and sparse power monitoring. Battery capacity defaults
   to the 384 Wh KUNLUN pack and can be changed in the UI; metered nodes can
   be manually synced to 100% after charging.
@@ -227,12 +233,18 @@ Run the web control plane in mock mode:
 Run it against a real conductor:
 
 ```bash
-CONTROL_CONDUCTOR=serial \
+CONTROL_CONDUCTOR=local-serial \
 CONTROL_SERIAL_PORT=/dev/cu.usbserial-XXXX \
+CONTROL_DATA_DIR="$PWD/.control-data" \
 .venv/bin/python -m uvicorn control.app:app --host 127.0.0.1 --port 8000
 ```
 
 Then open `http://127.0.0.1:8000/`.
+
+This local mode rejects non-loopback hosts and all forwarding headers. Use the
+authenticated HTTPS `serial` deployment contract in
+[`control/README.md`](control/README.md) for the Pi, tunnels, or any remotely
+reachable control plane.
 
 ## Repo guide
 

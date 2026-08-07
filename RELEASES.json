@@ -2,6 +2,23 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.8.0",
+      "date": "2026-08-06",
+      "title": "Seamless field firmware management",
+      "control_changes": [
+        "Made the promoted release's companion firmware the automatic desired image, with a show-safety switch that can pause automatic updates during high-visibility operation.",
+        "Added resumable per-performer OTA progress, automatic retries, truthful byte counts, independent install completion, and live dashboard updates while normal field controls remain available.",
+        "Simplified the USB flashing station around automatic board inspection, per-board installation, and bounded parallel auto-update, including complete packaged tooling for new-board provisioning.",
+        "Added top-level performer and group counts plus a dedicated power view with persistent battery calibration, stable state-of-charge, and recent per-performer draw."
+      ],
+      "firmware_changes": [
+        "Made OTA transfer repair individual and persistent: performers verify, install, and reboot independently while laggards keep retrying and the conductor activates last.",
+        "Kept show beacons live during OTA, added checkpoint-driven shared and targeted repairs, and paced flash-sector boundaries to improve ESP-NOW delivery reliability.",
+        "Staggered performer registration into deterministic MAC-derived slots with bounded retry backoff, preventing synchronized check-ins from hiding online performers.",
+        "Kept radio protocol v10, so existing v0.7.x boards remain compatible while automatic firmware management moves them to the matching v0.8.0 build."
+      ]
+    },
+    {
       "version": "0.7.1",
       "date": "2026-08-05",
       "title": "Repository move to Moda Labs",

@@ -5,19 +5,27 @@ import json
 import os
 import re
 import subprocess
+import urllib.error
+import urllib.request
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from .ota_store import OtaArtifactError, OtaArtifactStore
+from .ota_store import MAX_FIRMWARE_BYTES, OtaArtifactError, OtaArtifactStore
 
 
 SCHEMA_VERSION = 1
 SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ALLOWED_RELEASE_REPOSITORIES = (
+    "https://github.com/moda-labs/lightweave.git",
+    "https://github.com/underminedsk/lightweave.git",
+)
+MAX_RELEASE_MANIFEST_BYTES = 128 * 1024
 
 
 class ReleaseMetadataError(ValueError):
@@ -377,7 +385,12 @@ def stage_deployment_firmware(ota_store: OtaArtifactStore, record: Mapping[str, 
         return
     manifest = parse_release_manifest(record["manifest"])
     current = ota_store.current()
-    if current and current.get("sha256") == manifest.firmware["sha256"]:
+    if (
+        current
+        and current.get("sha256") == manifest.firmware["sha256"]
+        and current.get("source") == "release"
+        and current.get("version") == manifest.version
+    ):
         try:
             ota_store.read_verified()
             return
@@ -392,9 +405,73 @@ def stage_deployment_firmware(ota_store: OtaArtifactStore, record: Mapping[str, 
         raise ReleaseMetadataError("deployment firmware size mismatch")
     if hashlib.sha256(data).hexdigest() != manifest.firmware["sha256"]:
         raise ReleaseMetadataError("deployment firmware SHA-256 mismatch")
-    staged = ota_store.stage(str(manifest.firmware["filename"]), data)
+    staged = ota_store.stage(
+        str(manifest.firmware["filename"]),
+        data,
+        source="release",
+        release=manifest.release,
+        version=manifest.version,
+        commit=manifest.commit,
+    )
     if staged["crc32"] != manifest.firmware["crc32"]:
         raise ReleaseMetadataError("deployment firmware CRC32 mismatch")
+
+
+def _download_release_asset(url: str, limit: int) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": "lightweave-control/1"})
+    with urllib.request.urlopen(request, timeout=45) as response:
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ReleaseMetadataError("release asset exceeds its maximum allowed size")
+    return data
+
+
+def stage_known_release_firmware(
+    version: str,
+    ota_store: OtaArtifactStore,
+    *,
+    download: Any = _download_release_asset,
+) -> dict[str, Any]:
+    """Download and checksum-verify one published release's field image."""
+    if not SEMVER_RE.fullmatch(version):
+        raise ReleaseMetadataError("firmware release version must be semantic x.y.z")
+    release = f"v{version}"
+    failures: list[str] = []
+    for repository in ALLOWED_RELEASE_REPOSITORIES:
+        manifest_url = canonical_release_asset_url(
+            repository, release, "lightweave-release.json"
+        )
+        try:
+            manifest_bytes = download(manifest_url, MAX_RELEASE_MANIFEST_BYTES)
+            manifest = parse_release_manifest(json.loads(manifest_bytes))
+            if manifest.version != version or manifest.repository != repository:
+                raise ReleaseMetadataError("release manifest identity mismatch")
+            firmware = download(str(manifest.firmware["url"]), MAX_FIRMWARE_BYTES)
+            if len(firmware) != int(manifest.firmware["size"]):
+                raise ReleaseMetadataError("release firmware size mismatch")
+            if hashlib.sha256(firmware).hexdigest() != manifest.firmware["sha256"]:
+                raise ReleaseMetadataError("release firmware SHA-256 mismatch")
+            if zlib.crc32(firmware) & 0xFFFFFFFF != manifest.firmware["crc32"]:
+                raise ReleaseMetadataError("release firmware CRC32 mismatch")
+            artifact = ota_store.stage(
+                str(manifest.firmware["filename"]),
+                firmware,
+                source="release",
+                release=manifest.release,
+                version=manifest.version,
+                commit=manifest.commit,
+            )
+            return {"release": manifest.as_dict(), "artifact": artifact}
+        except (
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+            urllib.error.URLError,
+            ReleaseMetadataError,
+        ) as error:
+            failures.append(str(error))
+    detail = failures[-1] if failures else "release not found"
+    raise ReleaseMetadataError(f"cannot load firmware release v{version}: {detail}")
 
 
 def current_source_commit(repo_root: Path) -> str | None:

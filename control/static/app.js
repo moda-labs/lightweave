@@ -16,7 +16,10 @@ let selectedGroup = 0;
 let groupNameBaseline = null;
 let powerBaseline = null;
 let otaArtifact = null;
+let otaArtifactUploading = false;
 let otaInstall = null;
+let otaInstallRefreshPromise = null;
+let otaInstallPollTimer = null;
 let savedPatterns = [];
 let calibrationFrames = [];
 let calibrationProposal = null;
@@ -179,8 +182,25 @@ async function apiBinary(path, data) {
   return response.json();
 }
 
+function performerId(item) {
+  const direct = Number(item?.node_id);
+  if (Number.isInteger(direct) && direct > 0) return direct;
+  const match = String(item?.label || "").match(/^#(\d+)$/);
+  return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+}
+
+function comparePerformers(a, b) {
+  const idDifference = performerId(a) - performerId(b);
+  if (Number.isFinite(idDifference) && idDifference !== 0) return idDifference;
+  return String(a?.label || a?.mac || "").localeCompare(
+    String(b?.label || b?.mac || ""),
+    undefined,
+    { numeric: true },
+  );
+}
+
 function lanterns() {
-  return state?.lanterns || [];
+  return [...(state?.lanterns || [])].sort(comparePerformers);
 }
 
 function patternForGroup(groupId) {
@@ -206,6 +226,17 @@ function groupName(groupId) {
 
 function groupLabel(groupId) {
   return String(groupEntry(groupId)?.label || `Group ${Number(groupId) + 1}`);
+}
+
+function groupPerformerCounts(items) {
+  const counts = Array.from({ length: GROUP_COUNT }, () => ({ online: 0, total: 0 }));
+  for (const item of Array.isArray(items) ? items : []) {
+    const groupId = Number(item.group_id);
+    if (item.status === "retired" || !Number.isInteger(groupId) || groupId < 0 || groupId >= GROUP_COUNT) continue;
+    counts[groupId].total += 1;
+    if (item.status === "alive") counts[groupId].online += 1;
+  }
+  return counts;
 }
 
 function lanternDisplayName(mac) {
@@ -290,12 +321,17 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function onlinePerformerCount(items) {
+  return (Array.isArray(items) ? items : []).filter((item) => item.status === "alive").length;
+}
+
 function render() {
   if (!state) return;
   if (!selectedMac && lanterns().length) selectedMac = lanterns()[0].mac;
   if (!patternDraft || !isPatternDirty()) patternDraft = patternDraftFromState();
 
   $("#connection-status").textContent = state.conductor.connected ? "connected" : "disconnected";
+  $("#online-performer-count").textContent = `${onlinePerformerCount(lanterns())}`;
   $("#field-count").textContent = `${state.summary.alive} / ${state.summary.total}`;
   const activePattern = activePatternState();
   renderGroupControls();
@@ -329,61 +365,91 @@ function provisioningStateLabel(stateName) {
   return String(stateName || "unknown").replaceAll("_", " ");
 }
 
+function provisioningUpdateLabel(job) {
+  const labels = {
+    current: "Current",
+    update_needed: "Update needed",
+    unsupported: "Not a performer",
+    unknown: "Unknown",
+  };
+  return labels[job.update_status] || provisioningStateLabel(job.state);
+}
+
 function renderProvisioning() {
   if (!provisioning) return;
   const available = provisioning.available === true;
   const session = provisioning.session || {};
+  const autoUpdate = session.auto_update_enabled === true || session.active === true;
   const artifact = provisioning.artifact;
-  const jobs = Array.isArray(provisioning.jobs) ? provisioning.jobs : [];
+  const jobs = Array.isArray(provisioning.jobs)
+    ? provisioning.jobs.filter((job) => job.connected).sort(comparePerformers)
+    : [];
   const status = $("#provisioning-status");
-  status.textContent = !available ? "unavailable" : session.active ? "armed" : "idle";
-  status.className = `chip ${available && session.active ? "sync" : !available ? "active" : ""}`;
+  status.textContent = !available ? "unavailable" : autoUpdate ? "auto-update on" : "manual";
+  status.className = `chip ${available && autoUpdate ? "sync" : !available ? "active" : ""}`;
   $("#provisioning-release").textContent = artifact
     ? `${artifact.release} · ${artifact.build}`
     : "No approved artifact";
   $("#provisioning-connected").textContent = `${Number(provisioning.connected || 0)} boards`;
   $("#provisioning-running").textContent = String(Number(provisioning.running || 0));
-  if (!session.active) $("#provisioning-workers").value = String(session.max_workers || 5);
+  if (!autoUpdate) $("#provisioning-workers").value = String(session.max_workers || 5);
 
-  const factoryUntil = Number(session.factory_expires_at || 0);
-  const factoryRemaining = Math.max(0, Math.round(factoryUntil - Date.now() / 1000));
   const notice = $("#provisioning-notice");
-  notice.className = `flash-notice ${!available || provisioning.artifact_error || session.factory_armed ? "warn" : ""}`;
+  notice.className = `flash-notice ${!available || provisioning.artifact_error ? "warn" : ""}`;
   notice.textContent = !available
     ? (provisioning.artifact_error || "Install and start the local USB provisioner on this host.")
     : provisioning.artifact_error
       ? `Artifact warning: ${provisioning.artifact_error}`
-      : session.factory_armed
-        ? `Factory provisioning armed for ${formatDuration(factoryRemaining)}. Blank boards may be erased.`
-        : session.active
-          ? "Station armed for registered performers. New blank boards will fail closed."
-          : "Map each physical hub port to a numbered slot, then arm the station.";
+      : autoUpdate
+        ? `Auto-update is on. New and outdated boards install automatically; up to ${Number(session.max_workers || 5)} run at once.`
+        : "Auto-update is off. Use Install firmware on an individual board, or enable auto-update for the station.";
 
-  $('[data-action="start-provisioning"]').disabled = !available || !artifact || session.active;
-  $('[data-action="start-factory-provisioning"]').disabled = !available || !artifact || session.active;
-  $('[data-action="stop-provisioning"]').disabled = !session.active;
-  $("#provisioning-workers").disabled = session.active;
+  const enableAuto = $('[data-action="enable-provisioning-auto-update"]');
+  const disableAuto = $('[data-action="disable-provisioning-auto-update"]');
+  enableAuto.hidden = autoUpdate;
+  disableAuto.hidden = !autoUpdate;
+  enableAuto.disabled = !available || !artifact || autoUpdate;
+  disableAuto.disabled = !autoUpdate;
+  $("#provisioning-workers").disabled = autoUpdate;
 
   $("#provisioning-jobs").innerHTML = jobs.length ? jobs.map((job) => {
-    const slot = job.slot ? `Slot ${escapeHtml(job.slot)}` : "Unmapped port";
-    const board = job.node_id ? `BOARD #${escapeHtml(job.node_id)}` : provisioningStateLabel(job.state).toUpperCase();
-    const mapControls = job.state === "unmapped" && job.connected ? `
-      <div class="flash-job-actions">
-        <input type="number" min="1" max="32" placeholder="Slot #" data-slot-input="${escapeHtml(job.id)}" aria-label="Physical hub slot">
-        <button type="button" data-provision-action="map-slot" data-job-id="${escapeHtml(job.id)}" data-port-id="${escapeHtml(job.port_id)}">Assign slot</button>
-      </div>` : "";
-    const retry = job.state === "failed" && job.connected
-      ? `<div class="flash-job-actions"><button type="button" data-provision-action="retry" data-job-id="${escapeHtml(job.id)}">Retry this board</button></div>`
+    const slot = job.slot ? `Hub slot ${escapeHtml(job.slot)}` : "USB board";
+    const board = job.node_id
+      ? `BOARD #${escapeHtml(job.node_id)}`
+      : escapeHtml(String(job.role || "Unknown").toUpperCase());
+    const firmware = job.firmware_version && job.firmware_build
+      ? `v${escapeHtml(job.firmware_version)} · ${escapeHtml(job.firmware_build)}${job.firmware_proto !== null && job.firmware_proto !== undefined ? ` · p${escapeHtml(job.firmware_proto)}` : ""}${job.firmware_dirty ? " · dirty" : ""}`
+      : "Unknown";
+    const target = artifact
+      ? `Target v${escapeHtml(artifact.version)} · ${escapeHtml(artifact.build)}`
+      : "Target unavailable";
+    const active = ["inspecting", "probing", "reserving_id", "preparing", "flashing", "erasing", "assigning_id", "verifying", "rebooting"].includes(job.state);
+    const differentBuild = job.update_status === "update_needed"
+      && job.firmware_version === artifact?.version
+      && job.firmware_build
+      && job.firmware_build !== artifact?.build;
+    const badge = active
+      ? provisioningStateLabel(job.state)
+      : differentBuild
+        ? `Different build of ${escapeHtml(job.firmware_version)}`
+        : provisioningUpdateLabel(job);
+    const installable = job.connected
+      && !active
+      && job.update_status !== "current"
+      && job.update_status !== "unsupported";
+    const install = installable
+      ? `<div class="flash-job-actions"><button type="button" data-provision-action="install" data-job-id="${escapeHtml(job.id)}" ${autoUpdate ? "disabled" : ""}>Install firmware</button></div>`
       : "";
-    return `<article class="flash-job" data-state="${escapeHtml(job.state)}">
+    return `<article class="flash-job" data-state="${escapeHtml(job.state)}" data-update-status="${escapeHtml(job.update_status || "unknown")}">
       <div class="flash-job-head">
         <div class="flash-slot">${slot}</div>
-        <div class="chip">${escapeHtml(provisioningStateLabel(job.state))}</div>
+        <div class="chip">${escapeHtml(badge)}</div>
       </div>
       <div class="flash-board-id">${board}</div>
       <div class="flash-job-message">${escapeHtml(job.message || "")}</div>
+      <div class="flash-firmware"><strong>${firmware}</strong><span>${target}</span></div>
       ${job.mac ? `<div class="mono">${escapeHtml(job.mac)}</div>` : ""}
-      ${mapControls}${retry}
+      ${install}
     </article>`;
   }).join("") : '<div class="empty-state">No FireBeetles detected. Plug boards into the powered hub.</div>';
 }
@@ -747,8 +813,9 @@ function renderUnpositionedTray() {
 }
 
 function groupOptions(selectedGroupId) {
+  const counts = groupPerformerCounts(lanterns());
   return Array.from({ length: GROUP_COUNT }, (_, groupId) =>
-    `<option value="${groupId}" ${groupId === selectedGroupId ? "selected" : ""}>${escapeHtml(groupLabel(groupId))}</option>`
+    `<option value="${groupId}" ${groupId === selectedGroupId ? "selected" : ""}>${escapeHtml(`${groupLabel(groupId)} (${counts[groupId].online} online / ${counts[groupId].total})`)}</option>`
   ).join("");
 }
 
@@ -993,6 +1060,16 @@ function renderReleases() {
   $("#release-overall-status").textContent = allOk ? "in sync" : "attention";
   $("#release-overall-status").className = `chip ${allOk ? "sync" : "active"}`;
   const history = Array.isArray(releaseInfo.history) ? releaseInfo.history : [];
+  const releaseSelect = $("#ota-release-select");
+  if (releaseSelect) {
+    const selected = releaseSelect.value || control.version || history[0]?.version || "";
+    releaseSelect.innerHTML = history.map((release) => (
+      `<option value="${escapeHtml(release.version)}">v${escapeHtml(release.version)} · ${escapeHtml(release.title)}</option>`
+    )).join("");
+    if ([...releaseSelect.options].some((option) => option.value === selected)) {
+      releaseSelect.value = selected;
+    }
+  }
   $("#release-history-list").innerHTML = history.map((release) => `<details class="release-history-row">
     <summary><span><strong>v${escapeHtml(release.version)} · ${escapeHtml(release.title)}</strong><small>${escapeHtml(release.date)} · ${escapeHtml(String((release.control_changes || []).length))} control · ${escapeHtml(String((release.firmware_changes || []).length))} firmware</small></span></summary>
     <div class="release-history-detail">
@@ -1016,7 +1093,7 @@ function renderRecovery() {
     ...(recovery.failed_ota || []).map((item) => ({ ...item, kind: "OTA" })),
     ...(recovery.mismatched || []).map((item) => ({ ...item, kind: "Firmware" })),
     ...(recovery.missing || []).map((item) => ({ ...item, kind: "Missing" })),
-  ];
+  ].sort(comparePerformers);
   const list = $("#recovery-list");
   list.hidden = rows.length === 0;
   if (list.hidden) {
@@ -1050,25 +1127,27 @@ function renderWifi() {
 
 function renderPowerMonitor() {
   const monitor = state.power_monitor || {};
-  const samples = Array.isArray(monitor.samples) ? monitor.samples : [];
+  const samples = Array.isArray(monitor.samples)
+    ? [...monitor.samples].sort(comparePerformers)
+    : [];
   const usable = Number(monitor.usable_sample_count || 0);
   const sampleCount = Number(monitor.sample_count || 0);
-  const soc = monitor.estimated_node_soc_percent;
-  const fieldDraw = monitor.estimated_field_avg_w;
+  const soc = monitor.soc_percent ?? monitor.estimated_node_soc_percent;
+  const performerDraw = monitor.average_performer_draw_w ?? monitor.avg_node_w;
   const stale = Number(monitor.stale_count || 0);
   const bad = Number(monitor.implausible_count || 0);
   $("#power-monitor-status").textContent = sampleCount
     ? `${usable} / ${sampleCount} samples`
     : "no samples";
-  $("#power-monitor-status").className = `chip ${usable ? "sync" : ""}`;
+  $("#power-monitor-status").className = `ops-value ${usable ? "sync" : ""}`;
   $("#power-monitor-soc").textContent = soc === null || soc === undefined
     ? "--"
     : `${Number(soc).toFixed(1)}%`;
-  $("#power-monitor-soc").className = `ops-value ${soc === null || soc === undefined ? "" : soc < 25 ? "bad" : soc < 50 ? "warn" : "ok"}`;
-  $("#power-monitor-draw").textContent = fieldDraw === null || fieldDraw === undefined
+  $("#power-monitor-soc").className = `value ${soc === null || soc === undefined ? "" : soc < 25 ? "bad" : soc < 50 ? "warn" : "ok"}`;
+  $("#power-monitor-draw").textContent = performerDraw === null || performerDraw === undefined
     ? "--"
-    : `${Number(fieldDraw).toFixed(1)} W`;
-  $("#power-monitor-draw").className = `ops-value ${fieldDraw === null || fieldDraw === undefined ? "" : "sync"}`;
+    : `${Number(performerDraw).toFixed(2)} W`;
+  $("#power-monitor-draw").className = `ops-value ${performerDraw === null || performerDraw === undefined ? "" : "sync"}`;
   $("#battery-capacity").value = monitor.battery_capacity_wh ?? 384;
   $("#battery-full-voltage").value = monitor.full_voltage ?? 14.4;
 
@@ -1081,7 +1160,10 @@ function renderPowerMonitor() {
     const classes = [sample.stale ? "warn" : "", sample.plausible === false ? "bad" : ""].filter(Boolean).join(" ");
     const socLabel = sample.soc_percent === null || sample.soc_percent === undefined ? "--" : `${Number(sample.soc_percent).toFixed(1)}%`;
     const voltage = sample.bus_v === null || sample.bus_v === undefined ? "--" : `${Number(sample.bus_v).toFixed(2)} V`;
-    const detail = `${fmt(sample.used_since_full_wh)} Wh used · ${fmt(sample.avg_w)} W avg · ${voltage}`;
+    const drawLabel = sample.draw_source === "recent_average"
+      ? `${fmt(sample.avg_w)} W recent avg`
+      : `${fmt(sample.avg_w)} W now`;
+    const detail = `${fmt(sample.used_since_full_wh)} Wh since full · ${drawLabel} · ${voltage}`;
     return `<div class="power-sample-row ${classes}">
       <span><strong>${escapeHtml(sample.label || sample.mac || "node")}</strong><small class="mono">${escapeHtml(sample.mac || "")}</small></span>
       <span>${escapeHtml(socLabel)}</span>
@@ -1113,7 +1195,7 @@ function effectiveRecovery() {
       status: "ota_failed",
       ready: false,
       title: "Firmware update needs recovery",
-      action: "Exit maintenance mode, enter it again, wait for readiness, then rerun the same staged firmware. Power-cycle any listed lantern that does not check back in.",
+      action: "Start the same staged firmware again. The update resumes from the verified image prefix; power-cycle only a performer that never checks back in.",
       missing: [],
       mismatched: [],
       failed_ota: failed.length
@@ -1129,80 +1211,63 @@ function effectiveRecovery() {
   return state?.recovery || {};
 }
 
-function setOtaControlDisabled(button, installing) {
-  if (!button) return;
-  if (installing) {
-    if (button.dataset.otaWasDisabled === undefined) {
-      button.dataset.otaWasDisabled = String(button.disabled);
-    }
-    button.disabled = true;
-    return;
-  }
-  if (button.dataset.otaWasDisabled !== undefined) {
-    button.disabled = button.dataset.otaWasDisabled === "true";
-    delete button.dataset.otaWasDisabled;
-  }
-}
-
 function renderOta() {
   const ota = state?.ota || {};
   const active = Boolean(ota.enabled);
   const ready = Boolean(ota.ready);
   const installing = Boolean(otaInstall?.running);
+  const readyToActivate = otaInstall?.phase === "ready-to-activate";
   const expected = Number(ota.expected ?? state?.summary?.total ?? 0);
   const readyCount = Number(ota.ready_count ?? 0);
   const deferred = Number(ota.deferred ?? ota.missing ?? Math.max(0, expected - readyCount));
-  const timeout = Number(ota.timeout_s ?? 0);
   const blockers = Array.isArray(ota.blocked) ? ota.blocked : [];
-  $("#ota-mode").textContent = active ? "maintenance" : "idle";
+  const autoEnabled = otaInstall?.auto_update_enabled !== false;
+  $("#ota-mode").textContent = installing ? "updating" : "field live";
   $("#ota-mode").className = `chip ${active ? "sync" : ""}`;
   $("#ota-readiness").textContent = `${readyCount} online · ${deferred} deferred`;
   $("#ota-readiness").className = `ops-value ${ready ? "ok" : "warn"}`;
-  $("#ota-timeout").textContent = active ? `${Math.max(0, Math.floor(timeout / 60))}m ${timeout % 60}s` : "closed";
-  $("#ota-timeout").className = `ops-value ${active ? "ok" : ""}`;
-  $("#ota-blockers").textContent = blockers.length
+  const retryTimeout = Number(otaInstall?.retry_timeout_s || 6 * 60 * 60);
+  $("#ota-timeout").textContent = `${formatDuration(retryTimeout)} retry window`;
+  $("#ota-timeout").className = "ops-value ok";
+  $("#ota-blockers").textContent = !autoEnabled
+    ? "Automatic updates are off. The field will not be interrupted unless you start an update manually."
+    : blockers.length
     ? `Blocked: ${blockers.join(", ")}.`
     : deferred > 0
-      ? "Ready. Offline lanterns will stay deferred for a later maintenance run."
-      : "Ready for the next firmware upload step.";
+      ? "Ready. The show stays live; offline performers remain deferred until a later run."
+      : "Ready. The show stays live while chunks are broadcast, repaired, and verified.";
+  const controlVersion = releaseInfo?.control?.version;
+  const companion = otaArtifact?.source === "release" && otaArtifact?.version === controlVersion;
+  const targetLabel = !otaArtifact
+    ? "Companion firmware unavailable"
+    : companion
+      ? `v${otaArtifact.version} companion firmware`
+      : otaArtifact.source === "release"
+        ? `v${otaArtifact.version} release override`
+        : "Manual binary override";
+  $("#ota-target").textContent = targetLabel;
+  $("#ota-auto-note").textContent = autoEnabled
+    ? "Old performers update automatically when they check in."
+    : "Show lock is active; use Update field now for an explicit update.";
+  const autoButton = $('[data-action="toggle-ota-auto-update"]');
+  autoButton.textContent = `Automatic updates: ${autoEnabled ? "On" : "Off"}`;
+  autoButton.classList.toggle("sync", autoEnabled);
+  autoButton.classList.toggle("active", !autoEnabled);
   $("#ota-artifact").innerHTML = otaArtifact
-    ? `Staged ${escapeHtml(otaArtifact.filename)} · ${formatBytes(otaArtifact.size)} · ${otaArtifact.chunks} chunks · sha256 <span class="mono">${escapeHtml(shortHash(otaArtifact.sha256))}</span>`
-    : "No firmware staged.";
+    ? `${escapeHtml(otaArtifact.filename)} · ${formatBytes(otaArtifact.size)} · ${otaArtifact.chunks} chunks · sha256 <span class="mono">${escapeHtml(shortHash(otaArtifact.sha256))}</span>`
+    : "No verified companion image is available on this control plane.";
   renderOtaProgress();
   renderOtaNodes();
-  const serialActions = [
-    "identify", "move", "replace", "forget", "broadcast", "turn-off-group",
-    "blackout", "restore-blackout",
-    "save-power-policy", "sleep-field", "wake-field", "follow-schedule",
-    "save-power-monitor",
-    "enter-ota", "exit-ota", "stage-ota-artifact", "install-ota",
-    "toggle-calibration-mode", "upload-calibration-frames",
-    "save-calibration-proposal",
-  ];
-  serialActions.forEach((action) => {
-    setOtaControlDisabled($(`[data-action="${action}"]`), installing);
-  });
-  $$("[data-pattern]").forEach((button) => {
-    setOtaControlDisabled(button, installing);
-  });
-  $$('[data-pattern-action="broadcast-saved"], [data-power-sync]').forEach((button) => {
-    setOtaControlDisabled(button, installing);
-  });
-  setOtaControlDisabled($("#lantern-group"), installing);
-  setOtaControlDisabled($("#lantern-led-count"), installing);
-  $$("#lantern-rows [data-group-mac]").forEach((select) => {
-    setOtaControlDisabled(select, installing);
-  });
-  $$("#lantern-rows [data-led-mac]").forEach((select) => {
-    setOtaControlDisabled(select, installing);
-  });
-  if (!installing) {
-    const fileInput = $("#ota-file");
-    $('[data-action="stage-ota-artifact"]').disabled = !fileInput?.files?.length;
-    $('[data-action="enter-ota"]').disabled = active;
-    $('[data-action="install-ota"]').disabled = !otaReadyForInstall() || !otaArtifact;
-    $('[data-action="exit-ota"]').disabled = !active;
-  }
+  const fileInput = $("#ota-file");
+  fileInput.disabled = installing || readyToActivate || otaArtifactUploading;
+  const installButton = $('[data-action="install-ota"]');
+  installButton.textContent = readyToActivate
+    ? "Install firmware on field"
+    : otaInstall?.phase === "paused"
+      ? "Resume field update"
+      : "Update field now";
+  installButton.disabled = installing || otaArtifactUploading || (!readyToActivate && (!otaReadyForInstall() || !otaArtifact));
+  $('[data-action="pause-ota"]').hidden = !installing;
 }
 
 function otaReadyForInstall() {
@@ -1225,7 +1290,9 @@ function renderOtaProgress() {
   const error = otaInstall?.error;
   const targetCount = Number(otaInstall?.target_count || 0);
   const deferredCount = Number(otaInstall?.deferred_count || 0);
-  const show = running || complete || error;
+  const paused = otaInstall?.phase === "paused";
+  const readyToActivate = otaInstall?.phase === "ready-to-activate";
+  const show = running || complete || error || paused || readyToActivate;
   progress.hidden = !show;
   if (!show) return;
 
@@ -1234,11 +1301,31 @@ function renderOtaProgress() {
   const bytesSent = Number(otaInstall?.bytes_sent || 0);
   const size = Number(otaInstall?.size || 0);
   const percent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 0;
+  const phase = String(otaInstall?.phase || "starting");
+  const repairChunks = Number(otaInstall?.repair_chunks || 0);
+  const activated = Array.isArray(otaInstall?.activated_macs) ? otaInstall.activated_macs.length : 0;
+  const staged = Array.isArray(otaInstall?.staged_macs) ? otaInstall.staged_macs.length : 0;
+  const activeMac = otaInstall?.active_mac;
+  const phaseLabels = {
+    starting: "Preparing firmware update",
+    waiting: "Retrying conductor connection",
+    broadcasting: "Broadcasting firmware while the field stays live",
+    repairing: "Repairing missed chunks",
+    staging: "Verifying uploaded images",
+    staged: "Firmware uploaded to performers",
+    "ready-to-activate": "Firmware uploaded and ready to install",
+    "preparing-activation": "Rechecking uploaded firmware",
+    activating: "Restarting performers one at a time",
+    "activating-conductor": "Restarting the conductor",
+    paused: "Firmware update paused",
+  };
   const label = error
     ? `Install failed: ${error}`
-    : complete
-      ? `Install complete for ${targetCount || "online"} performer${targetCount === 1 ? "" : "s"}; ${deferredCount} deferred`
-      : `Installing ${otaInstall?.filename || "firmware"}`;
+    : readyToActivate
+      ? `${staged || targetCount} / ${targetCount} performers uploaded · ready to install`
+      : complete
+        ? `Firmware installed on ${targetCount || "online"} performer${targetCount === 1 ? "" : "s"}; ${deferredCount} deferred`
+        : phaseLabels[phase] || `Installing ${otaInstall?.filename || "firmware"}`;
   $("#ota-progress-label").textContent = label;
   $("#ota-progress-count").textContent = total > 0
     ? `${sent} / ${total} chunks`
@@ -1247,16 +1334,25 @@ function renderOtaProgress() {
   const eta = Number(otaInstall?.eta_s || 0);
   const rate = Number(otaInstall?.bytes_per_s || 0);
   const rateLabel = rate > 0 ? `${formatBytes(rate)}/s` : "--";
+  const activity = phase === "repairing"
+    ? `${repairChunks} repair chunks sent`
+    : phase === "activating"
+      ? `${activated} / ${targetCount} restarted${activeMac ? ` · ${activeMac}` : ""}`
+      : phase === "staging" || phase === "staged"
+        ? `${staged} / ${targetCount} verified`
+        : `ETA ${formatDuration(eta)} · ${rateLabel}`;
   $("#ota-progress-meta").textContent = running
-    ? `Elapsed ${formatDuration(elapsed)} · ETA ${formatDuration(eta)} · ${rateLabel}`
-    : complete
-      ? `Completed in ${formatDuration(elapsed)} · average ${rateLabel}`
-      : error
-        ? `Stopped after ${formatDuration(elapsed)}`
-        : "";
-  $("#ota-progress-fill").style.width = `${complete ? 100 : percent}%`;
+    ? `Elapsed ${formatDuration(elapsed)} · ${activity}`
+    : readyToActivate
+      ? `Uploaded in ${formatDuration(elapsed)} · installation is waiting for the operator`
+      : complete
+        ? `Installed in ${formatDuration(elapsed)} · average ${rateLabel}`
+        : error
+          ? `Stopped after ${formatDuration(elapsed)}`
+          : "";
+  $("#ota-progress-fill").style.width = `${complete || readyToActivate ? 100 : percent}%`;
   progress.classList.toggle("bad", Boolean(error));
-  progress.classList.toggle("ok", complete && !error);
+  progress.classList.toggle("ok", (complete || readyToActivate) && !error);
 }
 
 function renderOtaNodes() {
@@ -1264,7 +1360,24 @@ function renderOtaNodes() {
   if (!box) return;
   const liveNodes = Array.isArray(state?.ota?.nodes) ? state.ota.nodes : [];
   const installNodes = Array.isArray(otaInstall?.nodes) ? otaInstall.nodes : [];
-  const nodes = liveNodes.length ? liveNodes : installNodes;
+  const byMac = new Map();
+  installNodes.forEach((node) => {
+    if (node?.mac) byMac.set(node.mac, node);
+  });
+  liveNodes.forEach((node) => {
+    if (node?.mac) byMac.set(node.mac, { ...(byMac.get(node.mac) || {}), ...node });
+  });
+  const targetMacs = Array.isArray(otaInstall?.target_macs) ? otaInstall.target_macs : [];
+  const nodeOffsets = otaInstall?.node_offsets || {};
+  targetMacs.forEach((mac) => {
+    const existing = byMac.get(mac) || { mac, phase: otaInstall?.running ? "writing" : "idle" };
+    byMac.set(mac, { ...existing, offset: nodeOffsets[mac] ?? existing.offset ?? 0 });
+  });
+  const nodes = [...byMac.values()].sort((a, b) => {
+    const performerA = lanterns().find((item) => item.mac === a.mac) || a;
+    const performerB = lanterns().find((item) => item.mac === b.mac) || b;
+    return comparePerformers(performerA, performerB);
+  });
   const installing = Boolean(otaInstall?.running);
   box.hidden = nodes.length === 0 && !installing;
   if (box.hidden) return;
@@ -1272,19 +1385,58 @@ function renderOtaNodes() {
     box.innerHTML = `<div class="ota-node-row"><span>Waiting for node reports</span><span class="muted-inline">--</span></div>`;
     return;
   }
+  const totalSize = Number(otaInstall?.size || 0);
+  const stagedMacs = new Set(Array.isArray(otaInstall?.staged_macs) ? otaInstall.staged_macs : []);
+  const activatedMacs = new Set(
+    Array.isArray(otaInstall?.activated_macs) ? otaInstall.activated_macs : [],
+  );
+  const alreadyInstalledMacs = new Set(
+    Array.isArray(otaInstall?.already_installed_macs) ? otaInstall.already_installed_macs : [],
+  );
+  const phaseLabels = {
+    idle: "Waiting",
+    writing: "Uploading",
+    staged: "Uploaded",
+    activating: "Restarting",
+    complete: "Installed",
+    failed: "Failed",
+  };
   box.innerHTML = nodes.map((node) => {
     const failed = node.phase === "failed";
-    const complete = node.phase === "complete";
-    const cls = failed ? "bad" : complete ? "ok" : "";
+    const alreadyInstalled = alreadyInstalledMacs.has(node.mac) || activatedMacs.has(node.mac);
+    const uploaded = alreadyInstalled
+      ? totalSize
+      : Math.max(0, Math.min(totalSize, Number(node.offset || 0)));
+    const fullImage = totalSize > 0 && uploaded === totalSize;
+    const crcMatches = Number(node.crc32 || 0) === Number(otaInstall?.crc32 || 0);
+    const verified = alreadyInstalled || (
+      fullImage
+      && crcMatches
+      && (node.phase === "staged" || node.phase === "complete" || stagedMacs.has(node.mac))
+    );
+    const percent = totalSize > 0
+      ? Math.max(0, Math.min(100, Math.floor(uploaded * 100 / totalSize)))
+      : 0;
+    const cls = failed ? "bad" : verified ? "ok" : "";
     const lantern = lanterns().find((item) => item.mac === node.mac);
     const label = lantern?.label ? `${lantern.label} ${node.mac}` : (node.mac || "node");
+    const phase = failed
+      ? "failed"
+      : alreadyInstalled || (verified && node.phase === "complete")
+        ? "complete"
+        : verified
+          ? "staged"
+          : installing && targetMacs.includes(node.mac)
+            ? "writing"
+            : node.phase;
     const detail = failed
       ? node.error
-      : `${formatBytes(node.offset || 0)}${node.last_seen_s !== undefined ? ` · ${node.last_seen_s}s ago` : ""}`;
+      : `${formatBytes(uploaded)} / ${formatBytes(totalSize)}${node.last_seen_s !== undefined ? ` · ${node.last_seen_s}s ago` : ""}`;
     return `<div class="ota-node-row ${cls}">
       <span>${escapeHtml(label)}</span>
-      <span>${escapeHtml(node.phase || "idle")}</span>
+      <span>${escapeHtml(phaseLabels[phase] || phase || "Waiting")} · ${percent}%</span>
       <span class="mono">${escapeHtml(detail)}</span>
+      <span class="ota-node-result" aria-label="${verified ? "verified" : "pending"}">${verified ? "✓" : ""}</span>
     </div>`;
   }).join("");
 }
@@ -2121,7 +2273,7 @@ async function refresh() {
     provisioning = {
       available: false,
       artifact_error: error.message,
-      session: { active: false, max_workers: 5, factory_armed: false },
+      session: { active: false, auto_update_enabled: false, max_workers: 5 },
       jobs: [],
     };
   }
@@ -2150,8 +2302,37 @@ async function refreshSavedPatterns() {
 }
 
 async function refreshOtaInstall() {
-  otaInstall = (await api("/api/operations/ota-install")).install;
-  renderOta();
+  if (!otaInstallRefreshPromise) {
+    otaInstallRefreshPromise = (async () => {
+      otaInstall = (await api("/api/operations/ota-install")).install;
+      renderOta();
+      return otaInstall;
+    })();
+  }
+  const refreshPromise = otaInstallRefreshPromise;
+  try {
+    return await refreshPromise;
+  } finally {
+    if (otaInstallRefreshPromise === refreshPromise) otaInstallRefreshPromise = null;
+  }
+}
+
+function scheduleOtaInstallPoll(delayMs) {
+  if (otaInstallPollTimer !== null) return;
+  otaInstallPollTimer = window.setTimeout(async () => {
+    otaInstallPollTimer = null;
+    try {
+      await refreshOtaInstall();
+    } catch (_error) {
+      // The WebSocket connection indicator owns transient connectivity errors.
+    } finally {
+      scheduleOtaInstallPoll(otaInstall?.running ? 750 : 3000);
+    }
+  }, delayMs);
+}
+
+function startOtaInstallPolling() {
+  scheduleOtaInstallPoll(otaInstall?.running ? 750 : 3000);
 }
 
 async function refreshWifiStatus({ quiet = false } = {}) {
@@ -2372,49 +2553,77 @@ async function runAction(action) {
       toast(ack.message);
       return;
     }
-    if (action === "start-provisioning" || action === "start-factory-provisioning") {
-      const factory = action === "start-factory-provisioning";
-      if (factory && !confirm("Arm factory provisioning for 15 minutes? Blank boards may be erased before flashing.")) return;
-      provisioning = await api("/api/provisioning/session", {
-        method: "POST",
+    if (action === "enable-provisioning-auto-update") {
+      provisioning = await api("/api/provisioning/auto-update", {
+        method: "PUT",
         body: JSON.stringify({
           max_workers: Number($("#provisioning-workers").value || 5),
-          factory,
         }),
       });
       renderProvisioning();
-      toast(factory ? "factory provisioning armed" : "flashing station armed");
+      toast("USB firmware auto-update enabled");
       return;
     }
-    if (action === "stop-provisioning") {
-      provisioning = await api("/api/provisioning/session", { method: "DELETE" });
+    if (action === "disable-provisioning-auto-update") {
+      provisioning = await api("/api/provisioning/auto-update", { method: "DELETE" });
       renderProvisioning();
-      toast("station stopped accepting new boards");
+      toast("USB firmware auto-update disabled");
       return;
     }
-    if (action === "enter-ota" || action === "exit-ota") {
-      const enabled = action === "enter-ota";
-      if (enabled && !confirm("Enter maintenance mode for a field-wide firmware update?")) return;
-      const ack = await api("/api/operations/ota-mode", {
-        method: "POST",
-        body: JSON.stringify({ enabled }),
-      });
-      toast(ack.message);
-      await refresh();
-      return;
-    }
-    if (action === "stage-ota-artifact") {
+    if (action === "upload-ota-artifact") {
       const file = $("#ota-file")?.files?.[0];
       if (!file) return;
-      const ack = await apiBinary(`/api/operations/ota-artifact?filename=${encodeURIComponent(file.name)}`, file);
+      otaArtifactUploading = true;
+      renderOta();
+      toast("uploading firmware file to control plane");
+      try {
+        const ack = await apiBinary(`/api/operations/ota-artifact?filename=${encodeURIComponent(file.name)}`, file);
+        otaArtifact = ack.artifact;
+        toast(ack.message);
+      } finally {
+        otaArtifactUploading = false;
+        renderOta();
+      }
+      return;
+    }
+    if (action === "toggle-ota-auto-update") {
+      const enabled = otaInstall?.auto_update_enabled !== false;
+      const ack = await api("/api/operations/ota-auto-update", {
+        method: "PUT",
+        body: JSON.stringify({ enabled: !enabled }),
+      });
+      otaInstall = ack.install;
+      renderOta();
+      toast(ack.message);
+      return;
+    }
+    if (action === "select-ota-release") {
+      const version = $("#ota-release-select")?.value;
+      if (!version) return;
+      if (!confirm(`Use firmware from release v${version} as the field target?`)) return;
+      const ack = await api("/api/operations/ota-release", {
+        method: "POST",
+        body: JSON.stringify({ version }),
+      });
       otaArtifact = ack.artifact;
       renderOta();
       toast(ack.message);
       return;
     }
     if (action === "install-ota") {
+      if (otaInstall?.phase === "ready-to-activate") {
+        if (!confirm("Install the verified firmware now? Staged performers and the conductor will restart.")) return;
+        const ack = await api("/api/operations/ota-activate", { method: "POST" });
+        otaInstall = ack.install;
+        renderOta();
+        await pollOtaInstallUntilTerminal();
+        if (otaInstall.error) throw new Error(otaInstall.error);
+        toast("Firmware installed on field");
+        await refresh();
+        return;
+      }
       if (!otaArtifact || !otaReadyForInstall()) return;
-      if (!confirm("Install staged firmware across the field? Boards will reboot.")) return;
+      if (!confirm("Update every online performer? Firmware will upload and verify while the field stays live, then performers and the conductor will restart automatically.")) return;
       otaInstall = {
         running: true,
         complete: false,
@@ -2431,8 +2640,15 @@ async function runAction(action) {
       renderOta();
       await pollOtaInstallUntilTerminal();
       if (otaInstall.error) throw new Error(otaInstall.error);
-      toast("OTA install complete");
+      toast("Firmware installed on field");
       await refresh();
+      return;
+    }
+    if (action === "pause-ota") {
+      const ack = await api("/api/operations/ota-install", { method: "DELETE" });
+      otaInstall = ack.install;
+      renderOta();
+      toast(ack.message);
       return;
     }
     if (action === "upload-calibration-frames") {
@@ -2589,13 +2805,13 @@ document.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-provision-action]");
   if (!target) return;
   try {
-    if (target.dataset.provisionAction === "retry") {
+    if (target.dataset.provisionAction === "install") {
       provisioning = await api(
-        `/api/provisioning/jobs/${encodeURIComponent(target.dataset.jobId)}/retry`,
+        `/api/provisioning/jobs/${encodeURIComponent(target.dataset.jobId)}/install`,
         { method: "POST" },
       );
       renderProvisioning();
-      toast("board queued for retry");
+      toast("firmware installation queued");
       return;
     }
     if (target.dataset.provisionAction === "map-slot") {
@@ -2621,7 +2837,7 @@ $$("[data-action]").forEach((button) => {
   button.addEventListener("click", () => runAction(button.dataset.action));
 });
 
-$("#ota-file")?.addEventListener("change", renderOta);
+$("#ota-file")?.addEventListener("change", () => runAction("upload-ota-artifact"));
 $("#calibration-files")?.addEventListener("change", () => {
   calibrationProposal = null;
   calibrationSaveStatus = "";
@@ -2929,8 +3145,7 @@ window.addEventListener("mouseup", (event) => {
   finishLanternMove(event.clientX, event.clientY);
 });
 
-window.setInterval(() => {
-  if (provisioning?.session?.factory_armed) renderProvisioning();
-}, 1000);
-
-refresh().then(connectWebSocket).catch((error) => toast(error.message, true));
+refresh().then(() => {
+  connectWebSocket();
+  startOtaInstallPolling();
+}).catch((error) => toast(error.message, true));

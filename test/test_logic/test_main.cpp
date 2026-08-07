@@ -22,6 +22,8 @@
 #include "powermon.h"
 #include "power_policy.h"
 #include "powersave.h"
+#include "performer_tx.h"
+#include "registration.h"
 #include "roster.h"
 #include "serial_json.h"
 #include "table.h"
@@ -674,6 +676,125 @@ void test_roster_overflow_drops_new_keeps_existing() {
   TEST_ASSERT_EQUAL_UINT16(42, r.entries[rosterFind(r, known)].id);
 }
 
+// ---- Performer registration: fleet spreading + delivery retries ------------
+
+static const RegistrationConfig REGISTRATION_TEST_CONFIG = {
+    10'000'000, 2'000'000, 500'000, 200'000, 2'000'000};
+
+void test_registration_spreads_a_simultaneous_fleet_inside_radio_window() {
+  int64_t slots[60] = {0};
+  int unique = 0;
+  int64_t earliest = INT64_MAX;
+  int64_t latest = 0;
+  for (uint8_t i = 0; i < 60; i++) {
+    uint8_t mac[6] = {0x68, 0xfe, 0x71, 0xa6, 0x30, i};
+    RegistrationSchedule schedule;
+    registrationInit(schedule);
+    registrationSendDue(schedule, 1'000'000, mac, REGISTRATION_TEST_CONFIG);
+    TEST_ASSERT_TRUE(schedule.slot_pending);
+    TEST_ASSERT_TRUE(schedule.slot_us >= 1'000'000);
+    TEST_ASSERT_TRUE(schedule.slot_us <= 1'500'000);
+    slots[i] = schedule.slot_us;
+    if (slots[i] < earliest) earliest = slots[i];
+    if (slots[i] > latest) latest = slots[i];
+    bool seen = false;
+    for (uint8_t j = 0; j < i; j++)
+      if (slots[j] == slots[i]) seen = true;
+    if (!seen) unique++;
+  }
+  TEST_ASSERT_TRUE(unique >= 55);
+  TEST_ASSERT_TRUE(latest - earliest >= 400'000);
+}
+
+void test_registration_holds_radio_only_through_slot_and_delivery() {
+  const uint8_t mac[6] = {0xc0, 0xcd, 0xd6, 0xc7, 0xf2, 0x0c};
+  RegistrationSchedule schedule;
+  registrationInit(schedule);
+  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule));
+
+  registrationSendDue(schedule, 5'000'000, mac, REGISTRATION_TEST_CONFIG);
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule));
+  TEST_ASSERT_TRUE(registrationSendDue(
+      schedule, schedule.slot_us, mac, REGISTRATION_TEST_CONFIG));
+  registrationSendStarted(schedule);
+  TEST_ASSERT_TRUE(schedule.in_flight);
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule));
+
+  registrationSendResult(schedule, 5'600'000, mac,
+                         REGISTRATION_TEST_CONFIG, /*delivered*/ true);
+  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule));
+  TEST_ASSERT_EQUAL_UINT8(0, schedule.failures);
+  TEST_ASSERT_TRUE(schedule.next_due_us >= 15'600'000);
+  TEST_ASSERT_TRUE(schedule.next_due_us <= 17'600'000);
+  TEST_ASSERT_FALSE(registrationSendDue(
+      schedule, schedule.next_due_us - 1, mac, REGISTRATION_TEST_CONFIG));
+}
+
+void test_registration_delivery_failures_back_off_and_cap() {
+  const uint8_t mac[6] = {0x68, 0xfe, 0x71, 0x31, 0xdd, 0x04};
+  RegistrationConfig config = REGISTRATION_TEST_CONFIG;
+  config.slot_spread_us = 0;
+  RegistrationSchedule schedule;
+  registrationInit(schedule);
+
+  TEST_ASSERT_TRUE(registrationSendDue(schedule, 1'000, mac, config));
+  registrationSendStarted(schedule);
+  registrationSendResult(schedule, 2'000, mac, config, /*delivered*/ false);
+  TEST_ASSERT_EQUAL_UINT8(1, schedule.failures);
+  TEST_ASSERT_TRUE(schedule.next_due_us >= 102'000);
+  TEST_ASSERT_TRUE(schedule.next_due_us <= 202'000);
+
+  int64_t previous_delay = schedule.next_due_us - 2'000;
+  for (uint8_t failure = 2; failure <= 12; failure++) {
+    int64_t attempt = schedule.next_due_us;
+    TEST_ASSERT_TRUE(registrationSendDue(schedule, attempt, mac, config));
+    registrationSendStarted(schedule);
+    registrationSendResult(schedule, attempt, mac, config,
+                           /*delivered*/ false);
+    int64_t delay = schedule.next_due_us - attempt;
+    TEST_ASSERT_TRUE(delay <= config.retry_max_us);
+    if (failure <= 5) TEST_ASSERT_TRUE(delay >= previous_delay / 2);
+    previous_delay = delay;
+  }
+  TEST_ASSERT_EQUAL_UINT8(12, schedule.failures);
+  TEST_ASSERT_TRUE(previous_delay >= config.retry_max_us / 2);
+}
+
+void test_performer_tx_serializes_same_destination_packet_types() {
+  const uint8_t conductor[6] = {0x30, 0x76, 0xf5, 0x93, 0x67, 0x3c};
+  PerformerTxState tx;
+  performerTxInit(tx);
+  TEST_ASSERT_TRUE(performerTxAvailable(tx));
+  TEST_ASSERT_TRUE(performerTxBegin(tx, conductor, PERFORMER_TX_REGISTER));
+  TEST_ASSERT_FALSE(performerTxAvailable(tx));
+  TEST_ASSERT_FALSE(performerTxBegin(tx, conductor, PERFORMER_TX_POWER));
+
+  PerformerTxCompletion completion =
+      performerTxComplete(tx, conductor, /*delivered*/ true);
+  TEST_ASSERT_TRUE(completion.matched);
+  TEST_ASSERT_TRUE(completion.delivered);
+  TEST_ASSERT_EQUAL_UINT8(PERFORMER_TX_REGISTER, completion.purpose);
+  TEST_ASSERT_TRUE(performerTxAvailable(tx));
+  TEST_ASSERT_TRUE(performerTxBegin(tx, conductor, PERFORMER_TX_POWER));
+}
+
+void test_performer_tx_ignores_wrong_callback_and_cancels_queue_failure() {
+  const uint8_t conductor[6] = {0x30, 0x76, 0xf5, 0x93, 0x67, 0x3c};
+  const uint8_t other[6] = {0x30, 0x76, 0xf5, 0x93, 0x67, 0x3d};
+  PerformerTxState tx;
+  performerTxInit(tx);
+  TEST_ASSERT_TRUE(performerTxBegin(tx, conductor, PERFORMER_TX_OTA_STATUS));
+
+  PerformerTxCompletion wrong =
+      performerTxComplete(tx, other, /*delivered*/ false);
+  TEST_ASSERT_FALSE(wrong.matched);
+  TEST_ASSERT_FALSE(performerTxAvailable(tx));
+  TEST_ASSERT_FALSE(performerTxCancel(tx, other, PERFORMER_TX_OTA_STATUS));
+  TEST_ASSERT_TRUE(
+      performerTxCancel(tx, conductor, PERFORMER_TX_OTA_STATUS));
+  TEST_ASSERT_TRUE(performerTxAvailable(tx));
+}
+
 void test_firmware_version_matches_proto_build_and_dirty() {
   FirmwareVersion a = {3, 0x12345678, 0, "0.1.0"};
   FirmwareVersion b = {3, 0x12345678, 0, "0.1.0"};
@@ -812,9 +933,14 @@ void test_ota_hex_decode_rejects_bad_or_oversized_input() {
 }
 
 void test_ota_chunk_decision_accepts_repeated_written_chunks() {
-  TEST_ASSERT_EQUAL_UINT8(8, OTA_RADIO_SEND_COPIES);
+  TEST_ASSERT_EQUAL_UINT8(6, OTA_RADIO_SEND_COPIES);
   TEST_ASSERT_TRUE(OTA_RADIO_SEND_MAX_ATTEMPTS >= OTA_RADIO_SEND_COPIES);
+  TEST_ASSERT_TRUE(OTA_RADIO_STRONG_COPIES > OTA_RADIO_SEND_COPIES);
+  TEST_ASSERT_TRUE(OTA_RADIO_STRONG_MAX_ATTEMPTS >= OTA_RADIO_STRONG_COPIES);
+  TEST_ASSERT_EQUAL_UINT8(1, OTA_RADIO_REPAIR_COPIES);
+  TEST_ASSERT_TRUE(OTA_RADIO_REPAIR_MAX_ATTEMPTS >= OTA_RADIO_REPAIR_COPIES);
   TEST_ASSERT_TRUE(OTA_RADIO_SEND_DELAY_MS >= 4);
+  TEST_ASSERT_TRUE(OTA_RADIO_REPAIR_MAX_ATTEMPTS >= OTA_RADIO_REPAIR_COPIES);
 
   TEST_ASSERT_EQUAL_UINT8(OTA_CHUNK_ACCEPT,
                           otaChunkDecision(0, 1000, 0, 200));
@@ -836,6 +962,26 @@ void test_ota_expected_chunk_len_uses_full_chunks_until_tail() {
   TEST_ASSERT_EQUAL_UINT16(1000 - (7 * OTA_SERIAL_CHUNK_MAX),
                            otaExpectedChunkLen(1000, 7 * OTA_SERIAL_CHUNK_MAX));
   TEST_ASSERT_EQUAL_UINT16(0, otaExpectedChunkLen(1000, 1000));
+}
+
+void test_ota_flash_settle_only_follows_complete_sector() {
+  TEST_ASSERT_FALSE(otaFlashSettleDue(0, 128));
+  TEST_ASSERT_FALSE(otaFlashSettleDue(3840, 128));
+  TEST_ASSERT_TRUE(otaFlashSettleDue(3968, 128));
+  TEST_ASSERT_FALSE(otaFlashSettleDue(4096, 128));
+  TEST_ASSERT_TRUE(otaFlashSettleDue(8064, 128));
+  TEST_ASSERT_FALSE(otaFlashSettleDue(883200, 112));
+}
+
+void test_ota_conductor_defers_boot_partition_selection_until_activation() {
+  TEST_ASSERT_TRUE(otaShouldFinalizeFlash(
+      /*is_conductor=*/false, OTA_FINALIZE_ON_END));
+  TEST_ASSERT_FALSE(otaShouldFinalizeFlash(
+      /*is_conductor=*/false, OTA_FINALIZE_ON_ACTIVATE));
+  TEST_ASSERT_FALSE(otaShouldFinalizeFlash(
+      /*is_conductor=*/true, OTA_FINALIZE_ON_END));
+  TEST_ASSERT_TRUE(otaShouldFinalizeFlash(
+      /*is_conductor=*/true, OTA_FINALIZE_ON_ACTIVATE));
 }
 
 void test_ota_status_table_upserts_by_mac() {
@@ -875,6 +1021,35 @@ void test_ota_status_complete_requires_matching_fresh_complete() {
   TEST_ASSERT_FALSE(otaStatusCompleteForMac(t, a, 1000, 42, 1200, 200));
 }
 
+void test_ota_status_slots_spread_inventory_ids_and_hash_unknown_nodes() {
+  const uint8_t a[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t b[6] = {1, 2, 3, 4, 5, 7};
+
+  TEST_ASSERT_EQUAL_UINT16(0, otaStatusSlot(1, a));
+  TEST_ASSERT_EQUAL_UINT16(52, otaStatusSlot(53, a));
+  TEST_ASSERT_NOT_EQUAL(otaStatusSlot(0, a), otaStatusSlot(0, b));
+  TEST_ASSERT_EQUAL_UINT32(
+      (uint32_t)otaStatusSlot(53, a) * OTA_STATUS_SLOT_MS,
+      otaStatusDelayMs(53, a));
+}
+
+void test_ota_staged_and_checkpoint_status_require_exact_crc_and_freshness() {
+  OtaNodeStatusEntry staged = {{1, 2, 3, 4, 5, 6}, OTA_PHASE_STAGED,
+                               OTA_ERR_NONE, 1000, 42, 900};
+  TEST_ASSERT_TRUE(otaStatusEntryStaged(staged, 1000, 42, 1000, 200));
+  TEST_ASSERT_TRUE(otaStatusEntryAtCheckpoint(staged, 1000, 42, 1000, 200));
+  TEST_ASSERT_FALSE(otaStatusEntryStaged(staged, 1000, 43, 1000, 200));
+  TEST_ASSERT_FALSE(otaStatusEntryStaged(staged, 1000, 42, 1200, 200));
+
+  staged.phase = OTA_PHASE_ACTIVATING;
+  TEST_ASSERT_TRUE(otaStatusEntryStaged(staged, 1000, 42, 1000, 200));
+  staged.phase = OTA_PHASE_REPAIRING;
+  TEST_ASSERT_FALSE(otaStatusEntryStaged(staged, 1000, 42, 1000, 200));
+  TEST_ASSERT_EQUAL_STRING("repairing", otaPhaseName(OTA_PHASE_REPAIRING));
+  TEST_ASSERT_EQUAL_STRING("staged", otaPhaseName(OTA_PHASE_STAGED));
+  TEST_ASSERT_EQUAL_STRING("activating", otaPhaseName(OTA_PHASE_ACTIVATING));
+}
+
 void test_ota_cohort_freezes_online_targets_and_ignores_offline_rows() {
   OtaCohort cohort;
   otaCohortInit(cohort);
@@ -891,6 +1066,61 @@ void test_ota_cohort_freezes_online_targets_and_ignores_offline_rows() {
   TEST_ASSERT_TRUE(otaStatusUpsert(status, online, OTA_PHASE_COMPLETE,
                                    OTA_ERR_NONE, 1000, 42, 900));
   TEST_ASSERT_TRUE(otaCohortComplete(status, cohort, 1000, 42, 1000, 200));
+}
+
+void test_ota_cohort_selects_fresh_non_conductor_roster_entries() {
+  Roster roster;
+  rosterInit(roster);
+  const uint8_t conductor[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t fresh[6] = {10, 11, 12, 13, 14, 15};
+  const uint8_t stale[6] = {20, 21, 22, 23, 24, 25};
+  rosterUpsert(roster, conductor, 1, 10, 1, 0, "0.7.1", 990);
+  rosterUpsert(roster, fresh, 23, 10, 2, 0, "0.5.1", 980);
+  rosterUpsert(roster, stale, 24, 10, 3, 0, "0.5.1", 800);
+
+  OtaCohort cohort;
+  otaCohortSelectFresh(cohort, roster, conductor, 1000, 100);
+
+  TEST_ASSERT_EQUAL_UINT8(1, cohort.count);
+  TEST_ASSERT_TRUE(otaCohortContains(cohort, fresh));
+  TEST_ASSERT_FALSE(otaCohortContains(cohort, conductor));
+  TEST_ASSERT_FALSE(otaCohortContains(cohort, stale));
+}
+
+void test_ota_peer_lease_reuses_one_target_and_resets_cleanly() {
+  const uint8_t first[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t second[6] = {1, 2, 3, 4, 5, 7};
+  OtaPeerLease lease;
+  otaPeerLeaseInit(lease);
+
+  TEST_ASSERT_FALSE(otaPeerLeaseMatches(lease, first));
+  otaPeerLeaseSet(lease, first);
+  TEST_ASSERT_TRUE(otaPeerLeaseMatches(lease, first));
+  TEST_ASSERT_FALSE(otaPeerLeaseMatches(lease, second));
+
+  otaPeerLeaseInit(lease);
+  TEST_ASSERT_FALSE(lease.active);
+  TEST_ASSERT_FALSE(otaPeerLeaseMatches(lease, first));
+}
+
+void test_ota_send_ack_only_completes_the_pending_target() {
+  const uint8_t target[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t unrelated[6] = {1, 2, 3, 4, 5, 7};
+  OtaSendAck ack;
+  otaSendAckInit(ack);
+
+  TEST_ASSERT_FALSE(otaSendAckComplete(ack, target, true));
+  otaSendAckBegin(ack, target);
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_PENDING, ack.state);
+  TEST_ASSERT_FALSE(otaSendAckComplete(ack, unrelated, true));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_PENDING, ack.state);
+  TEST_ASSERT_TRUE(otaSendAckComplete(ack, target, false));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_FAILED, ack.state);
+
+  otaSendAckBegin(ack, target);
+  TEST_ASSERT_TRUE(otaSendAckComplete(ack, target, true));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_SUCCESS, ack.state);
+  TEST_ASSERT_FALSE(otaSendAckComplete(ack, target, false));
 }
 
 void test_ota_cohort_requires_every_frozen_target_to_complete() {
@@ -2047,11 +2277,43 @@ void test_serial_json_ota_begin_chunk_and_end_parse() {
   TEST_ASSERT_EQUAL_UINT32(160, cmd.ota_offset);
   TEST_ASSERT_EQUAL_STRING("e90010ff", cmd.ota_data_hex);
 
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":15,\"cmd\":\"ota_rebroadcast\",\"offset\":128,"
+      "\"data\":\"e90010ff\"}", cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_REBROADCAST, cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(128, cmd.ota_offset);
+  TEST_ASSERT_EQUAL_STRING("e90010ff", cmd.ota_data_hex);
+
   TEST_ASSERT_TRUE(serialJsonParse("{\"id\":15,\"cmd\":\"ota_end\"}", cmd, error));
   TEST_ASSERT_EQUAL_INT(SJ_OTA_END, cmd.kind);
 
   TEST_ASSERT_TRUE(serialJsonParse("{\"id\":16,\"cmd\":\"ota_progress\"}", cmd, error));
   TEST_ASSERT_EQUAL_INT(SJ_OTA_PROGRESS, cmd.kind);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":17,\"cmd\":\"ota_repair\",\"mac\":\"01:02:03:04:05:06\","
+      "\"offset\":128,\"data\":\"e90010ff\"}", cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_REPAIR, cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(128, cmd.ota_offset);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":18,\"cmd\":\"ota_restart\",\"mac\":\"01:02:03:04:05:06\"}",
+      cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_RESTART, cmd.kind);
+
+  TEST_ASSERT_TRUE(serialJsonParse("{\"id\":19,\"cmd\":\"ota_probe\"}", cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_PROBE, cmd.kind);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":20,\"cmd\":\"ota_activate\",\"mac\":\"01:02:03:04:05:06\"}",
+      cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_ACTIVATE, cmd.kind);
+  TEST_ASSERT_FALSE(cmd.ota_self);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":21,\"cmd\":\"ota_activate\",\"conductor\":true}", cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_ACTIVATE, cmd.kind);
+  TEST_ASSERT_TRUE(cmd.ota_self);
 }
 
 void test_serial_json_rejects_retired_keepalive_command() {
@@ -2407,6 +2669,11 @@ int main(int, char**) {
   RUN_TEST(test_roster_appends_distinct_macs);
   RUN_TEST(test_roster_dedup_updates_in_place);
   RUN_TEST(test_roster_overflow_drops_new_keeps_existing);
+  RUN_TEST(test_registration_spreads_a_simultaneous_fleet_inside_radio_window);
+  RUN_TEST(test_registration_holds_radio_only_through_slot_and_delivery);
+  RUN_TEST(test_registration_delivery_failures_back_off_and_cap);
+  RUN_TEST(test_performer_tx_serializes_same_destination_packet_types);
+  RUN_TEST(test_performer_tx_ignores_wrong_callback_and_cancels_queue_failure);
   RUN_TEST(test_firmware_version_matches_proto_build_and_dirty);
   RUN_TEST(test_firmware_fleet_consistency_requires_every_seen_node_to_match);
   RUN_TEST(test_power_policy_window_handles_daytime_and_overnight_ranges);
@@ -2420,9 +2687,16 @@ int main(int, char**) {
   RUN_TEST(test_ota_hex_decode_rejects_bad_or_oversized_input);
   RUN_TEST(test_ota_chunk_decision_accepts_repeated_written_chunks);
   RUN_TEST(test_ota_expected_chunk_len_uses_full_chunks_until_tail);
+  RUN_TEST(test_ota_flash_settle_only_follows_complete_sector);
+  RUN_TEST(test_ota_conductor_defers_boot_partition_selection_until_activation);
   RUN_TEST(test_ota_status_table_upserts_by_mac);
   RUN_TEST(test_ota_status_complete_requires_matching_fresh_complete);
+  RUN_TEST(test_ota_status_slots_spread_inventory_ids_and_hash_unknown_nodes);
+  RUN_TEST(test_ota_staged_and_checkpoint_status_require_exact_crc_and_freshness);
   RUN_TEST(test_ota_cohort_freezes_online_targets_and_ignores_offline_rows);
+  RUN_TEST(test_ota_cohort_selects_fresh_non_conductor_roster_entries);
+  RUN_TEST(test_ota_peer_lease_reuses_one_target_and_resets_cleanly);
+  RUN_TEST(test_ota_send_ack_only_completes_the_pending_target);
   RUN_TEST(test_ota_cohort_requires_every_frozen_target_to_complete);
   RUN_TEST(test_ota_online_freshness_has_explicit_boundary);
   RUN_TEST(test_table_set_and_lookup);

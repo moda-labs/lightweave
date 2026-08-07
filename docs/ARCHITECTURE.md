@@ -194,8 +194,8 @@ elapsed time.
    accumulated Wh to the conductor as a small ESP-NOW unicast, piggybacking on the
    existing bidirectional-ESP-NOW path used by `MSG_REGISTER` (§7). The conductor
    logs every report and exposes the latest sample in `/api/state`; the control
-   plane rolls sparse reference nodes into an estimated field draw and per-node
-   battery SOC.
+   plane reports average draw per metered performer and estimates battery SOC
+   from the representative samples.
 4. **Future field diagnostic (optional):** expose the current Wh reading over BLE
    for a phone-app spot-check, independent of the conductor link.
 
@@ -229,7 +229,7 @@ not remove its inventory row or change its number.
   REGISTER is the one moment the conductor provably knows that node's radio is
   on (TX is gated on radio-up), so the reply lands inside the sender's open
   listen window instead of playing the ~13%-per-broadcast lottery, and a missed
-  reply is retried for free by the node's next REGISTER (10 s). Steady state
+  reply is retried for free by the node's next REGISTER (10–12 s). Steady state
   (all nodes known + provisioned + profile-matched) costs zero table traffic beyond
   the backstop.
 
@@ -313,19 +313,24 @@ browser --HTTPS/tunnel--> Pi (web UI + CV + serial bridge) --USB--> conductor --
 ```
 
 **[done; hardware throughput proof pending] USB flashing station:** a separate
-same-host provisioner daemon discovers FireBeetles, maps USB topology to numbered
-physical hub slots, and runs a bounded pool of checksum-pinned serial flashes
+same-host provisioner daemon discovers FireBeetles automatically and runs a
+bounded pool of checksum-pinned serial flashes
 (five by default, configurable to ten). The control plane proxies a narrow API
 over a private Unix socket and publishes progress on its existing WebSocket; the
 daemon owns jobs, so browser refreshes and control-plane request lifetimes do not
-own flash subprocesses. Job history and slot configuration persist locally.
+own flash subprocesses. Job history and optional slot configuration persist locally.
 Factory erase is a distinct 15-minute session, the configured conductor path is
 excluded before probing, and firmware role verification refuses any conductor.
 Permanent-ID reservation crosses a scoped credential to the control plane and
 then the conductor's NVS inventory. Pi packaging uses a hardened systemd unit;
 macOS uses a per-user LaunchAgent. A laptop station can point that reservation
 call at the Pi's HTTPS authority while all flash bytes remain local to the USB
-host.
+host. USB discovery also starts a read-only serial inspection while the station
+is idle. The UI shows the board's permanent ID, role, firmware version, build,
+wire protocol, production target, and a server-computed Current/Update needed
+assessment before the operator authorizes any write. Unreadable or factory
+boards remain Version unknown, and detected conductors are excluded from the
+performer job queue.
 
 An internet-connected deployment variant using Starlink Wi-Fi, a named
 Cloudflare Tunnel, and application-authenticated browser sessions is specified
@@ -343,10 +348,11 @@ deployment record, and untouched commit-specific Python environment. Release
 state is root-owned outside the app-writable data directory, application and
 release-tooling dependencies are transitively hash-locked, firmware build inputs
 are exactly pinned, and a shared operation
-lock defers Pi deployment during field OTA. The promoted firmware is staged but never broadcast by
-the reconciler: ESP32 OTA remains an explicit operator action using the frozen
-online cohort described in §7.1. This keeps Pi GitOps failure separate from show
-runtime and from variable performer availability. See
+lock defers Pi deployment during field OTA. The promoted control-plane release
+stages its checksum-matched companion firmware, and the control plane reconciles
+that desired image onto online performers by default. A persistent show-safety
+toggle disables new automatic work and pauses an automatic transfer at its next
+command boundary; manual recovery remains available. See
 [`RELEASING.md`](RELEASING.md).
 
 Before changing the checkout, the reconciler persists a root-only transaction
@@ -414,8 +420,14 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   `FF:FF:FF:FF:FF:FF`, `WIFI_STA`. The hot path (sync.h) reads `epoch_us`+`seq`.
 - **[done]** Bidirectional ESP-NOW: a performer learns the conductor's MAC from the
   recv-info, adds it as a peer, and unicasts
-  `MSG_REGISTER {mac, id, group_id, led_count, fw, build, dirty, version}` every 10 s; the conductor
-  builds a MAC-keyed roster (`roster` serial command). `fw` is wire
+  `MSG_REGISTER {mac, id, group_id, led_count, fw, build, dirty, version}` every
+  10–12 s; the conductor builds a MAC-keyed roster (`roster` serial command).
+  Shared radio sleep windows do not create a return-traffic herd: after a window
+  opens, each expired performer selects a stable MAC-derived slot across 500 ms,
+  holds the radio only through its own queued delivery, and uses 100 ms–2 s
+  bounded backoff when the ESP-NOW unicast delivery callback fails. Performer
+  unicasts are serialized by purpose so a power or OTA-status callback cannot be
+  mistaken for REGISTER completion. `fw` is wire
   compatibility (`PROTO_VERSION`); `version` + `build` + `dirty` are the OTA
   safety marker that catches same-protocol stale firmware.
 - **[done]** `MSG_TABLE`: the conductor broadcasts inventory and layout in chunks
@@ -427,23 +439,28 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   REGISTER unicast path. Added without a PROTO_VERSION bump — no existing
   layout changed, and receivers ignore unknown types via the dispatch default.
 - **[done]** `MSG_OTA_BEGIN`, `MSG_OTA_CHUNK`, `MSG_OTA_END`: conductor
-  broadcasts a staged firmware image during manual maintenance-mode OTA.
+  broadcasts a staged firmware image during a background field-wide OTA.
   Performers write the image into their OTA partition and accept it only after
   size and CRC checks pass. This is field-wide only; no selected-node firmware
   updates.
 - **[done]** `MSG_OTA_STATUS`: performers report begin/writing/complete/error
-  status with offset and CRC, and the API filters stale statuses. If no fresh
-  terminal ACKs arrive after reboot, the API can record per-node completion from
-  verified post-reboot field state.
+  status with offset and prefix CRC, and the API filters stale statuses.
+- **[done]** `MSG_OTA_QUERY` and `MSG_OTA_ACTIVATE`: the conductor requests
+  deterministically time-slotted status replies and activates a fully staged
+  performer. These additive v10 message types preserve compatibility with
+  already-flashed v10 receivers, which ignore unknown types.
 - **[planned]** `MSG_ACK` + richer machine Pi↔conductor serial (lands with the Pi
   UI).
 - Time base: 64-bit `esp_timer` microseconds throughout (no 32-bit `millis` wrap).
 
-### 7.1 OTA policy, transfer, and recovery **[done; 3-board bench verified]**
+### 7.1 OTA policy, transfer, and recovery **[done; scale hardware verification pending]**
 
-OTA is manual maintenance-mode only and field-wide only. The system must never
-offer selected-node firmware updates as a normal workflow. Mixed firmware can
-still happen after a failed update, but it is treated as an error/recovery state.
+OTA is field-wide only and automatically reconciles the companion firmware by
+default. It runs in the background:
+beacons and normal serial control commands continue between chunks, so pattern,
+blackout, and power operations remain available. The system must never offer
+selected-node firmware updates as a normal workflow. Mixed firmware can still
+happen after a failed update, but it is treated as an error/recovery state.
 
 The foundation is in place: device builds get a release version from `VERSION`,
 a git-derived 32-bit build id, and dirty flag via `scripts/firmware_build_id.py`;
@@ -452,40 +469,60 @@ conductor/per-node firmware in machine state; the control plane shows field
 firmware consistency in Operations, links build hashes to GitHub commits, and
 flags `Firmware mismatch` in the Node List.
 
-The transfer path is also in place: the control plane stages a `.bin` artifact,
+The transfer path stages a `.bin` artifact,
 streams it over machine serial with `ota_begin`/`ota_chunk`/`ota_end`, the
 conductor writes its own OTA partition, and the conductor broadcasts the same
-chunk stream to performers via ESP-NOW. The UI shows install progress by chunk.
+chunk stream to performers via ESP-NOW. The UI shows broadcast, repair, staging,
+and activation phases per board.
 This was hardware-verified on the 3-board bench on 2026-07-06, including a
 same-protocol mixed-firmware recovery that restored performer #1 from
-`0.3.0-mismatch` to `0.3.0`. Serial chunk timeouts and retryable chunk NACKs are
-retried, duplicate already-written chunks are idempotent on both conductor and
-performers, and unsafe mid-chunk resume offsets are rejected instead of papering
-over a partial write. The current serial/ESP-NOW chunk payload is 128 bytes for
-command-buffer margin. Firmware requires each decoded chunk length to equal the
-expected full/tail length at the current offset; this avoids the old failure mode
-where a truncated but even-length hex command decoded as a shorter chunk and
-advanced the flash writer to a non-chunk boundary. OTA maintenance beacons keep
-performer radios awake for the window so duty cycling does not fight the updater.
-Performer OTA status is freshness filtered; the API only reports install success
-after every expected placed performer reports complete or verifies from live
-post-reboot firmware consistency. Missing placed lanterns block install with a
-Recovery row, and post-reboot verification failures synthesize per-node failed
-OTA rows for expected performers that did not verify. A final `ota_end` serial
-ACK timeout after all bytes land is treated as a post-reboot verification path,
-not an immediate install failure; periodic `ota_progress` poll timeouts are
-recorded and ignored while chunk transfer continues. Remaining deployment
-hardening: decide whether a 60-node deployment needs explicit performer ACK/retry
-beyond the current status reporting.
+`0.3.0-mismatch` to `0.3.0`. The scale-hardened path now checkpoints every 256
+chunks. Each performer reports its exact written offset and prefix CRC in a
+deterministic status slot. Two or more valid laggards receive one shared suffix
+rebroadcast from the earliest missing offset; a lone laggard receives only its
+missing suffix by unicast. CRC divergence or a fatal flash error restarts and
+replays only that performer. Normal chunks use six callback-confirmed broadcast
+transmissions, while control packets and shared repairs use eight; the conductor
+also pauses after each 4 KiB boundary so performer flash writes cannot consume
+the next unique packet. Targeted repairs require one delivery-callback-confirmed
+unicast; checkpoints and the final full-image CRC provide the durable proof.
+Transient serial and radio failures retry with bounded backoff until success or
+the durable six-hour retry deadline. Starting staging again after that deadline
+opens a fresh window and reconciles the conductor plus each performer from its
+verified offset/CRC. Duplicate chunks and finalization are idempotent.
 
-The control plane derives a Recovery summary from live state and the last install
-attempt. It classifies missing placed lanterns, same-protocol mixed firmware, and
-failed OTA nodes into one operator action surface. Mixed firmware is never a
-normal running state: enter maintenance mode, wait for readiness, and reinstall
-the staged firmware field-wide. Same-protocol mixed firmware is allowed to
-proceed with maintenance install as the recovery action once all placed nodes are
-present. Failed OTA installs instruct the operator to reset the maintenance
-window and rerun the same staged firmware after nodes check back in.
+Each performer finalizes independently and activates as soon as its own image is
+full-size/full-CRC staged; there is no fleet-wide verification barrier. The
+normal UI and automatic reconciler use one operation: upload, verify, activate
+each ready performer, verify its re-registration, keep repairing laggards, then
+activate the conductor last. One performer's failure therefore cannot block a
+different verified performer. The stage-only and explicit-activation API
+routes remain recovery tools. The durable install journal and checksum-pinned
+artifact survive browser disconnects and service restarts. The control plane
+recognizes already-installed members of a partially migrated legacy cohort so
+they cannot deadlock a resumed update. Offline inventory rows are
+deferred and automatically catch up when they later check in. Operators can turn
+automatic updates off before a show; doing so prevents new background work and
+pauses an automatic transfer at its next safe command boundary.
+
+`Update.end()` also selects the newly written ESP32 partition for the next
+boot, so the conductor deliberately defers that call until its final explicit
+activation. An incidental conductor reset during performer repair therefore
+returns to the current conductor image instead of silently installing the
+staged image early. Performers finalize on their own successful END because
+their activation follows immediately and independently.
+
+The first rollout has one explicit bootstrap seam: the USB-attached conductor
+must be direct-flashed once because the previously deployed firmware cannot
+serve the new repair/probe/activation serial RPCs. Control-plane preflight
+detects that legacy command set before `ota_begin` and reports the required
+action. After that, existing v10 performers can transition through OTA; unknown
+additive message types remain safe during the mixed-version pass.
+
+The control plane derives a Recovery summary from live state and the durable last
+install attempt. It classifies missing lanterns, same-protocol mixed firmware,
+and failed OTA nodes into one operator action surface. Rerunning the same staged
+artifact resumes or repairs the field; no maintenance-window reset is required.
 
 ## 8. Resilience model
 

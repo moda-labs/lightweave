@@ -36,10 +36,12 @@ and the production pointer is verified. The original release request authorizes
 both reviewed PRs and their merges once their required checks pass; ask again
 only when a failure or policy gate needs user judgment.
 
-The Pi automatically polls the promoted production pointer and deploys the
-control plane while staging the matching firmware. **Field firmware OTA remains
-a separate, manual, authenticated safety action** and is never implied by a
-request to cut a release.
+The Pi automatically polls the promoted production pointer, deploys the control
+plane, and stages the matching firmware. With **Automatic updates** enabled (the
+default), the control plane then reconciles online mismatched boards in the
+background; each performer installs independently and the conductor activates
+last. Before a high-visibility show, use the persistent Automatic updates switch
+to pause that behavior at a safe command boundary.
 
 ## All code should be unit tested
 

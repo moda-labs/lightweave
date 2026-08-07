@@ -8,16 +8,93 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**158 pass**) is green; control tests (**369 pass**) are green; all three
+(**170 pass**) is green; **430 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
+Latest in this branch (2026-08-06): **release v0.8.0 packages the running
+control plane and field firmware as one release by default.** Its checksum-verified companion
+firmware becomes the desired image automatically; online mismatches and old
+performers that check in later are reconciled without another operator action.
+The Firmware tab has a persistent **Automatic updates** show-safety toggle,
+enabled by default. Turning it off prevents new automatic updates and requests a
+safe pause of an active automatic transfer; explicit manual recovery remains
+available. Known-release selection and manual binary upload are collapsed under
+Development / recovery. The conductor continues normal beacons and the control plane
+interleaves show commands between 128-byte OTA chunks. Every 256 chunks it probes
+the frozen online cohort. Two or more valid laggards receive one shared suffix
+rebroadcast; a lone laggard receives MAC-addressed unicast, while a bad prefix
+CRC or fatal flash error restarts only that board. Normal chunks use six
+callback-confirmed radio transmissions; control packets and shared repairs use
+eight. An 80 ms pause at each 4 KiB flash boundary prevents a receiver's sector
+write from swallowing the next chunk. A targeted repair uses one
+delivery-confirmed copy, because the checkpoint and final CRC barriers own
+reliability. Serial and radio recovery retry with bounded backoff for up to six
+hours. The normal UI is one operation: each performer installs and reboots as
+soon as its own full image and CRC are verified, without waiting for the rest of
+the field; laggards keep repairing independently and the conductor activates last. The
+stage-only and separate activation routes remain recovery APIs. The UI
+exposes broadcast/repair/staging/activation phases and leaves pattern, blackout,
+and power controls available. Install state is journaled beside the
+checksum-pinned artifact, resumes after control-service restart without changing
+requested intent, and supports an explicit pause/resume from the verified
+conductor prefix. Native logic, control API fault injection, rolling-order,
+persistence, and canonical field-build checks are green. Full 53-board hardware
+verification is still required before calling the scale behavior field-proven.
+The local USB-attached conductor has been direct-flashed with the new
+repair/probe/activation and shared-rebroadcast RPCs while preserving its NVS.
+Any still-legacy conductor needs that same one-time bootstrap before its first
+live OTA; preflight detects the old command set before `ota_begin`.
+The conductor now also defers `Update.end()` itself until conductor-last
+activation; merely verifying its local image no longer changes the partition
+that an incidental reset will boot.
+
+Also in this branch: **performer registration no longer forms a synchronized
+return-traffic herd.** A 17-board local field received conductor beacons but only
+nine initially appeared in the roster; power-cycling five immediately made all
+five register, confirming that their immediate/10-second check-ins were
+phase-locked. REGISTER now uses a dependency-free, host-tested scheduler: expired
+deadlines are spread into stable MAC-derived slots over 500 ms inside the next
+shared radio window, successful delivery returns to a jittered 10–12-second
+cadence, and failed ESP-NOW delivery retries with 100 ms–2 s bounded backoff.
+Performer unicasts are serialized by purpose so REGISTER cannot consume a power
+or OTA-status callback. The UI header separately shows the current conductor
+contact count, and every group dropdown shows `online / total` membership.
+
+Hardware acceptance on 2026-08-05 found and fixed three real-device-only edges:
+`ota_begin` copied the 3,080-byte roster onto the ESP32's 8 KiB loop-task stack
+(leaving 64 bytes and crashing the Wi-Fi heap spinlock), repair sends treated an
+ESP-NOW queue acceptance as radio delivery, and deployed `0.5.1` performers could
+not answer the new checkpoint query. The conductor now snapshots a bounded
+385-byte cohort, waits for ESP-NOW unicast delivery callbacks, and defers a
+query-incompatible laggard to at most one full delivery-confirmed replay at the
+final staging barrier instead of repeatedly replaying prefixes. A clean
+`a0e58bfc` artifact (`881984` bytes, CRC32 `3998627663`) completed OTA to
+performer #23 in 709 seconds while Fire Flicker remained controllable; the final
+operation reported all 6,891 chunks, matching CRC, post-reboot `complete`, and
+both conductor and #23 on clean `v0.7.1` build `a0e58bfc`. The local field now
+reports 17 performers radio-online after directly updating two protocol-v8
+stragglers; #23 is intentionally offline. The full 18-performer acceptance run
+therefore remains pending.
+
+The next scale acceptance run must exercise independent completion explicitly:
+healthy performers should install as soon as they verify, a board that missed
+`OTA_BEGIN` must receive a targeted writer restart before shared suffix replay,
+and that laggard must not hold already-verified performers behind a fleet-wide
+barrier. Record total duration and repair counts, and verify all performers plus
+the conductor return on the expected clean build. Repeat for #23 when it is
+online to close the requested 18-performer gate. The UI progress regression is
+covered: a partial row such as 224 KiB / 862 KiB cannot render 100%, and the
+green check requires full size plus the expected CRC (or confirmed installed
+firmware).
+
 Latest on main (2026-08-04): **the multi-board USB flashing station is built.**
-The control plane now has a Flashing screen backed by
-a separate same-host provisioner daemon. It detects FireBeetles on macOS and
-Linux, binds USB topology to numbered powered-hub slots, flashes five boards in
-parallel by default (configurable to ten), streams per-board stages over the
-existing WebSocket, supports retry, and persists slot configuration plus the
-last 100 jobs. Factory erase requires an explicit 15-minute session. Production
+The control plane now has a Firmware screen backed by a separate same-host
+provisioner daemon. It detects FireBeetles on macOS and Linux and automatically
+queues every connected board, flashing five boards in parallel by default
+(configurable to ten). Optional USB-topology slot labels persist across port-name
+shuffles and service restarts. Progress streams over the existing WebSocket and
+retry is available for connected failures. Factory erase requires an explicit
+15-minute session. Production
 mode fails closed on blank boards, the configured conductor path is excluded
 before probing, and role verification refuses any conductor. Permanent-ID
 reservation now goes through the conductor's canonical NVS inventory before the
@@ -31,6 +108,10 @@ The v0.7.0 tag workflow publishes a serial ZIP using flash-plan schema 2 with
 its usable local flashing runtime. Older v0.6.0 artifacts fail station preflight
 clearly rather than starting board jobs without that runtime.
 The schema-2 build gate now executes the bundled flashing runtime, the station and GitOps deployment share an operation lock, USB path reuse fails closed, production health includes the daemon, and conductor ID reservations roll back unless NVS persistence succeeds.
+The station now inspects connected USB boards even while idle. The Firmware UI
+shows permanent ID, role, current version/build/protocol, the production target,
+and Current/Update needed before flashing is armed. Unknown boards remain
+explicitly unknown until a station run, and detected conductors are excluded.
 
 The one-time inventory/tagging pass is complete: **53 boards are registered**.
 No performer firmware migration is required for the station itself; only the
@@ -335,8 +416,8 @@ or verify from post-reboot field firmware consistency. Performers also report
 begin/writing/complete OTA status so future failures expose their offset/error.
 Previous latest: **12 V power monitoring is code-complete in firmware/API/UI** —
 the conductor retains the latest `MSG_POWER` sample per metered MAC and exposes it
-in `/api/state`; Operations estimates field draw and per-node SOC from sparse
-INA228 reference nodes, defaulting to the 384 Wh KUNLUN model 1230 pack. SOC is based
+in `/api/state`; the dedicated Power tab shows top-line SOC and average draw per
+metered performer, defaulting to the 384 Wh KUNLUN model 1230 pack. SOC is based
 on Wh used since a full-charge anchor, not a voltage curve: voltage at or above
 the configured full threshold (default 14.4 V) can auto-anchor a metered node to
 100%, and each metered node has a manual **Sync to 100%** button after charging.
@@ -417,15 +498,12 @@ Priority order:
    the same Lantern Locations flow and add a fixture if it exposes a new failure
    mode. Temporal code scoring should ignore constant extra lights; only extra
    lights blinking with the same planned code should remain ambiguous.
-7. **Scale-harden OTA when more boards exist:** manual maintenance OTA and
-   same-protocol mixed-firmware recovery are hardware-verified on the 3-board
-   bench. The updater retries serial chunk timeouts/NACKs, rejects unsafe resume
-   offsets and wrong-length chunks, freezes the fresh online cohort at begin,
-   reports offline rows as deferred, and verifies every targeted performer after
-   reboot before declaring success. Defer
-   explicit per-node chunk ACK/retry until a larger bench/field test shows
-   repeated ESP-NOW chunk loss that the current 3x broadcast repetition cannot
-   cover.
+7. **Hardware-verify scale-hardened OTA:** first run the requested 18-performer
+   field once all 18 are radio-visible. Confirm checkpoint status collection,
+   targeted suffix repair, the explicit `18 / 18 staged` barrier with no reboots,
+   one-action rolling activation, and live show control under real ESP-NOW
+   contention. Record total duration, repair counts, and any nodes requiring a
+   targeted restart. Later expand the same proof across the 53-board inventory.
 8. **Optional negative OTA-safety check:** if useful, intentionally flash one
    performer with a same-v8 but different build and confirm it appears as
    `Firmware mismatch`; restore all boards to one build afterward. Any
@@ -526,7 +604,7 @@ revised cost roll-up.
 - **Protocol foundation Half 1** (hardware-verified): typed message header
   `{magic, version, type}` with type dispatch; **MAC identity** read at boot and
   shown in `info`; **bidirectional ESP-NOW** — performers unicast `REGISTER`
-  every 10 s and the conductor builds a **MAC-keyed roster** (`roster` command).
+  every 10–12 s and the conductor builds a **MAC-keyed roster** (`roster` command).
   Sync hot path unchanged (still `LOCKED gaps` flat after the rework).
 - **Protocol foundation Half 2** (v7 position, v8 ID, v9 group, and v10
   LED-profile paths hardware-verified on the current bench): **conductor-authoritative
@@ -674,7 +752,7 @@ conductor self-log on the tested scheduler). What landed:
 - Control plane (2026-07-06): `/api/state` includes `power_monitor` summary from
   sparse reference-node samples. Operators can configure battery capacity
   (default 384 Wh) and the full-voltage threshold (default 14.4 V), see
-  estimated field draw / node SOC in Operations, and click **Sync to 100%** per
+  average draw per metered performer and top-line SOC in Power, and click **Sync to 100%** per
   metered node after charging to anchor that node's current Wh as full.
 
 **INA228 bench checklist (Monday, chip in hand):** (1) wire VCC→3V3, GND→GND,
@@ -851,8 +929,8 @@ energy/charge accumulation, wired in series between battery+ and the buck
 input on 1–2 reference nodes. It replaces one-off ET900/DMM snapshots with a
 true continuous Wh integral per night, and instrumented performers report
 accumulated Wh to the conductor over ESP-NOW (`MSG_POWER`) so every overnight
-sync test doubles as a fleet-wide power audit. The Operations UI rolls those
-sparse samples into an estimated field draw and SOC using the configured battery
+sync test doubles as a fleet-wide power audit. The Power UI rolls those sparse
+samples into average performer draw and SOC using the configured battery
 capacity, with auto/manual full-charge anchoring. Awaiting the physical chip
 (Monday's order) for hardware verification — the bench checklist is in the
 section above.

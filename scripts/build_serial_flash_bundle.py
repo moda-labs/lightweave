@@ -56,10 +56,37 @@ def build_bundle(
         )
     if not tool_members or not any(item["filename"] == "esptool/__main__.py" for item in tool_members):
         raise ValueError("esptool package is incomplete")
+    contrib_dir = esptool_dir.parent / "_contrib"
+    intelhex_dir = contrib_dir / "intelhex"
+    intelhex_licenses = sorted(
+        contrib_dir.glob("intelhex-*.dist-info/LICENSE.txt")
+    )
+    if not intelhex_dir.is_dir() or len(intelhex_licenses) != 1:
+        raise ValueError("esptool IntelHex dependency is incomplete")
+    for source in sorted(intelhex_dir.rglob("*")):
+        if not source.is_file() or "__pycache__" in source.parts or source.suffix == ".pyc":
+            continue
+        relative = source.relative_to(intelhex_dir).as_posix()
+        filename = f"intelhex/{relative}"
+        data = source.read_bytes()
+        members[filename] = data
+        tool_members.append(
+            {
+                "filename": filename,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            }
+        )
+    if not any(item["filename"] == "intelhex/__init__.py" for item in tool_members):
+        raise ValueError("esptool IntelHex dependency is incomplete")
     license_data = esptool_license.read_bytes()
     if not license_data:
         raise ValueError("esptool license is empty")
     members["esptool-LICENSE"] = license_data
+    intelhex_license_data = intelhex_licenses[0].read_bytes()
+    if not intelhex_license_data:
+        raise ValueError("IntelHex license is empty")
+    members["intelhex-LICENSE"] = intelhex_license_data
     members["esptool.py"] = (
         b"#!/usr/bin/env python3\n"
         b"import esptool\n"
@@ -72,11 +99,11 @@ def build_bundle(
             "sha256": hashlib.sha256(members[filename]).hexdigest(),
             "size": len(members[filename]),
         }
-        for filename in ("esptool-LICENSE", "esptool.py")
+        for filename in ("esptool-LICENSE", "esptool.py", "intelhex-LICENSE")
     )
     tool_members.sort(key=lambda item: item["filename"])
     plan = {
-        "schema_version": 2,
+        "schema_version": 3,
         "chip": "esp32",
         "flash_size": "4MB",
         "flash_mode": "dio",

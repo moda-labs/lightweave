@@ -246,12 +246,17 @@ GPIO2 blink is the zero-wiring sync check).
 
 ## Multi-board flashing station (control-plane UI)
 
-The normal production workflow is now the **Flashing** screen in the control
+The normal production workflow is now the **Firmware** screen in the control
 plane. A separate local provisioner owns USB discovery and flash subprocesses,
 so closing or refreshing the browser does not interrupt an in-progress board.
-Use a powered USB hub with individually numbered ports; the first time a port is
-seen, map its topology-derived identity to the physical number printed on the
-hub. Those mappings survive port-name shuffles and service restarts.
+Plug boards into a powered USB hub first. The idle station performs a read-only
+serial inspection and shows each board's permanent ID, role, current firmware
+version/build/protocol, production target, and whether an update is needed.
+Choose the simultaneous-flash limit and start the station when ready; boards
+that need work begin as workers become available, while current boards still
+pass through ID and role verification without rewriting their firmware.
+Physical hub-slot mappings are optional metadata; when configured, they survive
+port-name shuffles and service restarts.
 
 The station defaults to five concurrent boards and can be set from one to ten.
 It downloads only the checksum-pinned serial bundle selected by the production
@@ -261,7 +266,9 @@ package and license; every tool file is hash-verified before probing, so the Pi
 does not need a separately installed source-only flashing package. The station
 never builds the local checkout. The configured
 conductor serial path is excluded before probing, and a board that reports the
-CONDUCTOR role is always refused.
+CONDUCTOR role is identified in the idle UI and excluded from performer jobs.
+Blank, sleeping, or otherwise unreadable boards show `Version unknown`; no write
+is attempted until the operator starts an appropriate station session.
 
 The Pi preflights this runtime before a session can be armed. A production
 release made before flash-plan schema 2 is rejected with an upgrade message;
@@ -269,9 +276,9 @@ promote a release built from the station code before using the new Pi workflow.
 
 There are two explicit modes:
 
-- **Arm registered performers** updates recognized Lightweave performers and
+- **Start station** updates recognized Lightweave performers and
   fails closed on blank/factory firmware.
-- **Arm new boards for 15 minutes** temporarily authorizes the one-time full
+- **Start for new boards (15 min)** temporarily authorizes the one-time full
   erase required for previously unseen factory boards. The authorization expires
   automatically and is captured when each job begins.
 
@@ -309,6 +316,12 @@ If the conductor is also attached to the Mac, exclude its stable serial path:
 .venv/bin/python scripts/install_flashing_station.py install \
   --conductor-port /dev/cu.usbserial-CONDUCTOR
 ```
+
+Start the control plane with `CONTROL_CONDUCTOR=local-serial` as documented in
+`control/README.md`. That mode is the loopback-only permanent-ID authority for
+the station. Mock mode may inspect boards but intentionally refuses ID
+reservations, so injecting a serial adapter while leaving the settings in mock
+mode is not a functional flashing-station configuration.
 
 If the authoritative conductor remains on the Pi, securely copy the Pi's
 `PROVISIONER_TOKEN` into the Mac station's `token` file (mode `0600`) and point

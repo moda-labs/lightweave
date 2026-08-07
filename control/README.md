@@ -15,7 +15,23 @@ dependency stack today.
 .venv/bin/python -m uvicorn control.app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Real conductor:
+Real conductor on the same laptop, exposed only on loopback:
+
+```bash
+CONTROL_CONDUCTOR=local-serial \
+CONTROL_SERIAL_PORT=/dev/cu.usbserial-XXXX \
+CONTROL_DATA_DIR="$PWD/.control-data" \
+.venv/bin/python -m uvicorn control.app:app --host 127.0.0.1 --port 8000 \
+  --workers 1 --no-proxy-headers
+```
+
+`local-serial` is deliberately narrower than mock mode: HTTP and WebSocket
+requests must arrive directly on a loopback socket, use a loopback Host, and
+carry no forwarding headers. This lets the same process act as the permanent-ID
+authority for the local USB flashing station without making that unauthenticated
+bench UI reachable through a LAN bind or reverse proxy.
+
+Remote/production conductor:
 
 ```bash
 export CONTROL_PASSWORD_HASH="$(
@@ -33,7 +49,7 @@ CONTROL_PASSWORD_HASH="$CONTROL_PASSWORD_HASH" \
   --workers 1 --no-proxy-headers
 ```
 
-Serial mode deliberately requires the complete authenticated HTTPS deployment
+Remote `serial` mode deliberately requires the complete authenticated HTTPS deployment
 contract, even when a conductor adapter is injected. Use the named tunnel or a
 reviewed local HTTPS proxy in front of this loopback listener; do not weaken the
 serial-mode boundary for bench convenience. The production environment file and
@@ -52,7 +68,7 @@ snapshot cannot corrupt the next request.
 
 Open:
 
-- UI: <http://127.0.0.1:8000/>
+- Local UI: <http://127.0.0.1:8000/>
 - OpenAPI: <http://127.0.0.1:8000/docs>
 
 Production remote administration uses a loopback-only service behind a named
@@ -76,5 +92,7 @@ pio test -e native
 - Shared lantern detail sheet
 - Actions for identify, assign, forget, replace, pattern changes, and blackout
 - Shared-password sessions that protect HTTP, previews, uploads, and WebSockets
-- Detached field OTA with prompt `423 Locked` responses for competing serial work
+- Durable background field OTA with checkpoint repair, a six-hour retry window,
+  per-performer verified staging and independent one-action activation, and
+  normal show controls available throughout the transfer
 - Persistent stores rooted by `CONTROL_DATA_DIR`

@@ -56,6 +56,30 @@ def protected_app(tmp_path: Path, *, require_https: bool = True):
     return app, manager
 
 
+def test_local_serial_mode_accepts_only_direct_loopback_requests(tmp_path: Path) -> None:
+    settings = RemoteSettings(
+        conductor_mode="local-serial",
+        password_hash=None,
+        allowed_origins=frozenset(),
+        allow_network_changes=False,
+        require_https=False,
+        data_dir=tmp_path,
+    )
+    app = create_app(MockConductor(), settings=settings)
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        direct = client.get("/api/state")
+        public_host = client.get("/api/state", headers={"Host": "control.example.test"})
+        forwarded = client.get(
+            "/api/state",
+            headers={"X-Forwarded-Proto": "https"},
+        )
+
+    assert direct.status_code == 200
+    assert public_host.status_code == 403
+    assert forwarded.status_code == 403
+
+
 def login(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(auth, "_verify_password_bytes", lambda *_args: True)
     response = client.post(
@@ -120,6 +144,8 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "async function pollOtaInstallUntilTerminal()" in app_js
     assert "pollOtaInstallWhile" not in app_js
     assert 'const ack = await api("/api/operations/ota-install"' in app_js
+    assert 'const ack = await api("/api/operations/ota-activate"' in app_js
+    assert 'api("/api/operations/ota-stage"' not in app_js
     assert "await pollOtaInstallUntilTerminal()" in app_js
     assert "wifi.allow_changes !== false" in app_js
     assert 'releaseInfo = await api("/api/releases")' in app_js
@@ -130,6 +156,49 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Field firmware" in index_html
     assert "field-release-pending-changes" in index_html
     assert "Full release changelog" in index_html
+    assert "Performers online" in index_html
+    assert 'id="online-performer-count"' in index_html
+    assert "Placed lights" in index_html
+    assert 'src="/static/app.js?v=15"' in index_html
+    assert 'href="/static/styles.css?v=4"' in index_html
+    assert 'data-view="power"' in index_html
+    assert 'id="view-power"' in index_html
+    assert index_html.index('data-view="ops"') < index_html.index('data-view="flash"')
+    assert '<button data-view="flash">Firmware</button>' in index_html
+    flash_view = index_html[index_html.index('id="view-flash"'):index_html.index('id="view-power"')]
+    assert 'id="ota-mode"' in flash_view
+    assert "OTA firmware update" in flash_view
+    assert "Upload to control plane" not in flash_view
+    assert "Update field" in flash_view
+    assert "Automatic updates: On" in flash_view
+    assert "Development / recovery" in flash_view
+    assert 'id="ota-release-select"' in flash_view
+    assert 'runAction("upload-ota-artifact")' in app_js
+    assert flash_view.index("Update field") < flash_view.index('id="ota-nodes"')
+    assert "USB Flashing Station" in flash_view
+    assert "Simultaneous flashes" in flash_view
+    assert "Enable auto-update" in flash_view
+    assert "Disable auto-update" in flash_view
+    assert "Start station" not in flash_view
+    assert "Start for new boards" not in flash_view
+    assert ".filter((job) => job.connected)" in app_js
+    assert "function provisioningUpdateLabel(job)" in app_js
+    assert 'update_needed: "Update needed"' in app_js
+    assert 'unknown: "Unknown"' in app_js
+    assert "Install firmware" in app_js
+    assert "/api/provisioning/auto-update" in app_js
+    assert "job.firmware_version && job.firmware_build" in app_js
+    assert "Target v${escapeHtml(artifact.version)}" in app_js
+    assert "Battery SOC" in index_html
+    assert index_html.index("Battery SOC") < index_html.index('<nav class="tabs"')
+    assert "Average draw per performer" in index_html
+    assert "Estimated field draw" not in index_html
+    assert "monitor.average_performer_draw_w" in app_js
+    assert "node_offsets" in app_js
+    assert 'verified ? "✓" : ""' in app_js
+    assert "fullImage" in app_js
+    assert "crcMatches" in app_js
+    assert 'complete: "Installed"' in app_js
     assert "Blackout all groups" in index_html
     assert "Restore all groups" in index_html
     assert 'data-action="turn-off-group"' in index_html
@@ -140,6 +209,112 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "event.code === 4401" in app_js
     assert 'await api("/api/auth/logout", { method: "POST" })' in app_js
     assert "JSON.stringify({password: passwordInput.value})" in login_js
+
+
+def test_performer_lists_sort_by_numeric_id() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function performerId(item)")
+    end = app_js.index("\n}\n\nfunction patternForGroup", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+let state = {{lanterns: [
+  {{node_id: 17, label: "#17", mac: "D"}},
+  {{label: "#4", mac: "C"}},
+  {{node_id: 2, label: "#2", mac: "B"}},
+  {{label: "unassigned", mac: "A"}},
+]}};
+{function_source}
+const labels = lanterns().map((item) => item.label).join(",");
+if (labels !== "#2,#4,#17,unassigned") process.exit(1);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_online_performer_count_uses_fresh_roster_status() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function onlinePerformerCount(items)")
+    end = app_js.index("\n}\n\nfunction render()", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+{function_source}
+const lanterns = [
+  {{status: "alive"}},
+  {{status: "missing"}},
+  {{status: "alive"}},
+];
+if (onlinePerformerCount(lanterns) !== 2) process.exit(1);
+if (onlinePerformerCount(null) !== 0) process.exit(2);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_group_performer_counts_include_missing_members_but_not_retired() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function groupPerformerCounts(items)")
+    end = app_js.index("\n}\n\nfunction lanternDisplayName", start) + 2
+    counts_source = app_js[start:end]
+    options_start = app_js.index("function groupOptions(selectedGroupId)")
+    options_end = app_js.index("\n}\n\nfunction updateGroupNameDirtyState", options_start) + 2
+    options_source = app_js[options_start:options_end]
+    script = f"""
+const GROUP_COUNT = 8;
+const items = [
+  {{group_id: 0, status: "alive"}},
+  {{group_id: 0, status: "missing"}},
+  {{group_id: 1, status: "alive"}},
+  {{group_id: 1, status: "retired"}},
+  {{group_id: 99, status: "alive"}},
+];
+function lanterns() {{ return items; }}
+function groupLabel(groupId) {{ return `Group ${{groupId + 1}}`; }}
+function escapeHtml(value) {{ return value; }}
+{counts_source}
+{options_source}
+const counts = groupPerformerCounts(items);
+if (JSON.stringify(counts[0]) !== JSON.stringify({{online: 1, total: 2}})) process.exit(1);
+if (JSON.stringify(counts[1]) !== JSON.stringify({{online: 1, total: 1}})) process.exit(2);
+if (groupPerformerCounts(null).some((count) => count.online || count.total)) process.exit(3);
+const options = groupOptions(0);
+if (!options.includes("Group 1 (1 online / 2)")) process.exit(4);
+if (!options.includes("Group 2 (1 online / 1)")) process.exit(5);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_control_plane_assets_revalidate_in_browser() -> None:
+    app = create_app(MockConductor())
+    with TestClient(app) as client:
+        page = client.get("/")
+        script = client.get("/static/app.js?v=3")
+
+    assert page.status_code == 200
+    assert script.status_code == 200
+    assert page.headers["cache-control"] == "no-cache"
+    assert script.headers["cache-control"] == "no-cache"
 
 
 def test_live_state_refreshes_release_status_in_executed_javascript() -> None:
@@ -174,32 +349,119 @@ if (rendered !== 1 || releaseRendered !== 1) process.exit(2);
     assert completed.returncode == 0, completed.stderr
 
 
-def test_ota_control_lock_is_reversible_in_executed_javascript() -> None:
+def test_ota_ui_keeps_field_controls_live_and_locks_only_firmware_inputs() -> None:
     app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
         encoding="utf-8"
     )
-    start = app_js.index("function setOtaControlDisabled")
-    end = app_js.index("\n}\n\nfunction renderOta()", start) + 2
+    start = app_js.index("function renderOta()")
+    end = app_js.index("\n}\n\nfunction otaReadyForInstall", start) + 2
     function_source = app_js[start:end]
-    script = f"""
-{function_source}
-const enabled = {{disabled: false, dataset: {{}}}};
-const disabled = {{disabled: true, dataset: {{}}}};
-setOtaControlDisabled(enabled, true);
-setOtaControlDisabled(disabled, true);
-if (!enabled.disabled || !disabled.disabled) process.exit(1);
-setOtaControlDisabled(enabled, false);
-setOtaControlDisabled(disabled, false);
-if (enabled.disabled || !disabled.disabled) process.exit(2);
-"""
 
+    assert "setOtaControlDisabled" not in app_js
+    assert "[data-pattern]" not in function_source
+    assert "fileInput.disabled = installing" in function_source
+    assert "stage-ota-artifact" not in function_source
+    assert "install-ota" in function_source
+    assert "stage-ota" not in function_source
+    assert "activate-ota" not in function_source
+    assert "pause-ota" in function_source
+
+
+def test_ota_node_rows_show_performer_percent_and_verified_checkmark() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function renderOtaNodes()")
+    end = app_js.index("\n}\n\nfunction calibrationSettings", start) + 2
+    function_source = app_js[start:end]
+    sort_start = app_js.index("function performerId(item)")
+    sort_end = app_js.index("\n}\n\nfunction lanterns", sort_start) + 2
+    sort_source = app_js[sort_start:sort_end]
+    script = f"""
+const box = {{ hidden: true, innerHTML: "" }};
+const state = {{ ota: {{ nodes: [
+  {{mac: "AA", phase: "staged", offset: 250, crc32: 111}},
+  {{mac: "BB", phase: "staged", offset: 1000, crc32: 123}},
+] }} }};
+const otaInstall = {{
+  running: true,
+  size: 1000,
+  crc32: 123,
+  target_macs: ["AA", "BB"],
+  node_offsets: {{AA: 250, BB: 1000}},
+  staged_macs: ["AA", "BB"],
+  activated_macs: ["BB"],
+  nodes: [],
+}};
+function $(selector) {{ return selector === "#ota-nodes" ? box : null; }}
+function lanterns() {{ return [{{mac: "AA", label: "#1"}}, {{mac: "BB", label: "#2"}}]; }}
+function escapeHtml(value) {{ return String(value); }}
+function formatBytes(value) {{ return `${{value}} B`; }}
+{sort_source}
+{function_source}
+renderOtaNodes();
+if (box.hidden) process.exit(1);
+if (!box.innerHTML.includes("Uploading · 25%")) process.exit(2);
+if (!box.innerHTML.includes("250 B / 1000 B")) process.exit(3);
+if (!box.innerHTML.includes("Installed · 100%")) process.exit(4);
+if ((box.innerHTML.match(/aria-label="verified">✓/g) || []).length !== 1) process.exit(4);
+if ((box.innerHTML.match(/ota-node-row /g) || []).length !== 2) process.exit(5);
+"""
     completed = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         check=False,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == 0, completed.stderr
 
+
+def test_ota_dashboard_background_poll_detects_automatic_updates() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("async function refreshOtaInstall()")
+    end = app_js.index("\nasync function refreshWifiStatus", start)
+    function_source = app_js[start:end]
+    script = f"""
+let otaInstall = {{running: false}};
+let otaInstallRefreshPromise = null;
+let otaInstallPollTimer = null;
+let scheduled = null;
+let requests = 0;
+const responses = [{{running: true}}, {{running: false, complete: true}}];
+const window = {{
+  setTimeout(callback, delay) {{
+    scheduled = {{callback, delay}};
+    return requests + 1;
+  }},
+}};
+async function api(path) {{
+  if (path !== "/api/operations/ota-install") process.exit(1);
+  const install = responses[requests++];
+  return {{install}};
+}}
+function renderOta() {{}}
+{function_source}
+startOtaInstallPolling();
+if (!scheduled || scheduled.delay !== 3000) process.exit(2);
+let callback = scheduled.callback;
+scheduled = null;
+await callback();
+if (requests !== 1 || !otaInstall.running) process.exit(3);
+if (!scheduled || scheduled.delay !== 750) process.exit(4);
+callback = scheduled.callback;
+scheduled = null;
+await callback();
+if (requests !== 2 || otaInstall.running || !otaInstall.complete) process.exit(5);
+if (!scheduled || scheduled.delay !== 3000) process.exit(6);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     assert completed.returncode == 0, completed.stderr
 
 
