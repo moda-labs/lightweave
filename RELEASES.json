@@ -2,6 +2,17 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.1",
+      "date": "2026-08-07",
+      "title": "Protocol-safe field updates",
+      "control_changes": [],
+      "firmware_changes": [
+        "Separated application compatibility from the stable protocol-v11 routing and OTA envelope, so existing v11 relays can carry future firmware migrations without understanding the new application protocol.",
+        "Centralized routed packet construction and preserved the beacon, registration, and OTA migration layouts across future application revisions.",
+        "Protocol-v10 boards still require the one-time flashing-station migration because v10 predates the routed OTA envelope; once on v11, later protocol transitions can remain field-OTA capable."
+      ]
+    },
+    {
       "version": "0.9.0",
       "date": "2026-08-07",
       "title": "Long-range conductor relays",
