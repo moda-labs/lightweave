@@ -1,7 +1,7 @@
 // Wire protocol for the ESP-NOW messages nodes exchange.
 //
 // Every packet starts with a common routed MsgHeader. The
-// receiver validates magic + version, then dispatches on `type` to the matching
+// receiver validates magic + transport version, then dispatches on `type` to the matching
 // payload struct. The clock beacon (MSG_BEACON) is the hot path — broadcast a few
 // times a second and followed by every performer — so it stays small. Everything
 // else (REGISTER, and later ROSTER/TABLE) is occasional control traffic.
@@ -9,20 +9,23 @@
 // All structs are packed so the wire layout is identical on every node
 // regardless of compiler padding, and every message stays at or below the
 // 250-byte ESP-NOW payload limit. The magic constant lives in config.h
-// (BEACON_MAGIC); the version is bumped here whenever the layout changes.
+// (BEACON_MAGIC). The routed transport and OTA migration plane are deliberately
+// stable across application protocol upgrades.
 #pragma once
 
 #include <stdint.h>
 
+#include "config.h"
 #include "firmware_version.h"
 #include "groups.h"
 #include "ota_update.h"
 #include "power_policy.h"
 #include "powermon.h"  // PowerSample — MSG_POWER's payload IS the logic struct
 
-// Bumped on any incompatible wire-layout change. Receivers reject a mismatch
-// rather than misparse a packet from a node on different firmware. Also reported
-// in REGISTER so the conductor can spot a straggler running stale firmware.
+// Application protocol generation. This is reported in REGISTER so the
+// conductor can spot a straggler and coordinate a field upgrade. It MUST NOT be
+// used to validate MsgHeader: doing so would prevent an old relay from carrying
+// the OTA packets needed to cross an application protocol boundary.
 // v2: BeaconMsg grew `flags` (field-awake override for daytime deep-sleep).
 // v3: RegisterMsg reports a build id + dirty flag for OTA version consistency.
 // v4: RegisterMsg also reports the human firmware version string.
@@ -39,6 +42,14 @@
 // MSG_ROSTER was added without a protocol bump: it is a new optional message
 // type, and older receivers safely ignore unknown types.
 static constexpr uint8_t PROTO_VERSION = 11;
+
+// Stable routing and OTA-envelope version introduced by application protocol
+// v11. Existing v11 relays validate only this value, so they can forward future
+// application generations without first understanding them. Keep MsgHeader and
+// all MSG_OTA_* layouts byte-compatible for this transport version. Incompatible
+// application changes must use additive message types or a coordinated migration
+// while retaining this envelope.
+static constexpr uint8_t TRANSPORT_VERSION = 11;
 
 // A field has eight fixed group slots. Group ids are zero-based on the wire and
 // in NVS (the operator UI labels them Group 1..8). Fixed slots avoid a second
@@ -71,7 +82,7 @@ enum MsgType : uint8_t {
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;    // BEACON_MAGIC — reject anything else
-  uint8_t  version;  // PROTO_VERSION — reject a mismatch
+  uint8_t  transport_version;  // TRANSPORT_VERSION — stable migration envelope
   uint8_t  type;     // MsgType
   uint8_t  origin[6];       // logical sender, preserved across a relay
   uint8_t  destination[6];  // logical recipient or FF:FF:FF:FF:FF:FF
@@ -79,6 +90,14 @@ typedef struct __attribute__((packed)) {
 } MsgHeader;
 
 static_assert(sizeof(MsgHeader) == 19, "MsgHeader v11 wire layout changed");
+
+inline MsgHeader makeMsgHeader(uint8_t type) {
+  MsgHeader hdr = {};
+  hdr.magic = BEACON_MAGIC;
+  hdr.transport_version = TRANSPORT_VERSION;
+  hdr.type = type;
+  return hdr;
+}
 
 // One group's pattern configuration. Kept as a separate packed wire type so a
 // performer can select its own group without copying or interpreting the other
@@ -164,7 +183,7 @@ typedef struct __attribute__((packed)) {
   uint8_t   group_id;  // cached table group; lets conductor repair a missed edit
   uint8_t   led_count;  // cached 16/32/64 hardware profile
   uint8_t   role;     // ROLE_PERFORMER / ROLE_CONDUCTOR / ROLE_RELAY
-  uint8_t   fw;      // sender's PROTO_VERSION (wire compatibility marker)
+  uint8_t   fw;      // sender's PROTO_VERSION (application compatibility)
   uint32_t  build;   // sender's firmware build id (git-derived)
   uint8_t   dirty;   // sender was built from uncommitted firmware changes
   char      version[FIRMWARE_VERSION_MAX];  // human release version, NUL-padded

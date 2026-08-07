@@ -40,9 +40,7 @@ inline uint8_t tableChunkCount(uint8_t count) {
 inline size_t tableChunkBuild(const LayoutTable& t, uint8_t c, TableMsg& m) {
   uint8_t chunks = tableChunkCount(t.count);
   if (c >= chunks) return 0;
-  m.hdr.magic = BEACON_MAGIC;
-  m.hdr.version = PROTO_VERSION;
-  m.hdr.type = MSG_TABLE;
+  m.hdr = makeMsgHeader(MSG_TABLE);
   m.chunk = c;
   m.chunks = chunks;
   uint8_t start = (uint8_t)(c * TABLE_ROWS_PER_MSG);
@@ -161,9 +159,7 @@ inline size_t tableRowBuild(const LayoutTable& t, const uint8_t mac[6],
                             TableMsg& m) {
   int i = tableFind(t, mac);
   if (i < 0) return 0;
-  m.hdr.magic = BEACON_MAGIC;
-  m.hdr.version = PROTO_VERSION;
-  m.hdr.type = MSG_TABLE;
+  m.hdr = makeMsgHeader(MSG_TABLE);
   m.chunk = 0;
   m.chunks = 1;
   m.n = 1;
