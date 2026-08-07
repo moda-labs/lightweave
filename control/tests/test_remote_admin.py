@@ -173,7 +173,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Automatic updates: On" in flash_view
     assert "Development / recovery" in flash_view
     assert 'id="ota-release-select"' in flash_view
-    assert 'runAction("upload-ota-artifact")' in app_js
+    assert 'data-action="upload-ota-artifact"' in flash_view
     assert flash_view.index("Update field") < flash_view.index('id="ota-nodes"')
     assert "USB Flashing Station" in flash_view
     assert "Simultaneous flashes" in flash_view
