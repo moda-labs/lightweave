@@ -18,6 +18,14 @@
 #include "ota_update.h"
 #include "pattern_ids.h"
 
+// Worst-case targeted begin is 64 quoted MACs (20 bytes each including comma)
+// plus bounded uint32 fields and JSON keys. Keep the UART accumulator large
+// enough for the full OTA_STATUS_MAX cohort without putting it on loopTask's
+// stack (pollSerialCommands owns a static buffer).
+static constexpr uint16_t SERIAL_JSON_COMMAND_MAX = 1536;
+static_assert(SERIAL_JSON_COMMAND_MAX >= 128 + OTA_STATUS_MAX * 20,
+              "serial command buffer cannot hold a full targeted OTA cohort");
+
 enum SerialJsonKind {
   SJ_NONE = 0,
   SJ_STATE,
@@ -34,6 +42,7 @@ enum SerialJsonKind {
   SJ_POWER_POLICY,
   SJ_OTA_MODE,
   SJ_OTA_BEGIN,
+  SJ_OTA_BEGIN_TARGETS,
   SJ_OTA_CHUNK,
   SJ_OTA_REBROADCAST,
   SJ_OTA_END,
@@ -85,6 +94,7 @@ struct SerialJsonCommand {
   uint32_t ota_size = 0;
   uint32_t ota_crc32 = 0;
   uint32_t ota_offset = 0;
+  OtaCohort ota_targets = {};
   char ota_data_hex[OTA_SERIAL_CHUNK_MAX * 2 + 1] = {0};
   bool ota_self = false;
 };
@@ -197,6 +207,41 @@ inline bool serialJsonPatternId(const char* value, uint16_t& out) {
 inline bool sjMac(const char* json, const char* key, uint8_t out[6]) {
   char text[18];
   return sjString(json, key, text, sizeof(text)) && parseMac(text, out);
+}
+
+// Parse the deliberately narrow JSON array emitted by the control adapter.
+// Keeping this here makes exact-cohort validation host-testable without pulling
+// a general-purpose JSON allocator into the firmware.
+inline bool sjMacCohort(const char* json, const char* key, OtaCohort& out) {
+  otaCohortInit(out);
+  const char* p = sjKey(json, key);
+  if (!p || *p != '[') return false;
+  p++;
+  while (*p && isspace((unsigned char)*p)) p++;
+  if (*p == ']') return false;
+
+  while (*p) {
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p != '"') return false;
+    p++;
+    char text[18];
+    size_t n = 0;
+    while (*p && *p != '"') {
+      if (n + 1 >= sizeof(text)) return false;
+      text[n++] = *p++;
+    }
+    if (*p != '"') return false;
+    p++;
+    text[n] = '\0';
+    uint8_t mac[6];
+    if (!parseMac(text, mac) || otaCohortContains(out, mac) ||
+        !otaCohortAdd(out, mac)) return false;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p == ']') return out.count > 0;
+    if (*p != ',') return false;
+    p++;
+  }
+  return false;
 }
 
 inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
@@ -392,6 +437,14 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     if (!sjUint(json, "size", cmd.ota_size) ||
         !sjUint(json, "crc32", cmd.ota_crc32)) {
       error = "bad ota begin";
+      return false;
+    }
+  } else if (!strcmp(norm, "otabegintargets")) {
+    cmd.kind = SJ_OTA_BEGIN_TARGETS;
+    if (!sjUint(json, "size", cmd.ota_size) ||
+        !sjUint(json, "crc32", cmd.ota_crc32) ||
+        !sjMacCohort(json, "targets", cmd.ota_targets)) {
+      error = "bad targeted ota begin";
       return false;
     }
   } else if (!strcmp(norm, "otachunk")) {

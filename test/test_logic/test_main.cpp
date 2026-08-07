@@ -1005,6 +1005,27 @@ void test_ota_conductor_defers_boot_partition_selection_until_activation() {
       /*is_conductor=*/true, OTA_FINALIZE_ON_ACTIVATE));
 }
 
+void test_ota_session_mode_keeps_targeted_delivery_out_of_local_writer() {
+  OtaSessionMode targeted = otaSessionBegin(/*targeted=*/true);
+  TEST_ASSERT_TRUE(otaSessionIsActive(targeted));
+  TEST_ASSERT_TRUE(otaSessionIsWriting(targeted));
+  TEST_ASSERT_TRUE(otaSessionIsTargeted(targeted));
+  TEST_ASSERT_FALSE(otaSessionOwnsLocalWriter(targeted));
+  TEST_ASSERT_FALSE(otaSessionIsStaged(targeted));
+  TEST_ASSERT_TRUE(otaSessionStage(targeted));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SESSION_TARGETED_STAGED, targeted);
+  TEST_ASSERT_TRUE(otaSessionIsTargeted(targeted));
+  TEST_ASSERT_FALSE(otaSessionOwnsLocalWriter(targeted));
+
+  OtaSessionMode full = otaSessionBegin(/*targeted=*/false);
+  TEST_ASSERT_FALSE(otaSessionIsTargeted(full));
+  TEST_ASSERT_TRUE(otaSessionOwnsLocalWriter(full));
+  TEST_ASSERT_TRUE(otaSessionStage(full, /*retain_local_writer=*/true));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SESSION_LOCAL_STAGED_WRITER, full);
+  TEST_ASSERT_TRUE(otaSessionIsStaged(full));
+  TEST_ASSERT_TRUE(otaSessionOwnsLocalWriter(full));
+}
+
 void test_ota_status_table_upserts_by_mac() {
   OtaStatusTable t;
   otaStatusInit(t);
@@ -1106,6 +1127,29 @@ void test_ota_cohort_selects_fresh_non_conductor_roster_entries() {
   TEST_ASSERT_TRUE(otaCohortContains(cohort, fresh));
   TEST_ASSERT_FALSE(otaCohortContains(cohort, conductor));
   TEST_ASSERT_FALSE(otaCohortContains(cohort, stale));
+}
+
+void test_ota_requested_cohort_rejects_stale_targets_atomically() {
+  Roster roster;
+  rosterInit(roster);
+  const uint8_t self[6] = {1, 1, 1, 1, 1, 1};
+  const uint8_t fresh[6] = {2, 2, 2, 2, 2, 2};
+  const uint8_t stale[6] = {3, 3, 3, 3, 3, 3};
+  rosterUpsert(roster, fresh, 2, 11, 1, false, "0.9.1", 900);
+  rosterUpsert(roster, stale, 3, 11, 1, false, "0.9.1", 100);
+
+  OtaCohort requested;
+  otaCohortInit(requested);
+  TEST_ASSERT_TRUE(otaCohortAdd(requested, fresh));
+  OtaCohort selected;
+  TEST_ASSERT_TRUE(otaCohortSelectRequestedFresh(
+      selected, requested, roster, self, 1000, 200));
+  TEST_ASSERT_EQUAL_UINT8(1, selected.count);
+
+  TEST_ASSERT_TRUE(otaCohortAdd(requested, stale));
+  TEST_ASSERT_FALSE(otaCohortSelectRequestedFresh(
+      selected, requested, roster, self, 1000, 200));
+  TEST_ASSERT_EQUAL_UINT8(0, selected.count);
 }
 
 void test_ota_peer_lease_reuses_one_target_and_resets_cleanly() {
@@ -2337,6 +2381,57 @@ void test_serial_json_ota_begin_chunk_and_end_parse() {
   TEST_ASSERT_TRUE(cmd.ota_self);
 }
 
+void test_serial_json_targeted_ota_begin_parses_exact_mac_cohort() {
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT16(1408, SERIAL_JSON_COMMAND_MAX);
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":22,\"cmd\":\"ota_begin_targets\",\"size\":4096,"
+      "\"crc32\":1234,\"targets\":[\"30:76:F5:93:67:3C\","
+      "\"8C:94:DF:8F:71:50\"]}",
+      cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_BEGIN_TARGETS, cmd.kind);
+  TEST_ASSERT_EQUAL_UINT8(2, cmd.ota_targets.count);
+  const uint8_t first[6] = {0x30, 0x76, 0xF5, 0x93, 0x67, 0x3C};
+  const uint8_t second[6] = {0x8C, 0x94, 0xDF, 0x8F, 0x71, 0x50};
+  TEST_ASSERT_TRUE(otaCohortContains(cmd.ota_targets, first));
+  TEST_ASSERT_TRUE(otaCohortContains(cmd.ota_targets, second));
+
+  TEST_ASSERT_FALSE(serialJsonParse(
+      "{\"id\":23,\"cmd\":\"ota_begin_targets\",\"size\":4096,"
+      "\"crc32\":1234,\"targets\":[]}",
+      cmd, error));
+  TEST_ASSERT_FALSE(serialJsonParse(
+      "{\"id\":24,\"cmd\":\"ota_begin_targets\",\"size\":4096,"
+      "\"crc32\":1234,\"targets\":[\"30:76:F5:93:67:3C\","
+      "\"30:76:F5:93:67:3C\"]}",
+      cmd, error));
+}
+
+void test_serial_json_targeted_ota_begin_accepts_full_64_node_cohort() {
+  char json[SERIAL_JSON_COMMAND_MAX];
+  int used = snprintf(
+      json, sizeof(json),
+      "{\"id\":25,\"cmd\":\"ota_begin_targets\",\"size\":4096,"
+      "\"crc32\":1234,\"targets\":[");
+  TEST_ASSERT_GREATER_THAN_INT(0, used);
+  for (uint8_t i = 0; i < OTA_STATUS_MAX; i++) {
+    int added = snprintf(json + used, sizeof(json) - (size_t)used,
+                         "%s\"02:00:00:00:00:%02X\"",
+                         i ? "," : "", i);
+    TEST_ASSERT_GREATER_THAN_INT(0, added);
+    used += added;
+    TEST_ASSERT_LESS_THAN_INT((int)sizeof(json) - 2, used);
+  }
+  snprintf(json + used, sizeof(json) - (size_t)used, "]}");
+
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+  TEST_ASSERT_TRUE(serialJsonParse(json, cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_OTA_BEGIN_TARGETS, cmd.kind);
+  TEST_ASSERT_EQUAL_UINT8(OTA_STATUS_MAX, cmd.ota_targets.count);
+}
+
 void test_serial_json_rejects_retired_keepalive_command() {
   SerialJsonCommand cmd;
   const char* error = nullptr;
@@ -2646,10 +2741,14 @@ void test_stable_transport_packets_fit_espnow() {
   TEST_ASSERT_EQUAL_UINT8(MSG_OTA_BEGIN, header.type);
   TEST_ASSERT_EQUAL_UINT32(19, sizeof(MsgHeader));
   TEST_ASSERT_EQUAL_UINT32(21, sizeof(AckMsg));
+  TEST_ASSERT_EQUAL_UINT32(25, sizeof(OtaFrameAckMsg));
   TEST_ASSERT_EQUAL_UINT32(250, sizeof(TableMsg));
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(RosterMsg));
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(BeaconMsg));
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(OtaChunkMsg));
+  TEST_ASSERT_EQUAL_UINT8(4, relayTargetCopies(MSG_OTA_BEGIN));
+  TEST_ASSERT_EQUAL_UINT8(2, relayTargetCopies(MSG_OTA_CHUNK));
+  TEST_ASSERT_EQUAL_UINT8(4, relayTargetCopies(MSG_OTA_END));
 }
 
 void test_performer_parent_is_sticky_then_fails_over_for_same_primary() {
@@ -2717,6 +2816,94 @@ void test_primary_validates_direct_and_relayed_logical_origins() {
   TEST_ASSERT_FALSE(routePrimaryReceiveValid(primary, relay, false, uplink));
 }
 
+void test_targeted_ota_routes_through_relay_only_to_logical_destination() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t relay[6] = {2, 2, 3, 4, 5, 6};
+  const uint8_t target[6] = {3, 2, 3, 4, 5, 6};
+  const uint8_t non_target[6] = {4, 2, 3, 4, 5, 6};
+  ParentRoute relay_route = {};
+  memcpy(relay_route.primary, primary, 6);
+  memcpy(relay_route.parent, primary, 6);
+  relay_route.hops = 0;
+  relay_route.valid = true;
+  ParentRoute performer_route = {};
+  memcpy(performer_route.primary, primary, 6);
+  memcpy(performer_route.parent, relay, 6);
+  performer_route.hops = 1;
+  performer_route.valid = true;
+
+  const uint8_t ota_types[] = {MSG_OTA_BEGIN, MSG_OTA_CHUNK, MSG_OTA_END};
+  for (uint8_t type : ota_types) {
+    MsgHeader direct = {BEACON_MAGIC, TRANSPORT_VERSION, type};
+    routeHeaderSet(direct, primary, target, 0);
+    TEST_ASSERT_TRUE(routeFromCurrentParentAnyDestination(
+        relay_route, primary, direct));
+
+    RelayQueue queue;
+    relayQueueInit(queue);
+    TEST_ASSERT_TRUE(relayQueuePush(queue, (const uint8_t*)&direct,
+                                    sizeof(direct), target, 1'000,
+                                    relayTargetCopies(type)));
+    uint8_t packet[RELAY_PACKET_MAX];
+    TEST_ASSERT_TRUE(relayFramePrepare(*relayQueueFront(queue), 1'001, packet));
+    MsgHeader forwarded;
+    memcpy(&forwarded, packet, sizeof(forwarded));
+    TEST_ASSERT_EQUAL_UINT8(1, forwarded.hops);
+    TEST_ASSERT_TRUE(routeFromCurrentParent(
+        performer_route, relay, forwarded, target));
+    TEST_ASSERT_FALSE(routeFromCurrentParent(
+        performer_route, relay, forwarded, non_target));
+  }
+}
+
+void test_relay_frame_receipts_fall_back_for_older_v11_relay() {
+  const uint8_t relay[6] = {2, 2, 3, 4, 5, 6};
+  const uint8_t target[6] = {3, 2, 3, 4, 5, 6};
+  FirmwareVersion primary = currentFirmwareVersion(PROTO_VERSION);
+  Roster roster;
+  rosterInit(roster);
+  TEST_ASSERT_TRUE(rosterUpsert(
+      roster, relay, 56, primary.proto, primary.build_id, primary.dirty,
+      primary.version, 100, ROLE_RELAY, relay, 0));
+  TEST_ASSERT_TRUE(rosterUpsert(
+      roster, target, 1, primary.proto, primary.build_id, primary.dirty,
+      primary.version, 100, ROLE_PERFORMER, relay, 1));
+  TEST_ASSERT_TRUE(relayRouteSupportsFrameReceipt(
+      roster, target, primary, MSG_OTA_CHUNK));
+
+  int relay_index = rosterFind(roster, relay);
+  roster.entries[relay_index].build ^= 1;
+  TEST_ASSERT_FALSE(relayRouteSupportsFrameReceipt(
+      roster, target, primary, MSG_OTA_BEGIN));
+  TEST_ASSERT_FALSE(relayRouteSupportsFrameReceipt(
+      roster, target, primary, MSG_OTA_CHUNK));
+  TEST_ASSERT_FALSE(relayRouteSupportsFrameReceipt(
+      roster, target, primary, MSG_OTA_END));
+  TEST_ASSERT_TRUE(relayRouteSupportsFrameReceipt(
+      roster, target, primary, MSG_OTA_ACTIVATE));
+}
+
+void test_ota_frame_ack_rejects_delayed_receipt_for_previous_chunk() {
+  const uint8_t child[6] = {3, 2, 3, 4, 5, 6};
+  OtaChunkMsg first = {makeMsgHeader(MSG_OTA_CHUNK), 0, 2, {0xAA, 0xBB}};
+  OtaChunkMsg second = {makeMsgHeader(MSG_OTA_CHUNK), 128, 2, {0xCC, 0xDD}};
+  uint32_t first_token = relayFrameReceiptToken(
+      (const uint8_t*)&first, offsetof(OtaChunkMsg, data) + first.n);
+  uint32_t second_token = relayFrameReceiptToken(
+      (const uint8_t*)&second, offsetof(OtaChunkMsg, data) + second.n);
+  TEST_ASSERT_NOT_EQUAL(first_token, second_token);
+
+  OtaFrameAckWait wait;
+  otaFrameAckInit(wait);
+  otaFrameAckBegin(wait, child, MSG_OTA_CHUNK, second_token);
+  TEST_ASSERT_FALSE(otaFrameAckComplete(
+      wait, child, MSG_OTA_CHUNK, first_token, true));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_PENDING, wait.state);
+  TEST_ASSERT_TRUE(otaFrameAckComplete(
+      wait, child, MSG_OTA_CHUNK, second_token, true));
+  TEST_ASSERT_EQUAL_UINT8(OTA_SEND_ACK_SUCCESS, wait.state);
+}
+
 void test_relay_queue_collapses_copies_and_advances_beacon_time() {
   const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
@@ -2764,6 +2951,9 @@ void test_relay_queue_reports_end_to_end_activation_delivery_after_all_copies() 
   TEST_ASSERT_TRUE(relayQueueCompleteCopy(queue, false, completion));
   TEST_ASSERT_TRUE(completion.delivered);
   TEST_ASSERT_EQUAL_UINT8(MSG_OTA_ACTIVATE, completion.type);
+  TEST_ASSERT_EQUAL_UINT32(
+      relayFrameReceiptToken((const uint8_t*)&activate, sizeof(activate)),
+      completion.token);
   TEST_ASSERT_TRUE(routeMacEqual(child, completion.destination));
   TEST_ASSERT_EQUAL_UINT8(0, queue.count);
 
@@ -2777,6 +2967,11 @@ void test_relay_queue_reports_end_to_end_activation_delivery_after_all_copies() 
   TEST_ASSERT_TRUE(receipt.pending);
   relayReceiptSendResult(receipt, true);
   TEST_ASSERT_FALSE(receipt.pending);
+  TEST_ASSERT_TRUE(relayReceiptSupportsType(MSG_OTA_BEGIN));
+  TEST_ASSERT_TRUE(relayReceiptSupportsType(MSG_OTA_CHUNK));
+  TEST_ASSERT_TRUE(relayReceiptSupportsType(MSG_OTA_END));
+  TEST_ASSERT_TRUE(relayReceiptSupportsType(MSG_OTA_ACTIVATE));
+  TEST_ASSERT_FALSE(relayReceiptSupportsType(MSG_BEACON));
 }
 
 void test_relay_queue_rejects_second_hop_and_counts_overflow() {
@@ -2946,12 +3141,14 @@ int main(int, char**) {
   RUN_TEST(test_ota_expected_chunk_len_uses_full_chunks_until_tail);
   RUN_TEST(test_ota_flash_settle_only_follows_complete_sector);
   RUN_TEST(test_ota_conductor_defers_boot_partition_selection_until_activation);
+  RUN_TEST(test_ota_session_mode_keeps_targeted_delivery_out_of_local_writer);
   RUN_TEST(test_ota_status_table_upserts_by_mac);
   RUN_TEST(test_ota_status_complete_requires_matching_fresh_complete);
   RUN_TEST(test_ota_status_slots_spread_inventory_ids_and_hash_unknown_nodes);
   RUN_TEST(test_ota_staged_and_checkpoint_status_require_exact_crc_and_freshness);
   RUN_TEST(test_ota_cohort_freezes_online_targets_and_ignores_offline_rows);
   RUN_TEST(test_ota_cohort_selects_fresh_non_conductor_roster_entries);
+  RUN_TEST(test_ota_requested_cohort_rejects_stale_targets_atomically);
   RUN_TEST(test_ota_peer_lease_reuses_one_target_and_resets_cleanly);
   RUN_TEST(test_ota_send_ack_only_completes_the_pending_target);
   RUN_TEST(test_ota_cohort_requires_every_frozen_target_to_complete);
@@ -3029,6 +3226,8 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_power_policy_parses_runtime_sleep_controls);
   RUN_TEST(test_serial_json_ota_mode_parses_enabled_flag);
   RUN_TEST(test_serial_json_ota_begin_chunk_and_end_parse);
+  RUN_TEST(test_serial_json_targeted_ota_begin_parses_exact_mac_cohort);
+  RUN_TEST(test_serial_json_targeted_ota_begin_accepts_full_64_node_cohort);
   RUN_TEST(test_serial_json_rejects_retired_keepalive_command);
   RUN_TEST(test_serial_json_rejects_bad_command);
   RUN_TEST(test_table_wire_len_fits_espnow);
@@ -3049,6 +3248,9 @@ int main(int, char**) {
   RUN_TEST(test_performer_parent_is_sticky_then_fails_over_for_same_primary);
   RUN_TEST(test_relay_learns_only_a_direct_primary);
   RUN_TEST(test_primary_validates_direct_and_relayed_logical_origins);
+  RUN_TEST(test_targeted_ota_routes_through_relay_only_to_logical_destination);
+  RUN_TEST(test_relay_frame_receipts_fall_back_for_older_v11_relay);
+  RUN_TEST(test_ota_frame_ack_rejects_delayed_receipt_for_previous_chunk);
   RUN_TEST(test_relay_queue_collapses_copies_and_advances_beacon_time);
   RUN_TEST(test_relay_queue_reports_end_to_end_activation_delivery_after_all_copies);
   RUN_TEST(test_relay_queue_rejects_second_hop_and_counts_overflow);

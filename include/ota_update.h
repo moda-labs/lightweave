@@ -68,6 +68,62 @@ enum OtaFinalizeEvent : uint8_t {
   OTA_FINALIZE_ON_ACTIVATE = 1,
 };
 
+// One node can either own a local Update writer or coordinate an exact remote
+// cohort. Keeping those modes mutually exclusive makes the safety boundary
+// testable on the host: a targeted session can never accidentally take the
+// local-writer/broadcast branch through a stale combination of booleans.
+enum OtaSessionMode : uint8_t {
+  OTA_SESSION_IDLE = 0,
+  OTA_SESSION_LOCAL_WRITING = 1,
+  OTA_SESSION_LOCAL_STAGED = 2,
+  OTA_SESSION_TARGETED_WRITING = 3,
+  OTA_SESSION_TARGETED_STAGED = 4,
+  OTA_SESSION_LOCAL_STAGED_WRITER = 5,
+};
+
+inline bool otaSessionIsActive(OtaSessionMode mode) {
+  return mode != OTA_SESSION_IDLE;
+}
+
+inline bool otaSessionIsWriting(OtaSessionMode mode) {
+  return mode == OTA_SESSION_LOCAL_WRITING ||
+         mode == OTA_SESSION_TARGETED_WRITING;
+}
+
+inline bool otaSessionIsStaged(OtaSessionMode mode) {
+  return mode == OTA_SESSION_LOCAL_STAGED ||
+         mode == OTA_SESSION_TARGETED_STAGED ||
+         mode == OTA_SESSION_LOCAL_STAGED_WRITER;
+}
+
+inline bool otaSessionIsTargeted(OtaSessionMode mode) {
+  return mode == OTA_SESSION_TARGETED_WRITING ||
+         mode == OTA_SESSION_TARGETED_STAGED;
+}
+
+inline bool otaSessionOwnsLocalWriter(OtaSessionMode mode) {
+  return mode == OTA_SESSION_LOCAL_WRITING ||
+         mode == OTA_SESSION_LOCAL_STAGED_WRITER;
+}
+
+inline OtaSessionMode otaSessionBegin(bool targeted) {
+  return targeted ? OTA_SESSION_TARGETED_WRITING : OTA_SESSION_LOCAL_WRITING;
+}
+
+inline bool otaSessionStage(OtaSessionMode& mode,
+                            bool retain_local_writer = false) {
+  if (mode == OTA_SESSION_LOCAL_WRITING) {
+    mode = retain_local_writer ? OTA_SESSION_LOCAL_STAGED_WRITER
+                               : OTA_SESSION_LOCAL_STAGED;
+    return true;
+  }
+  if (mode == OTA_SESSION_TARGETED_WRITING) {
+    mode = OTA_SESSION_TARGETED_STAGED;
+    return true;
+  }
+  return false;
+}
+
 // Update.end() selects the newly written ESP32 partition for the next boot.
 // Performers can do that as soon as their image verifies because activation
 // follows immediately. The conductor must defer it until its explicit final
@@ -149,6 +205,13 @@ struct OtaSendAck {
   uint8_t state;
 };
 
+struct OtaFrameAckWait {
+  uint8_t mac[6];
+  uint8_t type;
+  uint32_t token;
+  uint8_t state;
+};
+
 static_assert(sizeof(OtaCohort) <= 512,
               "OTA cohort must remain safe for the ESP32 loop-task stack");
 
@@ -183,6 +246,27 @@ inline bool otaSendAckComplete(OtaSendAck& ack, const uint8_t mac[6],
                                bool success) {
   if (ack.state != OTA_SEND_ACK_PENDING || memcmp(ack.mac, mac, 6) != 0)
     return false;
+  ack.state = success ? OTA_SEND_ACK_SUCCESS : OTA_SEND_ACK_FAILED;
+  return true;
+}
+
+inline void otaFrameAckInit(OtaFrameAckWait& ack) {
+  memset(&ack, 0, sizeof(ack));
+  ack.state = OTA_SEND_ACK_IDLE;
+}
+
+inline void otaFrameAckBegin(OtaFrameAckWait& ack, const uint8_t mac[6],
+                             uint8_t type, uint32_t token) {
+  memcpy(ack.mac, mac, 6);
+  ack.type = type;
+  ack.token = token;
+  ack.state = OTA_SEND_ACK_PENDING;
+}
+
+inline bool otaFrameAckComplete(OtaFrameAckWait& ack, const uint8_t mac[6],
+                                uint8_t type, uint32_t token, bool success) {
+  if (ack.state != OTA_SEND_ACK_PENDING || memcmp(ack.mac, mac, 6) != 0 ||
+      ack.type != type || ack.token != token) return false;
   ack.state = success ? OTA_SEND_ACK_SUCCESS : OTA_SEND_ACK_FAILED;
   return true;
 }
@@ -230,6 +314,28 @@ inline void otaCohortSelectFresh(OtaCohort& cohort, const Roster& roster,
       otaCohortAdd(cohort, entry.mac);
     }
   }
+}
+
+// Freeze an operator-selected subset, but only if every requested target is a
+// fresh roster member. Returning false rejects the entire request so a typo or
+// stale route cannot silently shrink a safety-critical OTA cohort.
+inline bool otaCohortSelectRequestedFresh(
+    OtaCohort& cohort, const OtaCohort& requested, const Roster& roster,
+    const uint8_t self_mac[6], int64_t now_us, int64_t max_age_us) {
+  otaCohortInit(cohort);
+  if (requested.count == 0) return false;
+  for (uint8_t i = 0; i < requested.count; i++) {
+    const uint8_t* mac = requested.macs[i];
+    int roster_index = rosterFind(roster, mac);
+    if (memcmp(mac, self_mac, 6) == 0 || roster_index < 0 ||
+        !otaSeenRecently(roster.entries[roster_index].last_us, now_us,
+                         max_age_us) ||
+        !otaCohortAdd(cohort, mac)) {
+      otaCohortInit(cohort);
+      return false;
+    }
+  }
+  return cohort.count == requested.count;
 }
 
 inline void otaStatusInit(OtaStatusTable& t) { t.count = 0; }

@@ -198,6 +198,24 @@ def test_ota_write_commands_map_to_json() -> None:
     assert json.loads(transport.writes[3]) == {"id": 4, "cmd": "ota_end"}
 
 
+def test_targeted_ota_begin_maps_exact_cohort_to_json() -> None:
+    transport = FakeTransport([
+        json.dumps({"id": 1, "ok": True, "message": "targeted ota write started"}),
+    ])
+    conductor = JsonLineSerialConductor(transport)
+    targets = ["30:76:F5:93:67:3C", "8C:94:DF:8F:71:50"]
+
+    conductor.ota_begin_targets(4, 0x12345678, targets)
+
+    assert json.loads(transport.writes[0]) == {
+        "id": 1,
+        "cmd": "ota_begin_targets",
+        "size": 4,
+        "crc32": 0x12345678,
+        "targets": targets,
+    }
+
+
 def test_ota_repair_probe_restart_and_activation_commands_map_to_json() -> None:
     transport = FakeTransport([
         json.dumps({"id": 1, "ok": True}),

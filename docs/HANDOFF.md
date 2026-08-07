@@ -8,8 +8,39 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**180 pass**) is green; **446 control tests** are green; all three
+(**188 pass**) is green; **450 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+
+Latest in this feature branch (2026-08-07): **automatic OTA reconciliation now
+targets only stale nodes once the primary already runs the exact immutable
+release.** The Pi computes the mismatch set, sends it with the additive
+`ota_begin_targets` serial command, and records `cohort_mode=selective`. Firmware
+rejects the whole request unless every MAC is fresh in the primary roster, then
+uses the existing logical-destination v11 OTA packets for begin/chunk/end, so a
+target behind a relay remains reachable. Already-current performers and relays
+do not open an OTA writer, receive firmware chunks, activate, or reboot; an
+already-current primary does not write or reboot either. The same checkpoint,
+repair, CRC/staged barrier, relay-last ordering, pause/resume, and eventual
+consistency logic remains in force for the exact cohort. The journal persists
+that cohort before radio transfer starts and never downgrades it to full-field
+after a Pi/conductor restart. Relayed targeted OTA waits for a downstream
+delivery receipt per logical frame, bounding the relay queue even for a 64-node
+cohort. The additive receipt carries a frame token, so a delayed chunk-N receipt
+cannot acknowledge chunk N+1. When a stale relay and its stale children are
+both discovered, reconciliation updates the directly reachable relay first and
+defers its children to the next automatic pass; conservative pacing remains the
+compatibility fallback. Selective repair stays per-node instead of replaying the
+full cohort.
+Manual artifacts
+without immutable build identity and an outdated primary use the explicit
+`full-field` fallback. A pre-v11 node returning after the primary is already v11
+fails closed with the one-time USB-station action because it cannot parse routed
+packets. Therefore the release introducing this command performs one normal
+whole-field upgrade; subsequent routed-v11 single-node drift is selective
+without another radio protocol bump. Native parser/cohort tests,
+control integration tests for one stale node and the compatibility fallback,
+and the canonical field build cover the software boundary; hardware proof
+through a relay is still owed.
 
 Latest in this feature branch (2026-08-06): **one-hop conductor relays are
 code-complete; hardware verification is pending.** Protocol v11 gives every

@@ -78,6 +78,7 @@ enum MsgType : uint8_t {
   MSG_OTA_STATUS = 9, // performer -> conductor: OTA progress/error report
   MSG_OTA_QUERY = 10, // conductor -> performers: report current OTA checkpoint
   MSG_OTA_ACTIVATE = 11, // conductor -> performer: reboot staged image
+  MSG_OTA_FRAME_ACK = 12, // relay -> primary: tokened targeted-frame receipt
 };
 
 typedef struct __attribute__((packed)) {
@@ -147,10 +148,8 @@ typedef struct __attribute__((packed)) {
   uint8_t   macs[ROSTER_MACS_PER_MSG][6];
 } RosterMsg;
 
-// A relay emits this only after every queued copy of a targeted packet has
-// completed downstream. The header origin is the logical child named by the
-// original packet, while the immediate ESP-NOW sender remains the relay. This
-// gives the primary end-to-end delivery evidence before it reboots that relay.
+// Stable-v11 activation receipt. New frame-by-frame OTA delivery uses the
+// additive tokened message below; keep this layout for older relay activation.
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;
   uint8_t   acked_type;
@@ -158,6 +157,18 @@ typedef struct __attribute__((packed)) {
 } AckMsg;
 
 static_assert(sizeof(AckMsg) == 21, "AckMsg v11 wire layout changed");
+
+// Additive receipt used by relays that run the selective-OTA build. Existing
+// v11 nodes ignore the unknown message type, so no stable layout changes.
+typedef struct __attribute__((packed)) {
+  MsgHeader hdr;
+  uint8_t   acked_type;
+  uint8_t   delivered;
+  uint32_t  frame_token;
+} OtaFrameAckMsg;
+
+static_assert(sizeof(OtaFrameAckMsg) == 25,
+              "OtaFrameAckMsg wire layout changed");
 
 inline uint16_t rosterMsgFindRank(const RosterMsg& msg, const uint8_t mac[6]) {
   for (uint8_t i = 0; i < msg.n && i < ROSTER_MACS_PER_MSG; i++) {
