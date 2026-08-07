@@ -659,7 +659,8 @@ revised cost roll-up.
   serial input** — hit Enter in a monitor to revive a quiet node (see
   FLASHING.md). Exception: the conductor's `[power]` telemetry log is
   deliberately ungated (it's the overnight audit trail).
-- **Wire protocol is v11** (`PROTO_VERSION 11`; the common header preserves
+- **Application protocol and stable transport are both v11** (`PROTO_VERSION 11`,
+  `TRANSPORT_VERSION 11`); the common header preserves
   logical origin/destination across at most one relay hop; REGISTER reports role
   and the primary retains each node's immediate next hop. `MSG_TABLE` includes permanent
   board ID, optional-position flags, group ID, and 16/32/64 LED count; BEACON includes eight group
@@ -669,10 +670,14 @@ revised cost roll-up.
   plus release version, protocol, build id, and dirty flag
   for OTA version consistency; OTA begin/chunk/end messages carry
   the staged firmware image during manual maintenance updates).
-  Protocol-mismatched nodes silently reject each other — **flash every board
-  together**. A same-protocol stale version/build is reported as
-  `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 180) and control tests (446): sync
+  Header validation is deliberately tied only to `TRANSPORT_VERSION`; REGISTER
+  separately reports `PROTO_VERSION`. This keeps the routed OTA migration plane
+  byte-stable so existing v11 relays can carry future application revisions and
+  a staged field can activate performers, relays, then the primary without USB
+  reflashing. The initial v10→v11 transition still requires the one-time station
+  migration because v10 predates the routed header. A same-protocol stale
+  version/build is reported as `Firmware mismatch`.
+- **Host unit tests** (`test/test_logic/`) and control tests: sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),
@@ -1183,9 +1188,9 @@ missing the field envs, and the field envs copy-pasting instead of
 
 **Known debt (deliberate, not yet done):**
 - Dead wire artifacts: `palette_id` unused, `MSG_ROSTER`/`MSG_ACK` unsent,
-  `TableMsg.chunk/chunks` written but never read. Removing the wire fields would
-  change layout → PROTO_VERSION bump → reflash every board together; fold it
-  into the next deliberate protocol rev instead of doing it standalone. Roster
+  `TableMsg.chunk/chunks` written but never read. The stable v11 migration plane
+  keeps existing layouts byte-compatible; retire or supersede fields through
+  additive message types in a deliberate application protocol revision. Roster
   firmware reporting is no longer dead: current REGISTER includes `fw` + release
   version + build id + dirty flag for OTA consistency checks, and BEACON includes
   runtime `PowerPolicy`.

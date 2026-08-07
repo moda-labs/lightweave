@@ -418,13 +418,18 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
 
 ## 7. Wire protocol **[partly done]**
 
-- **[done]** Protocol v11 common header
-  `MsgHeader {magic, version, type, origin, destination, hops}` on every packet.
+- **[done]** Stable transport v11 common header
+  `MsgHeader {magic, transport_version, type, origin, destination, hops}` on
+  every packet.
   Receivers validate the logical addresses and one-hop limit before dispatching
   on `type`. A relay increments `hops` but preserves logical origin and
   destination, so normal and OTA traffic share one routing boundary.
   Types: `MSG_BEACON` (hot path), `MSG_REGISTER`, `MSG_TABLE` (live);
-  `MSG_ROSTER`/`MSG_ACK` reserved. `PROTO_VERSION` is rejected on mismatch.
+  `MSG_ROSTER`/`MSG_ACK` reserved. `MsgHeader.transport_version` is the stable
+  `TRANSPORT_VERSION`, rejected on mismatch; it is intentionally independent of
+  the application `PROTO_VERSION` reported by each node. This separation lets a
+  v11 relay forward a future application generation's registration and OTA
+  traffic without understanding or running that generation itself.
 - **[done]** `MSG_BEACON` (clock + pattern) broadcast on a fixed channel to
   `FF:FF:FF:FF:FF:FF`, `WIFI_STA`. The hot path (sync.h) reads `epoch_us`+`seq`.
 - **[done]** Bidirectional ESP-NOW: a performer learns one logical primary and a
@@ -441,7 +446,7 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   window (released early by its row), and uses 100 ms–2 s bounded backoff when
   the ESP-NOW unicast delivery callback fails. Performer
   unicasts are serialized by purpose so a power or OTA-status callback cannot be
-  mistaken for REGISTER completion. `fw` is wire
+  mistaken for REGISTER completion. `fw` is application
   compatibility (`PROTO_VERSION`); `version` + `build` + `dirty` are the OTA
   safety marker that catches same-protocol stale firmware.
 - **[done]** `MSG_TABLE`: the conductor broadcasts inventory and layout in chunks
@@ -463,6 +468,13 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   deterministically time-slotted status replies and activates a fully staged
   performer. These message types were additive in v10; protocol v11 routes them
   without changing their OTA payload semantics.
+- **Compatibility contract:** `MsgHeader`, `BeaconMsg`, `RegisterMsg`, and every
+  `MSG_OTA_*` layout form the v11 migration plane and remain byte-stable across
+  application protocol revisions. Application evolution is additive (new
+  message types) or is coordinated while continuing to carry clock, routing,
+  registration, and OTA over transport v11. Upgrade order is performers, relays,
+  then primary after the field-wide staging barrier, so every intermediate fleet
+  can still route and report OTA state.
 - **[planned]** `MSG_ACK` + richer machine Pi↔conductor serial (lands with the Pi
   UI).
 - Time base: 64-bit `esp_timer` microseconds throughout (no 32-bit `millis` wrap).

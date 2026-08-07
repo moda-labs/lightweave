@@ -138,7 +138,7 @@ static OtaPeerLease   g_ota_unicast_peer = {{0}, false};
 static OtaSendAck     g_ota_send_ack = {{0}, OTA_SEND_ACK_IDLE};
 static portMUX_TYPE   g_ota_status_mux = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE   g_ota_send_ack_mux = portMUX_INITIALIZER_UNLOCKED;
-static OtaStatusMsg   g_ota_status_pending = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_STATUS},
+static OtaStatusMsg   g_ota_status_pending = {makeMsgHeader(MSG_OTA_STATUS),
                                                {0}, OTA_PHASE_IDLE, OTA_ERR_NONE, 0, 0};
 static bool           g_ota_status_pending_dirty = false;
 static int64_t        g_ota_status_due_us = 0;
@@ -526,7 +526,7 @@ static void patternConfigLoad() {
     for (uint8_t i = 0; i < GROUP_COUNT; i++)
       sanitizePatternConfig(g_beacon.patterns[i]);
   }
-  g_beacon.hdr = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  g_beacon.hdr = makeMsgHeader(MSG_BEACON);
   g_beacon.epoch_us = 0;
   g_beacon.flags = 0;
   g_beacon.power = g_power_policy;
@@ -994,9 +994,7 @@ static void radioWake() {
 
 static void broadcastBeacon() {
   BeaconMsg b = g_beacon;
-  b.hdr.magic = BEACON_MAGIC;
-  b.hdr.version = PROTO_VERSION;
-  b.hdr.type = MSG_BEACON;
+  b.hdr = makeMsgHeader(MSG_BEACON);
   routeHeaderSet(b.hdr, g_mac, BROADCAST_ADDR);
   b.epoch_us = now_us();
   b.seq = g_tx_seq++;
@@ -1074,7 +1072,7 @@ static void maybeRelayDeliveryReceipt() {
 
   uint8_t parent[6], primary[6];
   if (!conductorPeerReady(parent, primary)) return;
-  AckMsg ack = {{BEACON_MAGIC, PROTO_VERSION, MSG_ACK}, receipt.type,
+  AckMsg ack = {makeMsgHeader(MSG_ACK), receipt.type,
                 (uint8_t)(receipt.delivered ? 1 : 0)};
   // This is a relay-certified receipt for the logical child, sent directly to
   // the primary after the child's queued activation copies have drained.
@@ -1145,7 +1143,7 @@ static void maybeRegister(int64_t t) {
   registrationSendStarted(g_register_schedule);
   portEXIT_CRITICAL(&g_register_mux);
 
-  RegisterMsg r = {{BEACON_MAGIC, PROTO_VERSION, MSG_REGISTER}, {0}, g_id.id,
+  RegisterMsg r = {makeMsgHeader(MSG_REGISTER), {0}, g_id.id,
                    groupIdSafe(g_id.group_id), ledCountSafe(g_id.led_count),
                    nodeRoleSafe(g_role),
                    PROTO_VERSION,
@@ -1214,7 +1212,7 @@ static void maybePowerReport(int64_t t) {
                   conductorPeerReady(cmac, primary);
   if (!powerReportDue(g_power_sched, t, POWER_REPORT_INTERVAL_US, can_send)) return;
 
-  PowerMsg m = {{BEACON_MAGIC, PROTO_VERSION, MSG_POWER}, {0}, readPowerSample(t)};
+  PowerMsg m = {makeMsgHeader(MSG_POWER), {0}, readPowerSample(t)};
   memcpy(m.mac, g_mac, 6);
   routeHeaderSet(m.hdr, g_mac, primary);
   performerSend(cmac, (const uint8_t*)&m, sizeof(m), PERFORMER_TX_POWER);
@@ -1294,9 +1292,7 @@ static void broadcastCalibrationRoster() {
   uint8_t chunks = (uint8_t)((count + ROSTER_MACS_PER_MSG - 1) / ROSTER_MACS_PER_MSG);
   for (uint8_t c = 0; c < chunks; c++) {
     RosterMsg m = {};
-    m.hdr.magic = BEACON_MAGIC;
-    m.hdr.version = PROTO_VERSION;
-    m.hdr.type = MSG_ROSTER;
+    m.hdr = makeMsgHeader(MSG_ROSTER);
     routeHeaderSet(m.hdr, g_mac, BROADCAST_ADDR);
     m.chunk = c;
     m.chunks = chunks;
@@ -1752,7 +1748,7 @@ static void otaWriteAbort() {
 static void otaSetLocalStatus(uint8_t phase, uint8_t error, uint32_t offset,
                               uint32_t crc32) {
   if (isConductor()) return;
-  OtaStatusMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_STATUS},
+  OtaStatusMsg msg = {makeMsgHeader(MSG_OTA_STATUS),
                       {0}, phase, error, offset, crc32};
   memcpy(msg.mac, g_mac, 6);
   portENTER_CRITICAL(&g_ota_status_mux);
@@ -1925,7 +1921,7 @@ static void otaSendRepeated(const uint8_t* data, size_t len, uint8_t copies,
 
 static void otaBroadcastBegin(uint32_t size, uint32_t crc32) {
   if (!isConductor()) return;
-  OtaBeginMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_BEGIN}, size, crc32};
+  OtaBeginMsg msg = {makeMsgHeader(MSG_OTA_BEGIN), size, crc32};
   routeHeaderSet(msg.hdr, g_mac, BROADCAST_ADDR);
   otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
                   OTA_RADIO_STRONG_MAX_ATTEMPTS);
@@ -1934,7 +1930,7 @@ static void otaBroadcastBegin(uint32_t size, uint32_t crc32) {
 static void otaBroadcastChunk(uint32_t offset, const uint8_t* data, uint8_t len,
                               bool strong) {
   if (!isConductor() || len == 0 || len > OTA_SERIAL_CHUNK_MAX) return;
-  OtaChunkMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_CHUNK}, offset, len, {0}};
+  OtaChunkMsg msg = {makeMsgHeader(MSG_OTA_CHUNK), offset, len, {0}};
   routeHeaderSet(msg.hdr, g_mac, BROADCAST_ADDR);
   memcpy(msg.data, data, len);
   otaSendRepeated((const uint8_t*)&msg, offsetof(OtaChunkMsg, data) + len,
@@ -1946,7 +1942,7 @@ static void otaBroadcastChunk(uint32_t offset, const uint8_t* data, uint8_t len,
 
 static void otaBroadcastEnd() {
   if (!isConductor()) return;
-  OtaEndMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_END}};
+  OtaEndMsg msg = {makeMsgHeader(MSG_OTA_END)};
   routeHeaderSet(msg.hdr, g_mac, BROADCAST_ADDR);
   otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
                   OTA_RADIO_STRONG_MAX_ATTEMPTS);
@@ -2013,7 +2009,7 @@ static bool otaUnicastRepeated(const uint8_t mac[6], const uint8_t* data,
 static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
                             const uint8_t* data, uint8_t len) {
   if (!isConductor() || len == 0 || len > OTA_SERIAL_CHUNK_MAX) return false;
-  OtaChunkMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_CHUNK}, offset, len, {0}};
+  OtaChunkMsg msg = {makeMsgHeader(MSG_OTA_CHUNK), offset, len, {0}};
   routeHeaderSet(msg.hdr, g_mac, mac);
   memcpy(msg.data, data, len);
   return otaUnicastRepeated(mac, (const uint8_t*)&msg,
@@ -2022,13 +2018,13 @@ static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
 
 static bool otaUnicastBegin(const uint8_t mac[6], uint32_t size,
                             uint32_t crc32) {
-  OtaBeginMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_BEGIN}, size, crc32};
+  OtaBeginMsg msg = {makeMsgHeader(MSG_OTA_BEGIN), size, crc32};
   routeHeaderSet(msg.hdr, g_mac, mac);
   return otaUnicastRepeated(mac, (const uint8_t*)&msg, sizeof(msg));
 }
 
 static bool otaUnicastActivate(const uint8_t mac[6]) {
-  OtaActivateMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_ACTIVATE}};
+  OtaActivateMsg msg = {makeMsgHeader(MSG_OTA_ACTIVATE)};
   routeHeaderSet(msg.hdr, g_mac, mac);
   bool relayed = false;
   portENTER_CRITICAL(&g_roster_mux);
@@ -2281,7 +2277,7 @@ static void handleOtaProbe(const SerialJsonCommand& cmd) {
     jsonError(cmd.id, "ota write is not active");
     return;
   }
-  OtaQueryMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_QUERY}};
+  OtaQueryMsg msg = {makeMsgHeader(MSG_OTA_QUERY)};
   routeHeaderSet(msg.hdr, g_mac, BROADCAST_ADDR);
   otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
                   OTA_RADIO_STRONG_MAX_ATTEMPTS);

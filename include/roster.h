@@ -22,7 +22,7 @@ static constexpr uint8_t ROSTER_MAX = 64;
 struct RosterEntry {
   uint8_t  mac[6];
   uint16_t id;       // human label reported by the node (0 if unprovisioned)
-  uint8_t  fw;       // node's PROTO_VERSION (spot a stale wire protocol)
+  uint8_t  fw;       // node's PROTO_VERSION (application compatibility)
   uint32_t build;    // node's firmware build id (spot same-protocol stragglers)
   uint8_t  dirty;    // node was built from an uncommitted firmware tree
   uint8_t  role;     // runtime performer/conductor/relay role

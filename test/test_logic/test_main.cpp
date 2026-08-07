@@ -2406,7 +2406,7 @@ void test_table_chunk_build_single_chunk() {
   size_t len = tableChunkBuild(t, 0, m);
   TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(2), len);
   TEST_ASSERT_EQUAL_UINT32(BEACON_MAGIC, m.hdr.magic);
-  TEST_ASSERT_EQUAL_UINT8(PROTO_VERSION, m.hdr.version);
+  TEST_ASSERT_EQUAL_UINT8(TRANSPORT_VERSION, m.hdr.transport_version);
   TEST_ASSERT_EQUAL_UINT8(MSG_TABLE, m.hdr.type);
   TEST_ASSERT_EQUAL_UINT8(0, m.chunk);
   TEST_ASSERT_EQUAL_UINT8(1, m.chunks);
@@ -2540,7 +2540,7 @@ void test_table_row_build() {
   size_t len = tableRowBuild(t, b, m);
   TEST_ASSERT_EQUAL_size_t(tableMsgWireLen(1), len);  // 28 B on the wire
   TEST_ASSERT_EQUAL_UINT32(BEACON_MAGIC, m.hdr.magic);
-  TEST_ASSERT_EQUAL_UINT8(PROTO_VERSION, m.hdr.version);
+  TEST_ASSERT_EQUAL_UINT8(TRANSPORT_VERSION, m.hdr.transport_version);
   TEST_ASSERT_EQUAL_UINT8(MSG_TABLE, m.hdr.type);
   TEST_ASSERT_EQUAL_UINT8(1, m.n);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(b, m.rows[0].mac, 6);
@@ -2637,8 +2637,13 @@ void test_boot_serial_seed_expires_longest_grace() {
 
 // ---- One-hop relay routing --------------------------------------------------
 
-void test_route_header_v11_packets_fit_espnow() {
+void test_stable_transport_packets_fit_espnow() {
+  TEST_ASSERT_EQUAL_UINT8(11, TRANSPORT_VERSION);
   TEST_ASSERT_EQUAL_UINT8(11, PROTO_VERSION);
+  MsgHeader header = makeMsgHeader(MSG_OTA_BEGIN);
+  TEST_ASSERT_EQUAL_UINT32(BEACON_MAGIC, header.magic);
+  TEST_ASSERT_EQUAL_UINT8(TRANSPORT_VERSION, header.transport_version);
+  TEST_ASSERT_EQUAL_UINT8(MSG_OTA_BEGIN, header.type);
   TEST_ASSERT_EQUAL_UINT32(19, sizeof(MsgHeader));
   TEST_ASSERT_EQUAL_UINT32(21, sizeof(AckMsg));
   TEST_ASSERT_EQUAL_UINT32(250, sizeof(TableMsg));
@@ -2655,7 +2660,7 @@ void test_performer_parent_is_sticky_then_fails_over_for_same_primary() {
   const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
   ParentRoute route;
   parentRouteInit(route);
-  MsgHeader direct = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  MsgHeader direct = {BEACON_MAGIC, TRANSPORT_VERSION, MSG_BEACON};
   routeHeaderSet(direct, primary, broadcast, 0);
   TEST_ASSERT_EQUAL(PARENT_ACCEPT_NEW,
                     parentRouteOnBeacon(route, false, performer, primary,
@@ -2688,7 +2693,7 @@ void test_relay_learns_only_a_direct_primary() {
   const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
   ParentRoute route;
   parentRouteInit(route);
-  MsgHeader beacon = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  MsgHeader beacon = {BEACON_MAGIC, TRANSPORT_VERSION, MSG_BEACON};
   routeHeaderSet(beacon, primary, broadcast, 1);
   TEST_ASSERT_EQUAL(PARENT_REJECT,
                     parentRouteOnBeacon(route, true, local, other_relay,
@@ -2703,7 +2708,7 @@ void test_primary_validates_direct_and_relayed_logical_origins() {
   const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t relay[6] = {2, 2, 3, 4, 5, 6};
   const uint8_t child[6] = {3, 2, 3, 4, 5, 6};
-  MsgHeader uplink = {BEACON_MAGIC, PROTO_VERSION, MSG_REGISTER};
+  MsgHeader uplink = {BEACON_MAGIC, TRANSPORT_VERSION, MSG_REGISTER};
   routeHeaderSet(uplink, child, primary, 0);
   TEST_ASSERT_TRUE(routePrimaryReceiveValid(primary, child, false, uplink));
   TEST_ASSERT_FALSE(routePrimaryReceiveValid(primary, relay, true, uplink));
@@ -2716,7 +2721,7 @@ void test_relay_queue_collapses_copies_and_advances_beacon_time() {
   const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
   BeaconMsg beacon = {};
-  beacon.hdr = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  beacon.hdr = {BEACON_MAGIC, TRANSPORT_VERSION, MSG_BEACON};
   routeHeaderSet(beacon.hdr, primary, broadcast, 0);
   beacon.epoch_us = 10'000;
   beacon.seq = 7;
@@ -2745,7 +2750,7 @@ void test_relay_queue_reports_end_to_end_activation_delivery_after_all_copies() 
   const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t child[6] = {3, 2, 3, 4, 5, 6};
   OtaActivateMsg activate = {};
-  activate.hdr = {BEACON_MAGIC, PROTO_VERSION, MSG_OTA_ACTIVATE};
+  activate.hdr = {BEACON_MAGIC, TRANSPORT_VERSION, MSG_OTA_ACTIVATE};
   routeHeaderSet(activate.hdr, primary, child, 0);
   RelayQueue queue;
   relayQueueInit(queue);
@@ -2778,7 +2783,7 @@ void test_relay_queue_rejects_second_hop_and_counts_overflow() {
   const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
   BeaconMsg beacon = {};
-  beacon.hdr = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  beacon.hdr = {BEACON_MAGIC, TRANSPORT_VERSION, MSG_BEACON};
   routeHeaderSet(beacon.hdr, primary, broadcast, 1);
   RelayQueue queue;
   relayQueueInit(queue);
@@ -2806,6 +2811,46 @@ void test_roster_retains_role_and_immediate_route() {
   TEST_ASSERT_EQUAL_UINT8(ROLE_PERFORMER, roster.entries[0].role);
   TEST_ASSERT_EQUAL_UINT8(1, roster.entries[0].hops);
   TEST_ASSERT_TRUE(routeMacEqual(roster.entries[0].via, relay));
+}
+
+void test_v11_relay_forwards_future_application_protocol_registration() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t relay[6] = {2, 2, 3, 4, 5, 6};
+  const uint8_t child[6] = {3, 2, 3, 4, 5, 6};
+
+  ParentRoute upstream = {};
+  memcpy(upstream.primary, primary, 6);
+  memcpy(upstream.parent, primary, 6);
+  upstream.valid = true;
+
+  RegisterMsg registration = {};
+  registration.hdr = {BEACON_MAGIC, TRANSPORT_VERSION, MSG_REGISTER};
+  routeHeaderSet(registration.hdr, child, primary, 0);
+  memcpy(registration.mac, child, 6);
+  registration.fw = PROTO_VERSION + 1;
+
+  TEST_ASSERT_NOT_EQUAL(registration.fw,
+                        registration.hdr.transport_version);
+  TEST_ASSERT_TRUE(routeChildUplinkValid(upstream, child, registration.hdr));
+  registration.hdr.transport_version = registration.fw;
+  TEST_ASSERT_FALSE(routeChildUplinkValid(upstream, child, registration.hdr));
+  registration.hdr.transport_version = TRANSPORT_VERSION;
+
+  RelayQueue queue;
+  relayQueueInit(queue);
+  TEST_ASSERT_TRUE(relayQueuePush(queue, (const uint8_t*)&registration,
+                                  sizeof(registration), primary, 1'000));
+  uint8_t packet[RELAY_PACKET_MAX];
+  TEST_ASSERT_TRUE(relayFramePrepare(*relayQueueFront(queue), 1'100, packet));
+
+  RegisterMsg forwarded = {};
+  memcpy(&forwarded, packet, sizeof(forwarded));
+  TEST_ASSERT_EQUAL_UINT8(TRANSPORT_VERSION,
+                          forwarded.hdr.transport_version);
+  TEST_ASSERT_EQUAL_UINT8(PROTO_VERSION + 1, forwarded.fw);
+  TEST_ASSERT_EQUAL_UINT8(1, forwarded.hdr.hops);
+  TEST_ASSERT_TRUE(
+      routePrimaryReceiveValid(primary, relay, true, forwarded.hdr));
 }
 
 void test_relay_peer_kind_keeps_upstream_out_of_rotating_child_lease() {
@@ -3000,7 +3045,7 @@ int main(int, char**) {
   RUN_TEST(test_boot_timer_wake_without_day_flag_fails_awake);
   RUN_TEST(test_timer_wake_rendezvous_blocks_sleep_until_beacon_or_deadline);
   RUN_TEST(test_boot_serial_seed_expires_longest_grace);
-  RUN_TEST(test_route_header_v11_packets_fit_espnow);
+  RUN_TEST(test_stable_transport_packets_fit_espnow);
   RUN_TEST(test_performer_parent_is_sticky_then_fails_over_for_same_primary);
   RUN_TEST(test_relay_learns_only_a_direct_primary);
   RUN_TEST(test_primary_validates_direct_and_relayed_logical_origins);
@@ -3008,6 +3053,7 @@ int main(int, char**) {
   RUN_TEST(test_relay_queue_reports_end_to_end_activation_delivery_after_all_copies);
   RUN_TEST(test_relay_queue_rejects_second_hop_and_counts_overflow);
   RUN_TEST(test_roster_retains_role_and_immediate_route);
+  RUN_TEST(test_v11_relay_forwards_future_application_protocol_registration);
   RUN_TEST(test_relay_peer_kind_keeps_upstream_out_of_rotating_child_lease);
   return UNITY_END();
 }

@@ -42,7 +42,8 @@ inline void routeHeaderSet(MsgHeader& hdr, const uint8_t origin[6],
 }
 
 inline bool routeHeaderBasicValid(const MsgHeader& hdr) {
-  return hdr.magic == BEACON_MAGIC && hdr.version == PROTO_VERSION &&
+  return hdr.magic == BEACON_MAGIC &&
+         hdr.transport_version == TRANSPORT_VERSION &&
          hdr.hops <= ROUTE_MAX_HOPS && !routeMacZero(hdr.origin) &&
          !routeMacBroadcast(hdr.origin) && !routeMacZero(hdr.destination);
 }
