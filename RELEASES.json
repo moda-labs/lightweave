@@ -2,6 +2,22 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.0",
+      "date": "2026-08-07",
+      "title": "Long-range conductor relays",
+      "control_changes": [
+        "Added conductor-relay roles and route visibility so Operations can distinguish the Pi-connected primary, direct relays, and performers reached through them.",
+        "Extended reliable OTA coordination across relays with end-to-end delivery receipts and ordered activation: performers first, relays next, and the primary conductor last.",
+        "Added firmware protocol metadata, migration checks, and downgrade guards so releases fail safely when an older image would strand a relayed node."
+      ],
+      "firmware_changes": [
+        "Added one-hop conductor relays that rebroadcast clock, show configuration, inventory, commands, telemetry, and OTA traffic while performers continue rendering locally through packet loss.",
+        "Added protocol-v11 routed message headers, sticky parent selection, bounded forwarding queues, and automatic parent failover after a stale route.",
+        "Made relayed OTA activation wait for downstream delivery before a relay reboots, preserving staged firmware consistency across the full route.",
+        "Protocol v11 requires the reachable protocol-v10 performer cohort to migrate through a protocol-v10 primary before that primary and newly provisioned relays switch to v11."
+      ]
+    },
+    {
       "version": "0.8.0",
       "date": "2026-08-06",
       "title": "Seamless field firmware management",
