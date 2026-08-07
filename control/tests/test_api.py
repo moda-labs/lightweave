@@ -15,7 +15,7 @@ from control.adapters import SerialProtocolError
 from control.app import create_app, ota_monotonic_offset, ota_reconcile_needed
 from control.group_store import GroupStore
 from control.mock_conductor import Lantern, MockConductor
-from control.ota_store import OtaArtifactStore
+from control.ota_store import OtaArtifactStore, OtaInstallStore
 from control.pattern_store import PatternStore
 from control.power_monitor import PowerMonitorStore
 from control.preview import _fire_flicker_sample
@@ -466,6 +466,30 @@ class RecordingActivationConductor(MockConductor):
     def ota_activate(self, mac: str | None = None) -> dict:
         self.activation_order.append(mac)
         return super().ota_activate(mac)
+
+
+class OldConductorUntilActivated(RecordingActivationConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conductor_current = False
+
+    def snapshot(self) -> dict:
+        state = super().snapshot()
+        if not self.conductor_current:
+            state["conductor"]["firmware"] = {
+                "version": "0.7.0",
+                "proto": 10,
+                "build_id": 1,
+                "build_label": "oldbuild",
+                "dirty": False,
+            }
+        return state
+
+    def ota_activate(self, mac: str | None = None) -> dict:
+        ack = super().ota_activate(mac)
+        if mac is None and ack.get("ok"):
+            self.conductor_current = True
+        return ack
 
 
 class BlockingRecordingActivationConductor(RecordingActivationConductor):
@@ -1775,6 +1799,31 @@ def test_power_monitor_auto_anchors_when_full_voltage_seen() -> None:
     assert sample["soc_percent"] == 100.0
 
 
+def test_implausible_power_sample_cannot_replace_durable_soc_anchor(tmp_path: Path) -> None:
+    conductor = MockConductor()
+    meter = conductor._lanterns[0]
+    store = PowerMonitorStore(tmp_path / "power")
+    client = TestClient(create_app(conductor, power_monitor_store=store))
+
+    assert client.post(f"/api/lanterns/{meter.mac}/power-sync-full").status_code == 200
+    original = store.load()["full_anchors"][meter.mac]
+    meter.power_wh = 0.01
+    meter.bus_v = 15.0
+    meter.power_plausible = False
+
+    sample = next(
+        item
+        for item in client.get("/api/state").json()["power_monitor"]["samples"]
+        if item["mac"] == meter.mac
+    )
+
+    assert sample["plausible"] is False
+    assert sample["full_detected"] is False
+    assert sample["avg_w"] is None
+    assert sample["full_anchor"] == original
+    assert store.load()["full_anchors"][meter.mac] == original
+
+
 def test_ota_mode_update_round_trips_to_state(managed_client) -> None:
     client = managed_client(create_app(MockConductor()))
 
@@ -1829,6 +1878,31 @@ def test_automatic_firmware_updates_default_on_and_persist(tmp_path, managed_cli
     ] is False
 
 
+def test_promoted_release_replaces_stale_desired_artifact_hash(tmp_path) -> None:
+    store = OtaArtifactStore(tmp_path / "ota")
+    previous = store.stage("old.bin", b"\xe9old")
+    OtaInstallStore(store.root).save({
+        "running": False,
+        "complete": True,
+        "auto_update_enabled": True,
+        "desired_artifact_sha256": previous["sha256"],
+        "installed_artifact_sha256": previous["sha256"],
+    })
+    promoted = store.stage(
+        "lightweave-field-v0.8.0.bin",
+        b"\xe9new",
+        source="release",
+        release="v0.8.0",
+        version="0.8.0",
+        commit="a" * 40,
+    )
+
+    app = create_app(MockConductor(), ota_store=OtaArtifactStore(store.root))
+
+    assert app.state.ota_install["desired_artifact_sha256"] == promoted["sha256"]
+    assert app.state.ota_install["installed_artifact_sha256"] == previous["sha256"]
+
+
 def test_auto_reconcile_detects_late_old_performer() -> None:
     artifact = type("Artifact", (), {
         "sha256": "desired",
@@ -1852,6 +1926,20 @@ def test_auto_reconcile_detects_late_old_performer() -> None:
     }
 
     assert ota_reconcile_needed({"lanterns": [matching]}, artifact, install) is False
+    assert ota_reconcile_needed(
+        {
+            "conductor": {
+                "firmware": {
+                    "version": "0.7.0",
+                    "build_label": "oldbuild",
+                    "dirty": False,
+                }
+            },
+            "lanterns": [matching],
+        },
+        artifact,
+        install,
+    ) is True
     assert ota_reconcile_needed({"lanterns": [matching, old]}, artifact, install) is True
     assert ota_reconcile_needed(
         {"lanterns": [matching, {**old, "status": "missing"}]}, artifact, install
@@ -2281,6 +2369,83 @@ def test_ota_install_skips_live_board_matching_trusted_artifact_identity(
     assert install["already_installed_macs"] == [performer.mac]
     assert install["node_offsets"] == {performer.mac: artifact["size"]}
     assert conductor.activation_order == []
+    assert conductor._ota_expected_size == 0
+
+
+def test_ota_install_updates_old_conductor_when_all_performers_are_current(
+    tmp_path, managed_client
+) -> None:
+    conductor = OldConductorUntilActivated()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    current = conductor._lanterns[0].firmware
+    build = str(current["build_label"])
+    store = OtaArtifactStore(tmp_path)
+    artifact = store.stage(
+        "firmware.bin",
+        b"\xe9" + bytes(range(255)) * 2,
+        source="release",
+        version=str(current["version"]),
+        commit=build + "0" * (40 - len(build)),
+    )
+    client = managed_client(create_app(conductor, ota_store=store))
+
+    state = client.get("/api/state").json()
+    install_store = client.app.state.ota_install
+    install_store.update({
+        "auto_update_enabled": True,
+        "desired_artifact_sha256": artifact["sha256"],
+        "installed_artifact_sha256": artifact["sha256"],
+    })
+    assert ota_reconcile_needed(state, client.app.state.ota_store.artifact(), install_store) is True
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.activation_order[-1] is None
+    assert conductor.conductor_current is True
+    assert conductor._ota_expected_size == artifact["size"]
+
+
+def test_mixed_install_activates_current_board_after_broadcast_begin(
+    tmp_path, managed_client
+) -> None:
+    conductor = RecordingActivationConductor()
+    current = conductor._lanterns[0]
+    old = conductor._lanterns[1]
+    for lantern in conductor._lanterns:
+        lantern.status = "missing"
+    current.status = "alive"
+    old.status = "alive"
+    old.firmware = {
+        **old.firmware,
+        "version": "0.7.0",
+        "build_label": "oldbuild",
+        "build_id": 1,
+    }
+    build = str(current.firmware["build_label"])
+    store = OtaArtifactStore(tmp_path)
+    artifact = store.stage(
+        "firmware.bin",
+        b"\xe9" + bytes(range(255)) * 2,
+        source="release",
+        version=str(current.firmware["version"]),
+        commit=build + "0" * (40 - len(build)),
+    )
+    client = managed_client(create_app(conductor, ota_store=store))
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert current.mac in conductor.activation_order
+    assert old.mac in conductor.activation_order
+    assert conductor.activation_order[-1] is None
+    assert install["already_installed_macs"] == []
+    assert current.mac not in {item["mac"] for item in install["deferred"]}
+    assert install["installed_artifact_sha256"] == artifact["sha256"]
+    assert install["desired_artifact_sha256"] == artifact["sha256"]
 
 
 def test_ota_install_restarts_legacy_performer_when_gap_repair_stalls(

@@ -42,7 +42,7 @@ from .ota_store import (
     PersistentOtaInstall,
 )
 from .pattern_store import PatternStore, PatternStoreError
-from .power_monitor import PowerDrawTracker, PowerMonitorStore
+from .power_monitor import PowerDraw, PowerDrawTracker, PowerMonitorStore
 from .preview import parse_params, render_preview_data, render_preview_frames, render_preview_png, review_preview
 from .provisioning_client import (
     ProvisioningClient,
@@ -132,13 +132,17 @@ def ota_reconcile_needed(
 
     if artifact.version and artifact.commit:
         commit = artifact.commit.lower()
+        conductor = (state.get("conductor") or {}).get("firmware") or {}
+        firmware_targets = [item.get("firmware") or {} for item in alive]
+        if conductor:
+            firmware_targets.append(conductor)
         return any(
-            str((item.get("firmware") or {}).get("version") or "") != artifact.version
+            str(firmware.get("version") or "") != artifact.version
             or not commit.startswith(
-                str((item.get("firmware") or {}).get("build_label") or "").lower()
+                str(firmware.get("build_label") or "").lower()
             )
-            or bool((item.get("firmware") or {}).get("dirty"))
-            for item in alive
+            or bool(firmware.get("dirty"))
+            for firmware in firmware_targets
         )
 
     conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
@@ -591,7 +595,12 @@ def create_app(
     ota_defaults: dict[str, Any] = {}
     if "auto_update_enabled" not in app.state.ota_install:
         ota_defaults["auto_update_enabled"] = True
-    if "desired_artifact_sha256" not in app.state.ota_install and current_artifact is not None:
+    if current_artifact is not None and current_artifact.source == "release":
+        # A promoted release replaces the companion image atomically.  Keep the
+        # durable desired pointer aligned even when an older completed journal
+        # already contains a desired hash from the previous release.
+        ota_defaults["desired_artifact_sha256"] = current_artifact.sha256
+    elif "desired_artifact_sha256" not in app.state.ota_install and current_artifact is not None:
         ota_defaults["desired_artifact_sha256"] = current_artifact.sha256
     if (
         "installed_artifact_sha256" not in app.state.ota_install
@@ -897,10 +906,15 @@ def create_app(
                 stale_count += 1
             if plausible is False:
                 implausible_count += 1
-            full_detected = isinstance(bus_v, (int, float)) and bus_v >= full_voltage
+            anchor_eligible = plausible is not False and not stale
+            full_detected = (
+                anchor_eligible
+                and isinstance(bus_v, (int, float))
+                and bus_v >= full_voltage
+            )
             anchor = anchors.get(mac)
             anchor_wh = float(anchor["wh"]) if anchor and isinstance(anchor.get("wh"), (int, float)) else 0.0
-            if anchor and float(wh) + 0.001 < anchor_wh:
+            if anchor_eligible and anchor and float(wh) + 0.001 < anchor_wh:
                 anchor = {
                     "wh": float(wh),
                     "ts": now,
@@ -922,13 +936,17 @@ def create_app(
             used_since_full_wh = max(0.0, float(wh) - anchor_wh)
             soc_percent = max(0.0, min(100.0, 100.0 * (1.0 - used_since_full_wh / capacity_wh)))
             report_age = max(0.0, float(last_report_s)) if isinstance(last_report_s, (int, float)) else 0.0
-            draw = app.state.power_draw_tracker.observe(
-                mac,
-                wh=float(wh),
-                elapsed_s=power.get("elapsed_s"),
-                reported_at=now - report_age,
-                bus_v=bus_v,
-                current_ma=power.get("current_ma"),
+            draw = (
+                app.state.power_draw_tracker.observe(
+                    mac,
+                    wh=float(wh),
+                    elapsed_s=power.get("elapsed_s"),
+                    reported_at=now - report_age,
+                    bus_v=bus_v,
+                    current_ma=power.get("current_ma"),
+                )
+                if plausible is not False
+                else PowerDraw(None, None)
             )
             sample = {
                 "mac": mac,
@@ -2479,6 +2497,46 @@ def create_app(
             if (artifact_has_identity or mac in installed_evidence_macs)
             and already_installed(item)
         }
+        conductor_installed = already_installed({"firmware": conductor_firmware})
+        if (
+            not expected_macs
+            and expected_lanterns
+            and installed_macs == set(expected_lanterns)
+            and conductor_installed
+        ):
+            nodes = [
+                {
+                    "mac": mac,
+                    "phase": "complete",
+                    "error": "none",
+                    "offset": artifact.size,
+                    "crc32": artifact.crc32,
+                    "source": "live_firmware_identity",
+                }
+                for mac in sorted(installed_macs)
+            ]
+            app.state.ota_install.update({
+                "running": False,
+                "complete": True,
+                "phase": "complete",
+                "error": None,
+                "message": "firmware already installed across the online field",
+                "nodes": nodes,
+                "target_macs": sorted(installed_macs),
+                "target_count": len(installed_macs),
+                "already_installed_macs": sorted(installed_macs),
+                "activated_macs": sorted(installed_macs),
+                "node_offsets": {
+                    mac: artifact.size for mac in sorted(installed_macs)
+                },
+                "completed_at": time.time(),
+                "installed_artifact_sha256": artifact.sha256,
+            })
+            return {
+                "ok": True,
+                "message": "firmware already installed across the online field",
+                "artifact": artifact.as_dict(),
+            }
         missing_rounds: dict[str, int] = {}
         repair_offsets: dict[str, int] = {}
         repair_stalls: dict[str, int] = {}
@@ -2822,6 +2880,19 @@ def create_app(
                 ack = await call_until_ok("ota_begin", artifact.size, artifact.crc32)
                 reported_targets = {str(mac) for mac in ack.get("targets") or []}
                 expected_macs = reported_targets or set(expected_lanterns)
+                # ota_begin broadcasts to the frozen cohort. Even performers
+                # whose live identity already matched now own a fresh writer
+                # and must receive the image and activation with everyone else.
+                installed_macs.clear()
+                activated.clear()
+                for mac in expected_macs:
+                    node_offsets[mac] = 0
+                    delivery_confirmed_offsets.pop(mac, None)
+                app.state.ota_install.update({
+                    "activated_macs": [],
+                    "delivery_confirmed_macs": [],
+                    "delivery_confirmed_offsets": {},
+                })
                 written = 0
                 staged = False
             else:
@@ -2886,7 +2957,7 @@ def create_app(
             deferred = [
                 {"mac": mac, "label": item.get("label") or mac}
                 for mac, item in sorted(all_lanterns.items())
-                if mac not in expected_macs
+                if mac not in cohort_macs
             ]
             app.state.ota_install.update({
                 "phase": "broadcasting" if not staged else "staged",
@@ -3169,8 +3240,7 @@ def create_app(
             )
             persistent_settings = {
                 "auto_update_enabled": app.state.ota_install.get("auto_update_enabled") is True,
-                "desired_artifact_sha256": app.state.ota_install.get("desired_artifact_sha256")
-                or artifact.sha256,
+                "desired_artifact_sha256": artifact.sha256,
                 "installed_artifact_sha256": app.state.ota_install.get("installed_artifact_sha256"),
             }
             same_artifact_retry = (
