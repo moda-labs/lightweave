@@ -42,6 +42,13 @@ class PowerDrawTracker:
         current_ma: float | None,
     ) -> PowerDraw:
         instantaneous = _instantaneous_watts(bus_v, current_ma)
+        if _zero_bus_with_live_current(bus_v, current_ma):
+            # Current comes from the shunt while energy uses VBUS.  A loose
+            # VBUS lead can therefore report live current but accumulate zero
+            # energy.  Do not let that broken interval dilute the rolling draw
+            # after the voltage sense recovers.
+            self._points.pop(str(mac), None)
+            return PowerDraw(None, None)
         if not _finite_nonnegative(wh) or not math.isfinite(reported_at):
             return PowerDraw(instantaneous, "instantaneous" if instantaneous is not None else None)
 
@@ -131,6 +138,14 @@ def _instantaneous_watts(bus_v: float | None, current_ma: float | None) -> float
     if watts < 0 or watts > MAX_DRAW_W:
         return None
     return watts
+
+
+def _zero_bus_with_live_current(bus_v: float | None, current_ma: float | None) -> bool:
+    if not isinstance(bus_v, (int, float)) or not isinstance(current_ma, (int, float)):
+        return False
+    if not math.isfinite(float(bus_v)) or not math.isfinite(float(current_ma)):
+        return False
+    return float(bus_v) <= 0.0 and abs(float(current_ma)) >= 1.0
 
 
 def _finite_nonnegative(value: Any) -> bool:
