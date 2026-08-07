@@ -1,6 +1,6 @@
 # One-hop conductor relays
 
-> **Status:** Reviewing
+> **Status:** Complete
 > **Created:** 2026-08-06
 >
 > Markers: `[ ]` idle | `[wip]` in progress | `[x]` done | `[f]` failed/blocked
@@ -156,5 +156,5 @@ after v11 connectivity returns. New relay boards require direct USB bootstrap.
 - [x] Update architecture, handoff, README, and protocol comments with deployment and bootstrap instructions. (verify: documentation cross-check)
 - [x] Run native tests, the full control suite, and all firmware builds. (verify: 180 native tests, 446 control tests, and three device builds)
 - [x] Perform the required adversarial review, fix confirmed findings, and rerun affected proof. (verify: all confirmed findings fixed; affected native/device/static proof green)
-- [ ] Commit implementation, push the feature branch, and open a pull request without merging. (verify: PR URL and clean worktree)
+- [x] Commit implementation, push the feature branch, and open a pull request without merging. (verify: PR #35 and clean worktree)
 ```
