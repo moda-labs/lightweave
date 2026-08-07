@@ -12,6 +12,7 @@
 
 #include "beacon.h"
 #include "config.h"
+#include "roster.h"
 
 static constexpr uint8_t ROUTE_MAX_HOPS = 1;
 static constexpr size_t RELAY_PACKET_MAX = 250;
@@ -185,12 +186,14 @@ struct RelayFrame {
 struct RelayCompletion {
   uint8_t destination[6];
   uint8_t type;
+  uint32_t token;
   bool delivered;
 };
 
 struct RelayReceipt {
   uint8_t destination[6];
   uint8_t type;
+  uint32_t token;
   bool delivered;
   bool pending;
 };
@@ -199,15 +202,48 @@ inline void relayReceiptInit(RelayReceipt& receipt) {
   memset(&receipt, 0, sizeof(receipt));
 }
 
+inline bool relayReceiptSupportsType(uint8_t type) {
+  return type == MSG_OTA_BEGIN || type == MSG_OTA_CHUNK ||
+         type == MSG_OTA_END || type == MSG_OTA_ACTIVATE;
+}
+
+inline uint32_t relayFrameReceiptToken(const uint8_t* data, size_t len) {
+  if (!data || len < sizeof(MsgHeader)) return 0;
+  MsgHeader hdr;
+  memcpy(&hdr, data, sizeof(hdr));
+  uint32_t token = otaCrc32Update(0, &hdr.type, sizeof(hdr.type));
+  return otaCrc32Update(token, data + sizeof(MsgHeader),
+                        len - sizeof(MsgHeader));
+}
+
+// Activation receipts existed in the first routed-v11 release. Receipts for
+// every targeted OTA frame are additive, so use them only when the immediate
+// relay runs the same image as the primary. Older v11 relays remain compatible
+// through bounded pacing in the hardware glue.
+inline bool relayRouteSupportsFrameReceipt(
+    const Roster& roster, const uint8_t target[6],
+    const FirmwareVersion& primary_firmware, uint8_t type) {
+  int target_index = rosterFind(roster, target);
+  if (target_index < 0 || roster.entries[target_index].hops != 1) return false;
+  if (type == MSG_OTA_ACTIVATE) return true;
+  int relay_index = rosterFind(roster, roster.entries[target_index].via);
+  if (relay_index < 0 || roster.entries[relay_index].role != ROLE_RELAY)
+    return false;
+  return firmwareSame(primary_firmware,
+                      rosterEntryFirmware(roster.entries[relay_index]));
+}
+
 inline bool relayReceiptSchedule(RelayReceipt& receipt,
                                  const RelayCompletion& completion) {
-  if (completion.type != MSG_OTA_ACTIVATE ||
+  if (!relayReceiptSupportsType(completion.type) ||
       routeMacBroadcast(completion.destination)) return false;
   if (receipt.pending &&
       (!routeMacEqual(receipt.destination, completion.destination) ||
-       receipt.type != completion.type)) return false;
+       receipt.type != completion.type || receipt.token != completion.token))
+    return false;
   memcpy(receipt.destination, completion.destination, 6);
   receipt.type = completion.type;
+  receipt.token = completion.token;
   receipt.delivered = receipt.delivered || completion.delivered;
   receipt.pending = true;
   return true;
@@ -297,6 +333,7 @@ inline bool relayQueueCompleteCopy(RelayQueue& queue, bool delivered,
   memcpy(&hdr, frame->data, sizeof(hdr));
   memcpy(completion.destination, hdr.destination, 6);
   completion.type = hdr.type;
+  completion.token = relayFrameReceiptToken(frame->data, frame->len);
   completion.delivered = frame->delivered;
   memset(frame, 0, sizeof(*frame));
   queue.head = (uint8_t)((queue.head + 1) % RELAY_QUEUE_CAPACITY);
@@ -333,6 +370,7 @@ inline uint8_t relayTargetCopies(uint8_t type) {
   switch (type) {
     case MSG_OTA_ACTIVATE:
     case MSG_OTA_BEGIN:
+    case MSG_OTA_END:
       return 4;
     case MSG_OTA_CHUNK:
       return 2;

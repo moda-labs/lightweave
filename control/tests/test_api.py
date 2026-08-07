@@ -2587,7 +2587,7 @@ def test_ota_install_updates_old_conductor_when_all_performers_are_current(
     assert conductor._ota_expected_size == artifact["size"]
 
 
-def test_mixed_install_activates_current_board_after_broadcast_begin(
+def test_mixed_install_targets_only_stale_board_and_leaves_current_nodes_running(
     tmp_path, managed_client
 ) -> None:
     conductor = RecordingActivationConductor()
@@ -2619,13 +2619,157 @@ def test_mixed_install_activates_current_board_after_broadcast_begin(
     install = wait_for_ota_terminal(client)
 
     assert install["complete"] is True
-    assert current.mac in conductor.activation_order
-    assert old.mac in conductor.activation_order
-    assert conductor.activation_order[-1] is None
-    assert install["already_installed_macs"] == []
+    assert conductor.targeted_begin_calls == [[old.mac]]
+    assert conductor.ota_chunk_recipient_batches
+    assert all(
+        recipients == [old.mac]
+        for recipients in conductor.ota_chunk_recipient_batches
+    )
+    assert conductor.ota_end_recipient_batches == [[old.mac]]
+    assert current.mac not in conductor.activation_order
+    assert conductor.activation_order == [old.mac]
+    assert install["target_macs"] == [old.mac]
+    assert install["target_count"] == 1
+    assert install["cohort_mode"] == "selective"
+    assert install["already_installed_macs"] == [current.mac]
     assert current.mac not in {item["mac"] for item in install["deferred"]}
     assert install["installed_artifact_sha256"] == artifact["sha256"]
     assert install["desired_artifact_sha256"] == artifact["sha256"]
+
+
+def test_mixed_install_rejects_pre_routed_target_without_touching_current_nodes(
+    tmp_path, managed_client
+) -> None:
+    conductor = RecordingActivationConductor()
+    current = conductor._lanterns[0]
+    old = conductor._lanterns[1]
+    for lantern in conductor._lanterns:
+        lantern.status = "missing"
+    current.status = "alive"
+    old.status = "alive"
+    old.firmware = {
+        **old.firmware,
+        "version": "0.7.0",
+        "proto": 10,
+        "build_label": "oldbuild",
+        "build_id": 1,
+    }
+    build = str(current.firmware["build_label"])
+    store = OtaArtifactStore(tmp_path)
+    store.stage(
+        "firmware.bin",
+        b"\xe9" + bytes(range(255)) * 2,
+        source="release",
+        version=str(current.firmware["version"]),
+        commit=build + "0" * (40 - len(build)),
+        protocol=11,
+    )
+    client = managed_client(create_app(conductor, ota_store=store))
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is False
+    assert "pre-v11 node cannot rejoin" in install["error"]
+    assert conductor.targeted_begin_calls == []
+    assert conductor.activation_order == []
+    assert conductor._ota_expected_size == 0
+
+
+def test_selective_resume_never_downgrades_to_full_field_after_state_loss(
+    tmp_path, managed_client
+) -> None:
+    conductor = RecordingActivationConductor()
+    target = conductor._lanterns[0]
+    outside_cohort = conductor._lanterns[1]
+    for lantern in conductor._lanterns:
+        lantern.status = "missing"
+    target.status = "alive"
+    outside_cohort.status = "alive"
+    outside_cohort.firmware = {
+        **outside_cohort.firmware,
+        "version": "0.2.0",
+        "build_label": "oldbuild",
+        "build_id": 1,
+    }
+    build = str(target.firmware["build_label"])
+    store = OtaArtifactStore(tmp_path)
+    artifact = store.stage(
+        "firmware.bin",
+        b"\xe9" + bytes(range(255)) * 2,
+        source="release",
+        version=str(target.firmware["version"]),
+        commit=build + "0" * (40 - len(build)),
+        protocol=11,
+    )
+    OtaInstallStore(store.root).save({
+        "running": True,
+        "complete": False,
+        "phase": "activating",
+        "activate_after_stage": True,
+        "automatic": False,
+        "auto_update_enabled": True,
+        "sha256": artifact["sha256"],
+        "size": artifact["size"],
+        "crc32": artifact["crc32"],
+        "cohort_mode": "selective",
+        "target_macs": [target.mac],
+        "target_count": 1,
+        "retry_deadline_at": time.time() + 60,
+    })
+
+    client = managed_client(create_app(conductor, ota_store=store))
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert install["cohort_mode"] == "selective"
+    assert install["target_macs"] == [target.mac]
+    assert install["target_count"] == 1
+    assert conductor.targeted_begin_calls == []
+    assert conductor._ota_expected_size == 0
+    assert conductor.ota_chunk_recipient_batches == []
+    assert conductor.ota_end_recipient_batches == []
+    assert conductor.activation_order == []
+
+
+def test_selective_install_updates_stale_relay_before_its_stale_child(
+    tmp_path, managed_client
+) -> None:
+    conductor = RecordingActivationConductor()
+    relay = conductor._lanterns[0]
+    child = conductor._lanterns[1]
+    for lantern in conductor._lanterns:
+        lantern.status = "missing"
+    for lantern in (relay, child):
+        lantern.status = "alive"
+        lantern.firmware = {
+            **lantern.firmware,
+            "version": "0.2.0",
+            "build_label": "oldbuild",
+            "build_id": 1,
+        }
+    relay.role = "relay"
+    child.route_hops = 1
+    child.route_via = relay.mac
+    store = OtaArtifactStore(tmp_path)
+    store.stage(
+        "firmware.bin",
+        b"\xe9" + bytes(range(255)) * 2,
+        source="release",
+        version="0.3.0",
+        commit="44d028fd" + "0" * 32,
+        protocol=11,
+    )
+    client = managed_client(create_app(conductor, ota_store=store))
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.targeted_begin_calls == [[relay.mac]]
+    assert conductor.activation_order == [relay.mac]
+    assert install["target_macs"] == [relay.mac]
+    assert child.mac in {item["mac"] for item in install["deferred"]}
 
 
 def test_ota_install_restarts_legacy_performer_when_gap_repair_stalls(

@@ -124,13 +124,12 @@ static constexpr int64_t OTA_STATUS_FRESH_US = 30000000LL;
 // flap it.
 static constexpr int64_t OTA_COHORT_FRESH_US =
     3 * (REGISTER_INTERVAL_US + REGISTER_INTERVAL_JITTER_US);
-static bool        g_ota_write_active = false;
+static OtaSessionMode g_ota_session = OTA_SESSION_IDLE;
 static uint32_t    g_ota_write_size = 0;
 static uint32_t    g_ota_write_written = 0;
 static uint32_t    g_ota_write_crc = 0;
 static uint32_t    g_ota_write_expected_crc = 0;
 static bool        g_ota_finalize_pending = false;
-static bool        g_ota_local_staged = false;
 static bool        g_ota_reboot_pending = false;
 static OtaStatusTable g_ota_status;
 static OtaCohort      g_ota_cohort;
@@ -171,7 +170,7 @@ static OtaPeerLease   g_relay_peer = {{0}, false};
 static bool           g_relay_send_pending = false;
 static uint8_t        g_relay_send_mac[6] = {0};
 static portMUX_TYPE   g_relay_mux = portMUX_INITIALIZER_UNLOCKED;
-static OtaSendAck      g_ota_relay_delivery_ack = {{0}, OTA_SEND_ACK_IDLE};
+static OtaFrameAckWait g_ota_relay_delivery_ack = {};
 static constexpr uint16_t OTA_RELAY_DELIVERY_TIMEOUT_MS = 3000;
 
 static bool otaMaintenanceActive(int64_t t);
@@ -827,8 +826,29 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       portEXIT_CRITICAL(&g_roster_mux);
       if (!expected_route) return;
       portENTER_CRITICAL(&g_ota_send_ack_mux);
-      otaSendAckComplete(g_ota_relay_delivery_ack, hdr.origin,
-                         m.delivered != 0);
+      otaFrameAckComplete(g_ota_relay_delivery_ack, hdr.origin,
+                          m.acked_type, g_ota_relay_delivery_ack.token,
+                          m.delivered != 0);
+      portEXIT_CRITICAL(&g_ota_send_ack_mux);
+      break;
+    }
+    case MSG_OTA_FRAME_ACK: {
+      if (!isConductor() || len != (int)sizeof(OtaFrameAckMsg)) return;
+      OtaFrameAckMsg m;
+      memcpy(&m, data, sizeof(m));
+      if (!relayReceiptSupportsType(m.acked_type) ||
+          m.acked_type == MSG_OTA_ACTIVATE || m.delivered > 1) return;
+      bool expected_route = false;
+      portENTER_CRITICAL(&g_roster_mux);
+      int child = rosterFind(g_roster, hdr.origin);
+      expected_route = child >= 0 && g_roster.entries[child].hops == 1 &&
+                       g_roster.entries[child].role != ROLE_RELAY &&
+                       routeMacEqual(g_roster.entries[child].via, src);
+      portEXIT_CRITICAL(&g_roster_mux);
+      if (!expected_route) return;
+      portENTER_CRITICAL(&g_ota_send_ack_mux);
+      otaFrameAckComplete(g_ota_relay_delivery_ack, hdr.origin,
+                          m.acked_type, m.frame_token, m.delivered != 0);
       portEXIT_CRITICAL(&g_ota_send_ack_mux);
       break;
     }
@@ -920,7 +940,8 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     }
     case MSG_OTA_ACTIVATE: {
       if (isConductor() || !from_primary) return;
-      if (len != (int)sizeof(OtaActivateMsg) || !g_ota_local_staged) return;
+      if (len != (int)sizeof(OtaActivateMsg) ||
+          !otaSessionIsStaged(g_ota_session)) return;
       otaSetLocalStatus(OTA_PHASE_ACTIVATING, OTA_ERR_NONE,
                         g_ota_write_written, g_ota_write_crc);
       g_ota_reboot_pending = true;
@@ -1072,13 +1093,20 @@ static void maybeRelayDeliveryReceipt() {
 
   uint8_t parent[6], primary[6];
   if (!conductorPeerReady(parent, primary)) return;
-  AckMsg ack = {makeMsgHeader(MSG_ACK), receipt.type,
-                (uint8_t)(receipt.delivered ? 1 : 0)};
-  // This is a relay-certified receipt for the logical child, sent directly to
-  // the primary after the child's queued activation copies have drained.
-  routeHeaderSet(ack.hdr, receipt.destination, primary, 1);
-  performerSend(parent, (const uint8_t*)&ack, sizeof(ack),
-                PERFORMER_TX_RELAY_ACK);
+  if (receipt.type == MSG_OTA_ACTIVATE) {
+    AckMsg ack = {makeMsgHeader(MSG_ACK), receipt.type,
+                  (uint8_t)(receipt.delivered ? 1 : 0)};
+    routeHeaderSet(ack.hdr, receipt.destination, primary, 1);
+    performerSend(parent, (const uint8_t*)&ack, sizeof(ack),
+                  PERFORMER_TX_RELAY_ACK);
+  } else {
+    OtaFrameAckMsg ack = {makeMsgHeader(MSG_OTA_FRAME_ACK), receipt.type,
+                          (uint8_t)(receipt.delivered ? 1 : 0),
+                          receipt.token};
+    routeHeaderSet(ack.hdr, receipt.destination, primary, 1);
+    performerSend(parent, (const uint8_t*)&ack, sizeof(ack),
+                  PERFORMER_TX_RELAY_ACK);
+  }
 }
 
 static void drainRelayQueue() {
@@ -1733,16 +1761,19 @@ static void otaUnicastPeerRelease() {
 }
 
 static void otaWriteAbort() {
-  if (g_ota_write_active) Update.abort();
+  if (otaSessionOwnsLocalWriter(g_ota_session)) Update.abort();
   otaUnicastPeerRelease();
-  g_ota_write_active = false;
-  g_ota_local_staged = false;
+  g_ota_session = OTA_SESSION_IDLE;
   g_ota_write_size = 0;
   g_ota_write_written = 0;
   g_ota_write_crc = 0;
   g_ota_write_expected_crc = 0;
   g_ota_finalize_pending = false;
   otaCohortInit(g_ota_cohort);
+}
+
+static bool otaSessionActive() {
+  return otaSessionIsActive(g_ota_session);
 }
 
 static void otaSetLocalStatus(uint8_t phase, uint8_t error, uint32_t offset,
@@ -1795,17 +1826,16 @@ static void otaRadioBegin(const OtaBeginMsg& msg) {
     otaSetLocalStatus(OTA_PHASE_ERROR, OTA_ERR_BEGIN_FAILED, 0, 0);
     return;
   }
-  g_ota_write_active = true;
+  g_ota_session = otaSessionBegin(/*targeted=*/false);
   g_ota_write_size = msg.size;
   g_ota_write_written = 0;
   g_ota_write_crc = 0;
   g_ota_write_expected_crc = msg.crc32;
-  g_ota_local_staged = false;
   otaSetLocalStatus(OTA_PHASE_BEGIN, OTA_ERR_NONE, 0, 0);
 }
 
 static void otaRadioChunk(const OtaChunkMsg& msg) {
-  if (!g_ota_write_active) return;
+  if (!otaSessionOwnsLocalWriter(g_ota_session)) return;
   switch (otaChunkDecision(g_ota_write_written, g_ota_write_size,
                            msg.offset, msg.n)) {
     case OTA_CHUNK_DUPLICATE:
@@ -1845,7 +1875,7 @@ static void otaRadioChunk(const OtaChunkMsg& msg) {
 }
 
 static void otaRadioEnd() {
-  if (!g_ota_write_active) return;
+  if (!otaSessionOwnsLocalWriter(g_ota_session)) return;
   if (g_ota_write_written != g_ota_write_size) {
     otaSetLocalStatus(OTA_PHASE_REPAIRING, OTA_ERR_INCOMPLETE,
                       g_ota_write_written, g_ota_write_crc);
@@ -1863,9 +1893,9 @@ static void otaRadioEnd() {
 static void otaFinalizePending() {
   if (!g_ota_finalize_pending) return;
   g_ota_finalize_pending = false;
-  if (!g_ota_write_active) return;
+  if (!otaSessionOwnsLocalWriter(g_ota_session)) return;
   if (!otaShouldFinalizeFlash(isConductor(), OTA_FINALIZE_ON_END)) {
-    g_ota_local_staged = true;
+    otaSessionStage(g_ota_session);
     return;
   }
   if (!Update.end(true)) {
@@ -1874,8 +1904,7 @@ static void otaFinalizePending() {
     otaWriteAbort();
     return;
   }
-  g_ota_write_active = false;
-  g_ota_local_staged = true;
+  otaSessionStage(g_ota_session);
   otaSetLocalStatus(OTA_PHASE_STAGED, OTA_ERR_NONE,
                     g_ota_write_written, g_ota_write_crc);
 }
@@ -2006,46 +2035,54 @@ static bool otaUnicastRepeated(const uint8_t mac[6], const uint8_t* data,
   return accepted == OTA_RADIO_REPAIR_COPIES;
 }
 
-static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
-                            const uint8_t* data, uint8_t len) {
-  if (!isConductor() || len == 0 || len > OTA_SERIAL_CHUNK_MAX) return false;
-  OtaChunkMsg msg = {makeMsgHeader(MSG_OTA_CHUNK), offset, len, {0}};
-  routeHeaderSet(msg.hdr, g_mac, mac);
-  memcpy(msg.data, data, len);
-  return otaUnicastRepeated(mac, (const uint8_t*)&msg,
-                            offsetof(OtaChunkMsg, data) + len);
-}
-
-static bool otaUnicastBegin(const uint8_t mac[6], uint32_t size,
-                            uint32_t crc32) {
-  OtaBeginMsg msg = {makeMsgHeader(MSG_OTA_BEGIN), size, crc32};
-  routeHeaderSet(msg.hdr, g_mac, mac);
-  return otaUnicastRepeated(mac, (const uint8_t*)&msg, sizeof(msg));
-}
-
-static bool otaUnicastActivate(const uint8_t mac[6]) {
-  OtaActivateMsg msg = {makeMsgHeader(MSG_OTA_ACTIVATE)};
-  routeHeaderSet(msg.hdr, g_mac, mac);
+static bool otaTargetUsesRelay(const uint8_t mac[6], uint8_t type,
+                               bool& receipt_supported) {
   bool relayed = false;
+  receipt_supported = false;
   portENTER_CRITICAL(&g_roster_mux);
   int route = rosterFind(g_roster, mac);
   relayed = route >= 0 && g_roster.entries[route].hops == 1 &&
             g_roster.entries[route].role != ROLE_RELAY;
-  portEXIT_CRITICAL(&g_roster_mux);
   if (relayed) {
+    receipt_supported = relayRouteSupportsFrameReceipt(
+        g_roster, mac, currentFirmwareVersion(PROTO_VERSION), type);
+  }
+  portEXIT_CRITICAL(&g_roster_mux);
+  return relayed;
+}
+
+// Immediate ESP-NOW delivery to a next-hop relay is not enough: its bounded
+// queue may still be draining earlier frames. For every targeted OTA frame,
+// wait until the relay reports that all downstream copies have drained before
+// advancing to the next target. This both proves the final hop and bounds relay
+// queue occupancy regardless of cohort size.
+static bool otaUnicastDelivered(const uint8_t mac[6], uint8_t type,
+                                const uint8_t* data, size_t len) {
+  bool receipt_supported = false;
+  bool relayed = otaTargetUsesRelay(mac, type, receipt_supported);
+  uint32_t frame_token = relayFrameReceiptToken(data, len);
+  if (receipt_supported) {
     portENTER_CRITICAL(&g_ota_send_ack_mux);
-    otaSendAckBegin(g_ota_relay_delivery_ack, mac);
+    otaFrameAckBegin(g_ota_relay_delivery_ack, mac, type, frame_token);
     portEXIT_CRITICAL(&g_ota_send_ack_mux);
   }
-  if (!otaUnicastRepeated(mac, (const uint8_t*)&msg, sizeof(msg))) {
-    if (relayed) {
+  if (!otaUnicastRepeated(mac, data, len)) {
+    if (receipt_supported) {
       portENTER_CRITICAL(&g_ota_send_ack_mux);
-      otaSendAckInit(g_ota_relay_delivery_ack);
+      otaFrameAckInit(g_ota_relay_delivery_ack);
       portEXIT_CRITICAL(&g_ota_send_ack_mux);
     }
     return false;
   }
   if (!relayed) return true;
+  if (!receipt_supported) {
+    // A v11 relay from before frame receipts still forwards the exact packet.
+    // Pace by the maximum callback budget for every downstream copy so no
+    // second logical frame can overrun its bounded queue.
+    delay((OTA_RADIO_UNICAST_ACK_TIMEOUT_MS + OTA_RADIO_SEND_DELAY_MS) *
+          relayTargetCopies(type));
+    return true;
+  }
 
   int64_t deadline = now_us() +
       (int64_t)OTA_RELAY_DELIVERY_TIMEOUT_MS * 1000LL;
@@ -2058,9 +2095,44 @@ static bool otaUnicastActivate(const uint8_t mac[6]) {
   }
   portENTER_CRITICAL(&g_ota_send_ack_mux);
   bool delivered = g_ota_relay_delivery_ack.state == OTA_SEND_ACK_SUCCESS;
-  otaSendAckInit(g_ota_relay_delivery_ack);
+  otaFrameAckInit(g_ota_relay_delivery_ack);
   portEXIT_CRITICAL(&g_ota_send_ack_mux);
   return delivered;
+}
+
+static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
+                            const uint8_t* data, uint8_t len) {
+  if (!isConductor() || len == 0 || len > OTA_SERIAL_CHUNK_MAX) return false;
+  OtaChunkMsg msg = {makeMsgHeader(MSG_OTA_CHUNK), offset, len, {0}};
+  routeHeaderSet(msg.hdr, g_mac, mac);
+  memcpy(msg.data, data, len);
+  bool sent = otaUnicastDelivered(mac, MSG_OTA_CHUNK,
+                                  (const uint8_t*)&msg,
+                                  offsetof(OtaChunkMsg, data) + len);
+  if (sent && otaFlashSettleDue(offset, len)) delay(OTA_FLASH_SETTLE_MS);
+  return sent;
+}
+
+static bool otaUnicastBegin(const uint8_t mac[6], uint32_t size,
+                            uint32_t crc32) {
+  OtaBeginMsg msg = {makeMsgHeader(MSG_OTA_BEGIN), size, crc32};
+  routeHeaderSet(msg.hdr, g_mac, mac);
+  return otaUnicastDelivered(mac, MSG_OTA_BEGIN,
+                             (const uint8_t*)&msg, sizeof(msg));
+}
+
+static bool otaUnicastEnd(const uint8_t mac[6]) {
+  OtaEndMsg msg = {makeMsgHeader(MSG_OTA_END)};
+  routeHeaderSet(msg.hdr, g_mac, mac);
+  return otaUnicastDelivered(mac, MSG_OTA_END,
+                             (const uint8_t*)&msg, sizeof(msg));
+}
+
+static bool otaUnicastActivate(const uint8_t mac[6]) {
+  OtaActivateMsg msg = {makeMsgHeader(MSG_OTA_ACTIVATE)};
+  routeHeaderSet(msg.hdr, g_mac, mac);
+  return otaUnicastDelivered(mac, MSG_OTA_ACTIVATE,
+                             (const uint8_t*)&msg, sizeof(msg));
 }
 
 static void handleOtaBegin(const SerialJsonCommand& cmd) {
@@ -2093,12 +2165,11 @@ static void handleOtaBegin(const SerialJsonCommand& cmd) {
     jsonError(cmd.id, "ota begin failed");
     return;
   }
-  g_ota_write_active = true;
+  g_ota_session = otaSessionBegin(/*targeted=*/false);
   g_ota_write_size = cmd.ota_size;
   g_ota_write_written = 0;
   g_ota_write_crc = 0;
   g_ota_write_expected_crc = cmd.ota_crc32;
-  g_ota_local_staged = false;
   otaBroadcastBegin(cmd.ota_size, cmd.ota_crc32);
   Serial.printf("{\"id\":%lu,\"ok\":true,\"message\":\"ota write started\","
                 "\"targets\":[", (unsigned long)cmd.id);
@@ -2110,8 +2181,56 @@ static void handleOtaBegin(const SerialJsonCommand& cmd) {
   Serial.print("]}\n");
 }
 
+static void handleOtaBeginTargets(const SerialJsonCommand& cmd) {
+  if (cmd.ota_size == 0 || cmd.ota_targets.count == 0) {
+    jsonError(cmd.id, "bad targeted ota begin");
+    return;
+  }
+  otaWriteAbort();
+  OtaCohort cohort;
+  int64_t t = now_us();
+  bool selected;
+  portENTER_CRITICAL(&g_roster_mux);
+  selected = otaCohortSelectRequestedFresh(
+      cohort, cmd.ota_targets, g_roster, g_mac, t, OTA_COHORT_FRESH_US);
+  portEXIT_CRITICAL(&g_roster_mux);
+  if (!selected) {
+    jsonError(cmd.id, "targeted ota performer is not online");
+    return;
+  }
+  g_ota_cohort = cohort;
+  g_ota_maintenance = true;
+  g_ota_maintenance_until_us = now_us() + OTA_WINDOW_US;
+  portENTER_CRITICAL(&g_ota_status_mux);
+  otaStatusInit(g_ota_status);
+  portEXIT_CRITICAL(&g_ota_status_mux);
+  g_ota_session = otaSessionBegin(/*targeted=*/true);
+  g_ota_write_size = cmd.ota_size;
+  g_ota_write_written = 0;
+  g_ota_write_crc = 0;
+  g_ota_write_expected_crc = cmd.ota_crc32;
+  for (uint8_t i = 0; i < g_ota_cohort.count; i++) {
+    if (!otaUnicastBegin(g_ota_cohort.macs[i], cmd.ota_size,
+                         cmd.ota_crc32)) {
+      otaWriteAbort();
+      jsonError(cmd.id, "targeted ota begin send failed");
+      return;
+    }
+  }
+  Serial.printf("{\"id\":%lu,\"ok\":true,"
+                "\"message\":\"targeted ota write started\","
+                "\"targeted\":true,\"targets\":[",
+                (unsigned long)cmd.id);
+  for (uint8_t i = 0; i < g_ota_cohort.count; i++) {
+    char mac[18];
+    if (i) Serial.print(",");
+    Serial.printf("\"%s\"", macStr(g_ota_cohort.macs[i], mac));
+  }
+  Serial.print("]}\n");
+}
+
 static void handleOtaChunk(const SerialJsonCommand& cmd) {
-  if (!g_ota_write_active) {
+  if (!otaSessionIsWriting(g_ota_session)) {
     jsonError(cmd.id, "ota write is not active");
     return;
   }
@@ -2138,12 +2257,22 @@ static void handleOtaChunk(const SerialJsonCommand& cmd) {
     jsonError(cmd.id, "ota chunk exceeds image size");
     return;
   }
-  otaBroadcastChunk(cmd.ota_offset, bytes, (uint8_t)len);
-  size_t written = Update.write(bytes, len);
-  if (written != len) {
-    otaWriteAbort();
-    jsonError(cmd.id, "ota flash write failed");
-    return;
+  if (otaSessionIsTargeted(g_ota_session)) {
+    for (uint8_t i = 0; i < g_ota_cohort.count; i++) {
+      if (!otaUnicastChunk(g_ota_cohort.macs[i], cmd.ota_offset, bytes,
+                           (uint8_t)len)) {
+        jsonError(cmd.id, "targeted ota chunk send failed");
+        return;
+      }
+    }
+  } else {
+    otaBroadcastChunk(cmd.ota_offset, bytes, (uint8_t)len);
+    size_t written = Update.write(bytes, len);
+    if (written != len) {
+      otaWriteAbort();
+      jsonError(cmd.id, "ota flash write failed");
+      return;
+    }
   }
   g_ota_write_crc = otaCrc32Update(g_ota_write_crc, bytes, len);
   g_ota_write_written += (uint32_t)len;
@@ -2151,7 +2280,7 @@ static void handleOtaChunk(const SerialJsonCommand& cmd) {
 }
 
 static void handleOtaRebroadcast(const SerialJsonCommand& cmd) {
-  if (!g_ota_write_active && !g_ota_local_staged) {
+  if (!otaSessionActive()) {
     jsonError(cmd.id, "ota write is not active");
     return;
   }
@@ -2166,36 +2295,59 @@ static void handleOtaRebroadcast(const SerialJsonCommand& cmd) {
     jsonError(cmd.id, "ota rebroadcast range is invalid");
     return;
   }
-  otaBroadcastChunk(cmd.ota_offset, bytes, (uint8_t)len, /*strong=*/true);
+  if (otaSessionIsTargeted(g_ota_session)) {
+    for (uint8_t i = 0; i < g_ota_cohort.count; i++) {
+      if (!otaUnicastChunk(g_ota_cohort.macs[i], cmd.ota_offset, bytes,
+                           (uint8_t)len)) {
+        jsonError(cmd.id, "targeted ota repair send failed");
+        return;
+      }
+    }
+  } else {
+    otaBroadcastChunk(cmd.ota_offset, bytes, (uint8_t)len, /*strong=*/true);
+  }
   jsonOk(cmd.id, "ota repair chunk rebroadcast");
 }
 
 static void handleOtaEnd(const SerialJsonCommand& cmd) {
-  if (!g_ota_write_active && !g_ota_local_staged) {
+  if (!otaSessionActive()) {
     jsonError(cmd.id, "ota write is not active");
     return;
   }
-  if (g_ota_write_active && g_ota_write_written != g_ota_write_size) {
+  if (otaSessionIsWriting(g_ota_session) &&
+      g_ota_write_written != g_ota_write_size) {
     otaWriteAbort();
     jsonError(cmd.id, "ota image incomplete");
     return;
   }
-  if (g_ota_write_active && g_ota_write_crc != g_ota_write_expected_crc) {
+  if (otaSessionIsWriting(g_ota_session) &&
+      g_ota_write_crc != g_ota_write_expected_crc) {
     otaWriteAbort();
     jsonError(cmd.id, "ota crc mismatch");
     return;
   }
-  otaBroadcastEnd();
-  if (g_ota_write_active) {
-    if (otaShouldFinalizeFlash(isConductor(), OTA_FINALIZE_ON_END)) {
+  if (otaSessionIsTargeted(g_ota_session)) {
+    for (uint8_t i = 0; i < g_ota_cohort.count; i++) {
+      if (!otaUnicastEnd(g_ota_cohort.macs[i])) {
+        jsonError(cmd.id, "targeted ota end send failed");
+        return;
+      }
+    }
+    otaSessionStage(g_ota_session);
+  } else {
+    otaBroadcastEnd();
+  }
+  if (otaSessionOwnsLocalWriter(g_ota_session)) {
+    bool finalize_on_end =
+        otaShouldFinalizeFlash(isConductor(), OTA_FINALIZE_ON_END);
+    if (finalize_on_end) {
       if (!Update.end(true)) {
         otaWriteAbort();
         jsonError(cmd.id, "ota finalize failed");
         return;
       }
-      g_ota_write_active = false;
     }
-    g_ota_local_staged = true;
+    otaSessionStage(g_ota_session, /*retain_local_writer=*/!finalize_on_end);
   }
   Serial.printf("{\"id\":%lu,\"ok\":true,\"message\":\"ota image staged\","
                 "\"staged\":true,"
@@ -2206,11 +2358,13 @@ static void handleOtaEnd(const SerialJsonCommand& cmd) {
 
 static void handleOtaProgress(const SerialJsonCommand& cmd) {
   Serial.printf("{\"id\":%lu,\"ok\":true,\"active\":%s,"
-                "\"staged\":%s,\"size\":%lu,\"written\":%lu,"
+                "\"staged\":%s,\"targeted\":%s,"
+                "\"size\":%lu,\"written\":%lu,"
                 "\"crc32\":%lu,\"targets\":[",
                 (unsigned long)cmd.id,
-                g_ota_write_active ? "true" : "false",
-                g_ota_local_staged ? "true" : "false",
+                otaSessionIsWriting(g_ota_session) ? "true" : "false",
+                otaSessionIsStaged(g_ota_session) ? "true" : "false",
+                otaSessionIsTargeted(g_ota_session) ? "true" : "false",
                 (unsigned long)g_ota_write_size,
                 (unsigned long)g_ota_write_written,
                 (unsigned long)g_ota_write_crc);
@@ -2232,7 +2386,7 @@ static bool otaDecodeSerialChunk(const SerialJsonCommand& cmd,
 }
 
 static void handleOtaRepair(const SerialJsonCommand& cmd) {
-  if ((!g_ota_write_active && !g_ota_local_staged) ||
+  if (!otaSessionActive() ||
       !otaCohortContains(g_ota_cohort, cmd.mac)) {
     jsonError(cmd.id, "ota repair target is not active");
     return;
@@ -2256,7 +2410,7 @@ static void handleOtaRepair(const SerialJsonCommand& cmd) {
 }
 
 static void handleOtaRestart(const SerialJsonCommand& cmd) {
-  if ((!g_ota_write_active && !g_ota_local_staged) ||
+  if (!otaSessionActive() ||
       !otaCohortContains(g_ota_cohort, cmd.mac)) {
     jsonError(cmd.id, "ota restart target is not active");
     return;
@@ -2273,7 +2427,7 @@ static void handleOtaRestart(const SerialJsonCommand& cmd) {
 }
 
 static void handleOtaProbe(const SerialJsonCommand& cmd) {
-  if (!g_ota_write_active && !g_ota_local_staged) {
+  if (!otaSessionActive()) {
     jsonError(cmd.id, "ota write is not active");
     return;
   }
@@ -2286,18 +2440,19 @@ static void handleOtaProbe(const SerialJsonCommand& cmd) {
 
 static void handleOtaActivate(const SerialJsonCommand& cmd) {
   if (cmd.ota_self) {
-    if (!g_ota_local_staged) {
+    if (g_ota_session != OTA_SESSION_LOCAL_STAGED &&
+        g_ota_session != OTA_SESSION_LOCAL_STAGED_WRITER) {
       jsonError(cmd.id, "conductor firmware is not staged");
       return;
     }
-    if (g_ota_write_active &&
+    if (otaSessionOwnsLocalWriter(g_ota_session) &&
         otaShouldFinalizeFlash(isConductor(), OTA_FINALIZE_ON_ACTIVATE)) {
       if (!Update.end(true)) {
         otaWriteAbort();
         jsonError(cmd.id, "conductor firmware finalize failed");
         return;
       }
-      g_ota_write_active = false;
+      g_ota_session = OTA_SESSION_LOCAL_STAGED;
     }
     jsonOk(cmd.id, "activating conductor firmware");
     Serial.flush();
@@ -2714,8 +2869,7 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       if (!cmd.ota_enabled) otaWriteAbort();
       g_ota_maintenance = cmd.ota_enabled;
       g_ota_maintenance_until_us = cmd.ota_enabled ? now_us() + OTA_WINDOW_US : 0;
-      if (cmd.ota_enabled && !was_active && !g_ota_write_active &&
-          !g_ota_local_staged) {
+      if (cmd.ota_enabled && !was_active && !otaSessionActive()) {
         portENTER_CRITICAL(&g_ota_status_mux);
         otaStatusInit(g_ota_status);
         portEXIT_CRITICAL(&g_ota_status_mux);
@@ -2725,6 +2879,8 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     }
   } else if (cmd.kind == SJ_OTA_BEGIN) {
     handleOtaBegin(cmd);
+  } else if (cmd.kind == SJ_OTA_BEGIN_TARGETS) {
+    handleOtaBeginTargets(cmd);
   } else if (cmd.kind == SJ_OTA_CHUNK) {
     handleOtaChunk(cmd);
   } else if (cmd.kind == SJ_OTA_REBROADCAST) {
@@ -3018,7 +3174,7 @@ static void handleCommand(char* line) {
 
 // Accumulate a newline-terminated command from serial without blocking.
 static void pollSerialCommands() {
-  static char buf[512];
+  static char buf[SERIAL_JSON_COMMAND_MAX];
   static uint16_t len = 0;
   if (Serial.available()) g_last_serial_us = now_us();  // hold Stage-B naps off
   while (Serial.available()) {
@@ -3250,10 +3406,10 @@ void loop() {
     // the only registration state that extends the window.
     if (g_radio_on) maybeRegister(t);
     bool register_holds_radio = registrationHoldingRadio(t);
-    if ((g_ota_write_active || g_ota_local_staged || isRelay()) && !g_radio_on)
+    if ((otaSessionIsActive(g_ota_session) || isRelay()) && !g_radio_on)
       radioWake();
     if (field_awake && !g_radio_on) radioWake();
-    if (isPerformer() && g_powersave && !g_ota_write_active && !g_ota_local_staged &&
+    if (isPerformer() && g_powersave && !otaSessionIsActive(g_ota_session) &&
         !field_awake && !register_holds_radio) {
       DutyAction act = dutyStep(g_duty, currentDutyConfig(policy), t);
       if (act == DUTY_WAKE) radioWake();

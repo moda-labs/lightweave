@@ -2585,7 +2585,16 @@ def create_app(
             if item.get("mac")
         }
         expected_lanterns = expected_ota_lanterns(state)
-        expected_macs = set(str(mac) for mac in app.state.ota_install.get("target_macs") or [])
+        persisted_target_macs = set(
+            str(mac) for mac in app.state.ota_install.get("target_macs") or []
+        )
+        persisted_selective = bool(
+            resume
+            and app.state.ota_install.get("cohort_mode") == "selective"
+            and persisted_target_macs
+        )
+        expected_macs = set(persisted_target_macs)
+        targeted_mode = persisted_selective
         conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
         source_proto = int(conductor_firmware.get("proto") or 0)
         target_proto = require_artifact_protocol(artifact)
@@ -2642,12 +2651,96 @@ def create_app(
             if (artifact_has_identity or mac in installed_evidence_macs)
             and already_installed(item)
         }
-        conductor_installed = already_installed({"firmware": conductor_firmware})
+        field_installed_macs = set(installed_macs)
+        # Only immutable release metadata can prove that the primary already
+        # has this exact binary. A manually uploaded artifact has no build
+        # identity, so it must retain the legacy full-field/local-writer path.
+        conductor_matches_reference = already_installed(
+            {"firmware": conductor_firmware}
+        )
+        conductor_installed = artifact_has_identity and conductor_matches_reference
+        selective_cohort = (
+            persisted_target_macs
+            if persisted_selective
+            else set(expected_lanterns) - installed_macs
+        )
+        if not persisted_selective:
+            stale_relays = {
+                mac
+                for mac in selective_cohort
+                if str(expected_lanterns.get(mac, {}).get("role") or "")
+                == "relay"
+            }
+            # A stale relay predates tokened per-frame receipts. Upgrade that
+            # directly reachable infrastructure node first, then let the next
+            # automatic reconciliation target its stale children through the
+            # now-current relay. This keeps one job inside the six-hour bound
+            # without widening it to the current field.
+            blocked_by_stale_relay = {
+                mac
+                for mac in selective_cohort
+                if int(
+                    (expected_lanterns.get(mac, {}).get("route") or {}).get(
+                        "hops"
+                    )
+                    or 0
+                )
+                == 1
+                and str(
+                    (expected_lanterns.get(mac, {}).get("route") or {}).get(
+                        "via"
+                    )
+                    or ""
+                )
+                in stale_relays
+            }
+            selective_cohort -= blocked_by_stale_relay
+        selective_candidates = selective_cohort - installed_macs
+        pre_routed_targets = {
+            mac
+            for mac in selective_candidates
+            if int(
+                (expected_lanterns.get(mac, {}).get("firmware") or {}).get(
+                    "proto"
+                )
+                or 0
+            )
+            < ROUTED_PROTOCOL_VERSION
+        }
+        if conductor_installed and not persisted_selective and pre_routed_targets:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "a pre-v11 node cannot rejoin after the primary migrated to "
+                    "routed transport; update it once at the USB flashing station "
+                    f"({', '.join(sorted(pre_routed_targets))})"
+                ),
+            )
+
+        def selective_ota_supported(macs: set[str]) -> bool:
+            # Routed protocol v11 already understands logical-MAC-addressed OTA
+            # packets (the repair path uses them). A matching primary also
+            # proves that its serial command set includes exact-cohort begin.
+            return bool(
+                conductor_installed
+                and macs
+                and all(
+                    int(
+                        (expected_lanterns.get(mac, {}).get("firmware") or {}).get(
+                            "proto"
+                        )
+                        or 0
+                    )
+                    >= ROUTED_PROTOCOL_VERSION
+                    for mac in macs
+                )
+            )
         if (
-            not expected_macs
+            not persisted_selective
+            and not expected_macs
             and expected_lanterns
             and installed_macs == set(expected_lanterns)
-            and conductor_installed
+            and conductor_matches_reference
         ):
             nodes = [
                 {
@@ -2755,6 +2848,7 @@ def create_app(
                 error = str(ack.get("error") or "OTA command failed")
                 if (
                     "send failed" in error
+                    or error == "targeted ota performer is not online"
                     or (error in OTA_CHUNK_RETRYABLE_ERRORS and attempt <= OTA_CHUNK_RETRIES)
                 ):
                     app.state.ota_install.update({
@@ -2984,7 +3078,11 @@ def create_app(
                     ):
                         shared_repair_offsets[mac] = offset
 
-                if len(shared_repair_offsets) >= 2:
+                # Exact-cohort delivery already has a target-specific repair
+                # path. Avoid expanding one lagging target into another full
+                # cohort fan-out, which can repeatedly favor the same relay
+                # queue prefix under loss.
+                if not targeted_mode and len(shared_repair_offsets) >= 2:
                     replay_offset = min(shared_repair_offsets.values())
                     app.state.ota_install.update({
                         "phase": "repairing",
@@ -3151,14 +3249,51 @@ def create_app(
                             "keep the current primary online and retry recovery"
                         ),
                     )
-                ack = await call_until_ok("ota_begin", artifact.size, artifact.crc32)
-                reported_targets = {str(mac) for mac in ack.get("targets") or []}
-                expected_macs = expected_macs or reported_targets or set(expected_lanterns)
-                # ota_begin broadcasts to the frozen cohort. Even performers
-                # whose live identity already matched now own a fresh writer
-                # and must receive the image and activation with everyone else.
-                installed_macs.clear()
-                activated.clear()
+                targeted_mode = bool(
+                    persisted_selective
+                    or selective_ota_supported(selective_candidates)
+                )
+                if targeted_mode:
+                    expected_macs = set(selective_candidates)
+                    # Persist the safety boundary before asking the primary to
+                    # begin. A shared Pi/conductor power loss must resume this
+                    # exact cohort, never reinterpret it as a full-field job.
+                    app.state.ota_install.update({
+                        "cohort_mode": "selective",
+                        "target_macs": sorted(selective_cohort),
+                        "target_count": len(selective_cohort),
+                    })
+                    if expected_macs:
+                        ack = await call_until_ok(
+                            "ota_begin_targets",
+                            artifact.size,
+                            artifact.crc32,
+                            sorted(expected_macs),
+                        )
+                        reported_targets = {
+                            str(mac) for mac in ack.get("targets") or []
+                        }
+                        if reported_targets != expected_macs:
+                            raise HTTPException(
+                                status_code=503,
+                                detail="conductor accepted the wrong targeted OTA cohort",
+                            )
+                else:
+                    ack = await call_until_ok(
+                        "ota_begin", artifact.size, artifact.crc32
+                    )
+                    reported_targets = {
+                        str(mac) for mac in ack.get("targets") or []
+                    }
+                    expected_macs = (
+                        expected_macs or reported_targets or set(expected_lanterns)
+                    )
+                    # Legacy begin broadcasts to the frozen cohort and opens a
+                    # local conductor writer. Every receiver must then finish
+                    # and activate, including nodes that were already current.
+                    installed_macs.clear()
+                    field_installed_macs.clear()
+                    activated.clear()
                 for mac in expected_macs:
                     node_offsets[mac] = 0
                     delivery_confirmed_offsets.pop(mac, None)
@@ -3178,6 +3313,10 @@ def create_app(
             else:
                 reported_targets = {str(mac) for mac in current.get("targets") or []}
                 expected_macs = reported_targets or expected_macs or set(expected_lanterns)
+                targeted_mode = bool(
+                    current.get("targeted") is True
+                    or app.state.ota_install.get("cohort_mode") == "selective"
+                )
                 if staged:
                     # A finalized writer may report no active byte prefix even
                     # though its image and performer cohort are fully staged.
@@ -3190,8 +3329,11 @@ def create_app(
             # this cohort. Those performers no longer retain an OTA writer,
             # so requiring them to report `staged` again deadlocks the safety
             # barrier even though their live firmware identity proves success.
+            if targeted_mode:
+                installed_macs &= selective_cohort
             expected_macs -= installed_macs
-            cohort_macs = expected_macs | installed_macs
+            activated &= expected_macs
+            cohort_macs = expected_macs | field_installed_macs
 
             if not expected_macs:
                 await call_until_ok("set_ota_mode", False)
@@ -3215,7 +3357,7 @@ def create_app(
                     "nodes": nodes,
                     "target_macs": sorted(installed_macs),
                     "target_count": len(installed_macs),
-                    "already_installed_macs": sorted(installed_macs),
+                    "already_installed_macs": sorted(field_installed_macs),
                     "activated_macs": sorted(installed_macs),
                     "node_offsets": {
                         mac: artifact.size for mac in sorted(installed_macs)
@@ -3241,9 +3383,14 @@ def create_app(
             ]
             app.state.ota_install.update({
                 "phase": "broadcasting" if not staged else "staged",
-                "target_macs": sorted(cohort_macs),
-                "target_count": len(cohort_macs),
-                "already_installed_macs": sorted(installed_macs),
+                "cohort_mode": "selective" if targeted_mode else "full-field",
+                "target_macs": sorted(
+                    selective_cohort if targeted_mode else expected_macs
+                ),
+                "target_count": len(
+                    selective_cohort if targeted_mode else expected_macs
+                ),
+                "already_installed_macs": sorted(field_installed_macs),
                 "node_offsets": dict(sorted(node_offsets.items())),
                 "deferred": deferred,
                 "deferred_count": len(deferred),
@@ -3405,22 +3552,29 @@ def create_app(
                     "artifact": artifact.as_dict(),
                 }
 
-            app.state.ota_install.update({"phase": "activating-conductor", "active_mac": None})
-            try:
-                conductor_activation = await call("ota_activate", None)
-            except SerialProtocolError as error:
-                # The expected reboot can sever serial after the command was
-                # accepted but before its JSON ACK reaches the Pi. Live firmware
-                # identity below is the authoritative completion check.
+            if not targeted_mode:
                 app.state.ota_install.update({
-                    "last_retry": {"attempt": 1, "error": str(error)},
+                    "phase": "activating-conductor",
+                    "active_mac": None,
                 })
-            else:
-                if conductor_activation.get("ok") is not True:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=str(conductor_activation.get("error") or "conductor activation failed"),
-                    )
+                try:
+                    conductor_activation = await call("ota_activate", None)
+                except SerialProtocolError as error:
+                    # The expected reboot can sever serial after the command was
+                    # accepted but before its JSON ACK reaches the Pi. Live firmware
+                    # identity below is the authoritative completion check.
+                    app.state.ota_install.update({
+                        "last_retry": {"attempt": 1, "error": str(error)},
+                    })
+                else:
+                    if conductor_activation.get("ok") is not True:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=str(
+                                conductor_activation.get("error")
+                                or "conductor activation failed"
+                            ),
+                        )
             nodes = await infer_ota_complete_nodes(artifact.size, artifact.crc32, expected_macs)
             verified_macs = {str(node["mac"]) for node in nodes}
             if verified_macs != expected_macs:
@@ -3437,7 +3591,7 @@ def create_app(
                     "crc32": artifact.crc32,
                     "source": "live_firmware_identity",
                 }
-                for mac in sorted(installed_macs)
+                for mac in sorted(field_installed_macs)
             )
             await call_until_ok("set_ota_mode", False)
         except asyncio.CancelledError:
@@ -3576,6 +3730,12 @@ def create_app(
                 and app.state.ota_install.get("protocol_migration") is True
                 and app.state.ota_install.get("migration_activation_started") is True
             )
+            preserve_selective_recovery = bool(
+                resuming
+                and same_artifact_retry
+                and app.state.ota_install.get("cohort_mode") == "selective"
+                and app.state.ota_install.get("target_macs")
+            )
             preserved_activated = (
                 sorted(
                     str(mac)
@@ -3617,7 +3777,7 @@ def create_app(
                     str(mac)
                     for mac in app.state.ota_install.get("target_macs") or []
                 )
-                if preserve_migration_recovery
+                if preserve_migration_recovery or preserve_selective_recovery
                 else []
             )
             previous_delivery_offsets = dict(
@@ -3661,6 +3821,9 @@ def create_app(
                 "activation_dispatched_macs": preserved_activation_dispatched,
                 "target_macs": preserved_targets,
                 "target_count": len(preserved_targets),
+                "cohort_mode": (
+                    "selective" if preserve_selective_recovery else None
+                ),
                 "migration_activation_started": bool(
                     preserve_migration_recovery
                     and app.state.ota_install.get("migration_activation_started")

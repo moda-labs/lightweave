@@ -159,6 +159,14 @@ class MockConductor:
     _ota_expected_size: int = field(default=0, init=False, repr=False)
     _ota_expected_crc32: int = field(default=0, init=False, repr=False)
     _ota_nodes: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _ota_targeted: bool = field(default=False, init=False, repr=False)
+    targeted_begin_calls: list[list[str]] = field(default_factory=list, init=False)
+    ota_chunk_recipient_batches: list[list[str]] = field(
+        default_factory=list, init=False
+    )
+    ota_end_recipient_batches: list[list[str]] = field(
+        default_factory=list, init=False
+    )
     events: list[dict[str, Any]] = field(default_factory=list)
     _lanterns: list[Lantern] = field(
         default_factory=lambda: [
@@ -420,6 +428,7 @@ class MockConductor:
         if not enabled:
             self._ota_write = None
             self._ota_nodes = {}
+            self._ota_targeted = False
         self._event("ota maintenance mode started" if enabled else "ota maintenance mode ended")
         return {
             "ok": True,
@@ -433,6 +442,7 @@ class MockConductor:
         self._ota_image = b""
         self._ota_expected_size = size
         self._ota_expected_crc32 = crc32
+        self._ota_targeted = False
         self._ota_nodes = {
             item.mac: {"mac": item.mac, "phase": "begin", "error": "none", "offset": 0, "crc32": 0, "last_seen_s": 0}
             for item in self._lanterns
@@ -445,6 +455,39 @@ class MockConductor:
             "ok": True,
             "message": "ota write started",
             "targets": list(self._ota_nodes),
+        }
+
+    def ota_begin_targets(
+        self, size: int, crc32: int, targets: list[str]
+    ) -> dict[str, Any]:
+        if self.ota_started_at is None:
+            self.ota_started_at = _now()
+        alive = {item.mac for item in self._lanterns if item.status == "alive"}
+        exact_targets = list(dict.fromkeys(targets))
+        if not exact_targets or any(mac not in alive for mac in exact_targets):
+            return {"ok": False, "error": "targeted ota performer is not online"}
+        self.targeted_begin_calls.append(exact_targets)
+        self._ota_targeted = True
+        self._ota_write = bytearray()
+        self._ota_image = b""
+        self._ota_expected_size = size
+        self._ota_expected_crc32 = crc32
+        self._ota_nodes = {
+            mac: {
+                "mac": mac,
+                "phase": "begin",
+                "error": "none",
+                "offset": 0,
+                "crc32": 0,
+                "last_seen_s": 0,
+            }
+            for mac in exact_targets
+        }
+        return {
+            "ok": True,
+            "message": "targeted ota write started",
+            "targets": exact_targets,
+            "targeted": True,
         }
 
     def ota_chunk(self, offset: int, data: bytes) -> dict[str, Any]:
@@ -460,6 +503,7 @@ class MockConductor:
         if len(data) != expected_len:
             return {"ok": False, "error": "ota chunk length mismatch"}
         self._ota_write.extend(data)
+        self.ota_chunk_recipient_batches.append(sorted(self._ota_nodes))
         for node in self._ota_nodes.values():
             node.update({
                 "phase": "writing",
@@ -480,6 +524,7 @@ class MockConductor:
             "nodes": list(self._ota_nodes.values()),
             "staged": self._ota_write is None and self.ota_installed_crc32 is not None,
             "targets": list(self._ota_nodes),
+            "targeted": self._ota_targeted,
         }
 
     def ota_repair(self, mac: str, offset: int, data: bytes) -> dict[str, Any]:
@@ -535,6 +580,7 @@ class MockConductor:
         return {"ok": True, "message": "ota status requested", "settle_s": 0}
 
     def ota_end(self) -> dict[str, Any]:
+        self.ota_end_recipient_batches.append(sorted(self._ota_nodes))
         if self._ota_write is None:
             if self.ota_installed_crc32 == self._ota_expected_crc32 and self._ota_expected_size > 0:
                 for node in self._ota_nodes.values():

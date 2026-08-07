@@ -457,11 +457,14 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   hardware-accumulated energy/charge to the conductor (§4.3), reusing the
   REGISTER unicast path. Added without a PROTO_VERSION bump — no existing
   layout changed, and receivers ignore unknown types via the dispatch default.
-- **[done]** `MSG_OTA_BEGIN`, `MSG_OTA_CHUNK`, `MSG_OTA_END`: conductor
-  broadcasts a staged firmware image during a background field-wide OTA.
-  Performers write the image into their OTA partition and accept it only after
-  size and CRC checks pass. This is field-wide only; no selected-node firmware
-  updates.
+- **[done]** `MSG_OTA_BEGIN`, `MSG_OTA_CHUNK`, `MSG_OTA_END`: conductor sends a
+  staged firmware image during background OTA. A normal release transition
+  broadcasts to the online field and writes the conductor locally. Once the
+  conductor already has the exact immutable release, reconciliation freezes
+  only the stale routed-v11 MACs and sends the same byte-stable messages to
+  their logical destinations. Relays forward those packets; non-target nodes do
+  not open a writer, receive firmware chunks, or reboot. Receivers accept the
+  image only after size and CRC checks pass.
 - **[done]** `MSG_OTA_STATUS`: performers report begin/writing/complete/error
   status with offset and prefix CRC, and the API filters stale statuses.
 - **[done]** `MSG_OTA_QUERY` and `MSG_OTA_ACTIVATE`: the conductor requests
@@ -481,12 +484,15 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
 
 ### 7.1 OTA policy, transfer, and recovery **[done; scale hardware verification pending]**
 
-OTA is field-wide only and automatically reconciles the companion firmware by
-default. It runs in the background:
-beacons and normal serial control commands continue between chunks, so pattern,
-blackout, and power operations remain available. The system must never offer
-selected-node firmware updates as a normal workflow. Mixed firmware can still
-happen after a failed update, but it is treated as an error/recovery state.
+OTA automatically reconciles the companion firmware by default. A new release
+remains a field update, but later drift is repaired as an exact stale-node
+cohort when the primary already runs that immutable release. It runs in the
+background: beacons and normal serial control commands continue between chunks,
+so pattern, blackout, and power operations remain available. The system must never offer
+arbitrary operator-selected firmware versions as a normal workflow: the control
+plane derives the target set from trusted release identity and live state.
+Mixed firmware can still happen after a failed update, but it is treated as an
+automatic reconciliation/recovery state.
 
 The foundation is in place: device builds get a release version from `VERSION`,
 a git-derived 32-bit build id, and dirty flag via `scripts/firmware_build_id.py`;
@@ -495,11 +501,18 @@ conductor/per-node firmware in machine state; the control plane shows field
 firmware consistency in Operations, links build hashes to GitHub commits, and
 flags `Firmware mismatch` in the Node List.
 
-The transfer path stages a `.bin` artifact,
-streams it over machine serial with `ota_begin`/`ota_chunk`/`ota_end`, the
-conductor writes its own OTA partition, and the conductor broadcasts the same
-chunk stream to performers via ESP-NOW. The UI shows broadcast, repair, staging,
-and activation phases per board.
+The transfer path stages a `.bin` artifact and streams it over machine serial.
+The full-field path uses `ota_begin`/`ota_chunk`/`ota_end`: the conductor writes
+its own OTA partition and broadcasts the same chunk stream. The selective path
+uses `ota_begin_targets` with an exact MAC array. Firmware atomically validates
+that every requested MAC is fresh in the roster, opens no conductor writer, and
+routes begin/chunk/end only to that frozen cohort. The existing checkpoint,
+repair, staged-CRC, relay-last, and activation machinery is shared by both
+paths. The durable journal records the selective mode and original MAC set
+before transfer begins; resume can remove targets proven installed but never
+downgrades or expands that set into a full-field job. Install status exposes
+`cohort_mode` as `selective` or `full-field`.
+The UI shows broadcast, repair, staging, and activation phases per board.
 This was hardware-verified on the 3-board bench on 2026-07-06, including a
 same-protocol mixed-firmware recovery that restored performer #1 from
 `0.3.0-mismatch` to `0.3.0`. The scale-hardened path now checkpoints every 256
@@ -521,10 +534,12 @@ Each performer finalizes independently and activates as soon as its own image is
 full-size/full-CRC staged; there is no fleet-wide verification barrier. The
 normal UI and automatic reconciler use one operation: upload, verify, activate
 each ready performer, verify its re-registration, keep repairing laggards, then
-activate the conductor last. One performer's failure therefore cannot block a
-different verified performer. With relays, verified leaf performers still
-activate independently, but every relay remains online until all non-relay
-targets have activated; relays then activate, followed by the conductor. The
+activate a staged conductor last on a full-field run. Selective reconciliation
+leaves the already-current conductor running. One performer's failure therefore
+cannot block a different verified performer. With relays, verified leaf
+performers still activate independently, but every targeted relay remains
+online until all non-relay targets have activated; targeted relays then
+activate, followed by the conductor only when that full-field run staged it. The
 stage-only and explicit-activation API
 routes remain recovery tools. The durable install journal and checksum-pinned
 artifact survive browser disconnects and service restarts. The control plane
@@ -547,6 +562,19 @@ serve the new repair/probe/activation serial RPCs. Control-plane preflight
 detects that legacy command set before `ota_begin` and reports the required
 action. After that, existing v10 performers can transition through OTA; unknown
 additive message types remain safe during the mixed-version pass.
+
+Selective reconciliation has a similar safe bootstrap rule without another
+radio protocol bump. Routed v11 already supports logical-MAC-addressed OTA for
+targeted repair, so v0.9.1 receivers and relays understand the targeted radio
+packets. The primary-side `ota_begin_targets` command is additive, however: the
+release introducing it uses the full-field path because the primary is not yet
+on the desired immutable build. After that one rollout, a stale routed-v11
+performer or relay is the only node written and activated. An outdated primary
+or a manually uploaded artifact without immutable build identity deliberately
+falls back to the full-field path. A pre-v11 node returning after its primary
+has already migrated cannot understand routed packets at all, so reconciliation
+fails closed with the one-time USB-station action instead of rewriting the
+current field pointlessly.
 
 The control plane derives a Recovery summary from live state and the durable last
 install attempt. It classifies missing lanterns, same-protocol mixed firmware,
@@ -630,14 +658,26 @@ epoch by queue residence time so relay-zone clocks do not inherit a fixed relay
 delay. If upstream disappears, the relay and its performers continue rendering
 the last show state; the relay does not become a conductor.
 
-The primary learns each online node's immediate next hop from REGISTER. Targeted
-OTA repairs and activations use that next hop while retaining the performer as
-logical destination. Offset, prefix CRC, and full-image CRC remain the durable
-staging proof. Activation adds one stronger relay boundary: after every queued
-copy finishes downstream, the relay returns `MSG_ACK` for that logical child.
-The primary's serial activation call does not succeed until that receipt arrives,
-so a protocol migration cannot reboot a relay while a child's activation is
-still queued. Post-reboot REGISTER remains the final installed-image proof.
+The primary learns each online node's immediate next hop from REGISTER. Every
+targeted OTA begin, chunk, end, repair, and activation uses that next hop while
+retaining the performer as logical destination. After all queued copies of each
+logical frame finish downstream, a current relay returns the additive
+`MSG_OTA_FRAME_ACK` with a content/offset-derived token; the primary does not
+advance to another target until the exact token arrives. Delayed receipts for a
+previous chunk therefore cannot acknowledge the next chunk. This prevents a
+large cohort from overflowing the 16-frame relay queue. Activation retains the
+original v11 `MSG_ACK`, preventing a protocol migration from rebooting a relay
+while a child's activation is still queued.
+For a routed-v11 relay from before per-frame receipts, the primary detects the
+different firmware identity and conservatively paces each logical frame by the
+downstream callback budget; activation keeps using its original v11 receipt.
+If that stale relay and stale children appear in the same reconciliation, the
+control plane updates the directly reachable relay first and defers those
+children to the next automatic pass, avoiding a multi-hour paced cohort. This
+preserves the additive compatibility path without a protocol bump.
+Selective checkpoint repair is per-node rather than replaying the cohort.
+Offset, prefix CRC, and full-image CRC remain the durable staging proof, and
+post-reboot REGISTER remains the final installed-image proof.
 
 The v10-to-v11 rollout is a coordinated protocol migration, not the ordinary
 same-protocol rolling activation. Because a v11 performer becomes invisible to

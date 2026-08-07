@@ -51,6 +51,7 @@ class ConductorAdapter(Protocol):
     def update_power_policy(self, policy: dict[str, Any]) -> dict[str, Any]: ...
     def set_ota_mode(self, enabled: bool) -> dict[str, Any]: ...
     def ota_begin(self, size: int, crc32: int) -> dict[str, Any]: ...
+    def ota_begin_targets(self, size: int, crc32: int, targets: list[str]) -> dict[str, Any]: ...
     def ota_chunk(self, offset: int, data: bytes) -> dict[str, Any]: ...
     def ota_rebroadcast(self, offset: int, data: bytes) -> dict[str, Any]: ...
     def ota_end(self) -> dict[str, Any]: ...
@@ -144,6 +145,17 @@ class JsonLineSerialConductor:
 
     def ota_begin(self, size: int, crc32: int) -> dict[str, Any]:
         return self._request("ota_begin", _timeout_s=max(self.timeout_s, OTA_FINALIZE_TIMEOUT_S), size=size, crc32=crc32)
+
+    def ota_begin_targets(
+        self, size: int, crc32: int, targets: list[str]
+    ) -> dict[str, Any]:
+        return self._request(
+            "ota_begin_targets",
+            _timeout_s=max(self.timeout_s, OTA_FINALIZE_TIMEOUT_S),
+            size=size,
+            crc32=crc32,
+            targets=targets,
+        )
 
     def ota_chunk(self, offset: int, data: bytes) -> dict[str, Any]:
         return self._request("ota_chunk", _timeout_s=max(self.timeout_s, OTA_CHUNK_TIMEOUT_S), offset=offset, data=data.hex())
