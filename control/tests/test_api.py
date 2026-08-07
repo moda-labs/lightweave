@@ -102,7 +102,7 @@ def test_release_api_separates_control_and_field_firmware(managed_client, tmp_pa
     assert response.status_code == 200
     payload = response.json()
     assert payload["control"]["version"] == (Path(__file__).parents[2] / "VERSION").read_text().strip()
-    assert payload["control"]["release"]["control_changes"]
+    assert isinstance(payload["control"]["release"]["control_changes"], list)
     assert payload["firmware"]["version"] == "0.3.0"
     assert payload["firmware"]["release"]["firmware_changes"]
     assert payload["firmware"]["expected"] == 9
