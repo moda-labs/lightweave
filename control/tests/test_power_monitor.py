@@ -81,6 +81,50 @@ def test_draw_tracker_starts_a_new_session_when_hardware_energy_resets() -> None
     assert reset.source == "instantaneous"
 
 
+def test_draw_tracker_discards_window_after_zero_bus_with_live_current() -> None:
+    tracker = PowerDrawTracker(window_s=15 * 60)
+    tracker.observe(
+        "meter",
+        wh=0.150,
+        elapsed_s=600,
+        reported_at=1_000.0,
+        bus_v=13.26,
+        current_ma=70.0,
+    )
+
+    fault = tracker.observe(
+        "meter",
+        wh=0.150,
+        elapsed_s=660,
+        reported_at=1_060.0,
+        bus_v=0.0,
+        current_ma=70.0,
+    )
+    recovered = tracker.observe(
+        "meter",
+        wh=0.166,
+        elapsed_s=720,
+        reported_at=1_120.0,
+        bus_v=13.26,
+        current_ma=70.0,
+    )
+    next_report = tracker.observe(
+        "meter",
+        wh=0.18147,
+        elapsed_s=780,
+        reported_at=1_180.0,
+        bus_v=13.26,
+        current_ma=70.0,
+    )
+
+    assert fault.watts is None
+    assert fault.source is None
+    assert recovered.watts == pytest.approx(0.9282)
+    assert recovered.source == "instantaneous"
+    assert next_report.watts == pytest.approx(0.9282, abs=0.001)
+    assert next_report.source == "recent_average"
+
+
 def test_power_monitor_store_persists_config_and_full_anchors(tmp_path: Path) -> None:
     store = PowerMonitorStore(tmp_path)
     state = {
