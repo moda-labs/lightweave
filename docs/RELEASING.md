@@ -19,12 +19,14 @@ merge release metadata -> tag vX.Y.Z -> CI publishes + verifies immutable assets
                          Pi polls, verifies, deploys control, stages firmware
                                                 |
                                                 v
-                         operator separately starts field OTA when ready
+                         auto-update reconciles online mismatches unless paused
 ```
 
-This is GitOps for the Pi software and desired firmware artifact. It is not
-unattended firmware rollout: broadcasting firmware to lanterns remains a manual,
-authenticated maintenance operation.
+This is GitOps for the Pi software and desired firmware artifact. The control
+plane automatically reconciles online mismatches by default after promotion;
+the persistent **Automatic updates** switch is the operator's show-safety pause.
+Manual release selection, upload, staging, and activation remain authenticated
+development/recovery operations.
 
 ## One-action release contract
 
@@ -45,9 +47,10 @@ required review and CI gates pass. Stop only for a failed gate, an ambiguous
 release decision, or a repository policy that requires another human action.
 If the user asks only to “prepare the release PR,” honor that narrower scope.
 
-Field OTA is intentionally outside this contract. Promotion makes the Pi deploy
-the control plane and stage the matching firmware, but never broadcasts firmware
-to lanterns automatically.
+Waiting for every field board is intentionally outside this contract. Promotion
+makes the Pi deploy the control plane, stage the matching firmware, and begin
+background reconciliation when Automatic updates is enabled. Offline boards join
+a later reconciliation when they return; release completion does not wait for them.
 
 ## Release contents
 
@@ -202,7 +205,7 @@ service reads that marker once at process startup and reports it instead of
 invoking Git against the root-owned checkout, so health proves that the expected
 process was actually restarted rather than merely observing a changed file.
 
-The reconciler and manual OTA share a root-owned, service-readable cross-process
+The reconciler and field OTA share a root-owned, service-readable cross-process
 lock. If OTA is already running when the timer fires, deployment reports
 `deferred` and the next timer run retries without stopping the control plane.
 
@@ -220,21 +223,25 @@ is required.
 ## 5. Roll firmware out to the field
 
 The promoted firmware is automatically checksum-verified and staged in the
-existing OTA store. It is never broadcast automatically.
+existing OTA store. With **Automatic updates** enabled (the default), the control
+plane starts or resumes reconciliation for online mismatched performers. Each
+performer installs and reboots after its own image verifies; laggards keep
+repairing independently, and the conductor activates last.
 
 From the authenticated Operations page:
 
-1. Confirm the release and staged firmware shown in **Deployed changes**.
-2. Confirm the conductor and currently online performers are healthy.
-3. Enter the OTA maintenance window and start the install.
-4. Keep power stable until every member of the frozen online cohort verifies.
-5. Confirm field firmware reports the promoted clean build.
+1. Before a high-visibility show, turn **Automatic updates** off; this persists
+   and safely pauses an automatic transfer at a command boundary.
+2. Otherwise, confirm the release and desired firmware shown in **Deployed changes**.
+3. Keep power stable while the Firmware screen reports upload/install progress.
+4. Confirm each online performer and the conductor report the promoted clean build.
+5. Leave Automatic updates enabled so old/offline performers reconcile when they return.
 
 Offline layout rows are deferred rather than blocking the online cohort. Until
 every placed row is online and verified on the promoted build, the field card
-says **deferred** and the overall release remains **attention**. Run a later
-maintenance OTA when additional performers return; the normal consistency and
-recovery UI shows what remains.
+says **deferred** and the overall release remains **attention**. Automatic
+reconciliation catches those performers when they return; the normal consistency
+and recovery UI shows what remains.
 
 ## Rollback
 
@@ -249,9 +256,10 @@ old name is now a reserved placeholder rather than a redirect, so those assets
 no longer resolve. Do not promote a manifest older than `v0.7.1`: the Pi will
 fail to download it and reconciliation will error on every timer run.
 
-Firmware rollback is a normal manual OTA using the older promoted artifact. The
-Pi never changes lantern firmware merely because the control-plane release was
-rolled back.
+Firmware rollback is a deliberate selection of an older known release under
+Development / recovery. Once selected as desired, it follows the same automatic
+or explicitly started OTA path; rolling back only the control-plane channel does
+not silently select an older field artifact.
 
 Do not manually edit `/opt/lightweave`, a deployment record, or a downloaded
 firmware artifact to simulate rollback. Those changes break the integrity chain

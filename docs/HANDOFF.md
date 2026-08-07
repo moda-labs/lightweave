@@ -8,11 +8,11 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**169 pass**) is green; **401 control tests** are green; all three
+(**170 pass**) is green; **430 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest in this branch (2026-08-05): **the running control-plane release and field
-firmware are managed as one release by default.** Its checksum-verified companion
+Latest in this branch (2026-08-06): **release v0.8.0 packages the running
+control plane and field firmware as one release by default.** Its checksum-verified companion
 firmware becomes the desired image automatically; online mismatches and old
 performers that check in later are reconciled without another operator action.
 The Firmware tab has a persistent **Automatic updates** show-safety toggle,

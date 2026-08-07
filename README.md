@@ -34,22 +34,24 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   native unit tests, so sync math, pattern math, roster/table logic, power policy,
   and OTA helpers can be tested without hardware.
 
-Current release: `0.7.0`. The bench system has been verified with one conductor
+Current release: `0.8.0`. The bench system has been verified with one conductor
 and mixed 16/64-LED performers for sync, layout and pre-placement group assignment,
 independent group pattern control, reversible blackout, runtime power policy, and
 the local web control plane. The control plane now includes a same-host flashing
 station for automatically detecting and provisioning up to ten USB-connected
 FireBeetles in parallel, with permanent performer-ID assignment for physical
 labeling. Field-wide OTA runs in the background with checkpoint repair, a
-six-hour retry window, durable resume, an explicit full-field staged barrier,
-and one-action rolling per-performer activation; the earlier transfer path has
+six-hour retry window, durable resume, and independent per-performer activation
+as each board verifies; the earlier transfer path has
 completed successful bench installs, including same-protocol mixed-firmware
 recovery back to a consistent field. See [docs/HANDOFF.md](docs/HANDOFF.md) for
 the exact latest state and the pending scale hardware gate.
 
 Production Pi updates use a pull-based, hash-pinned release channel with health
 checks and automatic code rollback. Each promoted release stages its immutable
-firmware artifact, but an operator still explicitly starts field OTA. The UI
+firmware artifact and, by default, reconciles online mismatched performers in
+the background. The Firmware tab's persistent Automatic updates switch can pause
+that behavior before a high-visibility show. The UI
 shows separate web-control and field-firmware versions and changelogs. See
 [docs/RELEASING.md](docs/RELEASING.md) for the release procedure and
 [docs/SSH_ACCESS.md](docs/SSH_ACCESS.md) for Raspberry Pi shell access.
