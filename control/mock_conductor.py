@@ -15,7 +15,7 @@ def _now() -> float:
 
 FIELD_FIRMWARE = {
     "version": "0.3.0",
-    "proto": 10,
+    "proto": 11,
     "build_id": 0x44D028FD,
     "build_label": "44d028fd",
     "dirty": False,
@@ -69,6 +69,9 @@ class Lantern:
     firmware: dict[str, Any] = field(default_factory=lambda: deepcopy(FIELD_FIRMWARE))
     group_id: int = 0
     led_count: int = 16
+    role: str = "performer"
+    route_hops: int = 0
+    route_via: str | None = None
 
     def as_dict(self, now: float) -> dict[str, Any]:
         has_position = self.x is not None and self.y is not None
@@ -96,6 +99,11 @@ class Lantern:
             "group_id": self.group_id,
             "group": f"Group {self.group_id + 1}",
             "led_count": self.led_count,
+            "role": self.role,
+            "route": {
+                "hops": self.route_hops,
+                "via": self.route_via or self.mac,
+            },
             "attention": attention,
             "firmware": deepcopy(self.firmware),
             "power": {

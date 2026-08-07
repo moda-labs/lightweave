@@ -24,6 +24,7 @@
 #include "powersave.h"
 #include "performer_tx.h"
 #include "registration.h"
+#include "relay.h"
 #include "roster.h"
 #include "serial_json.h"
 #include "table.h"
@@ -679,7 +680,7 @@ void test_roster_overflow_drops_new_keeps_existing() {
 // ---- Performer registration: fleet spreading + delivery retries ------------
 
 static const RegistrationConfig REGISTRATION_TEST_CONFIG = {
-    10'000'000, 2'000'000, 500'000, 200'000, 2'000'000};
+    10'000'000, 2'000'000, 500'000, 200'000, 2'000'000, 750'000};
 
 void test_registration_spreads_a_simultaneous_fleet_inside_radio_window() {
   int64_t slots[60] = {0};
@@ -710,24 +711,44 @@ void test_registration_holds_radio_only_through_slot_and_delivery() {
   const uint8_t mac[6] = {0xc0, 0xcd, 0xd6, 0xc7, 0xf2, 0x0c};
   RegistrationSchedule schedule;
   registrationInit(schedule);
-  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule));
+  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule, 5'000'000));
 
   registrationSendDue(schedule, 5'000'000, mac, REGISTRATION_TEST_CONFIG);
-  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule));
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule, 5'000'000));
   TEST_ASSERT_TRUE(registrationSendDue(
       schedule, schedule.slot_us, mac, REGISTRATION_TEST_CONFIG));
   registrationSendStarted(schedule);
   TEST_ASSERT_TRUE(schedule.in_flight);
-  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule));
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule, schedule.slot_us));
 
   registrationSendResult(schedule, 5'600'000, mac,
                          REGISTRATION_TEST_CONFIG, /*delivered*/ true);
-  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule));
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule, 5'600'000));
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule, 6'349'999));
+  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule, 6'350'000));
   TEST_ASSERT_EQUAL_UINT8(0, schedule.failures);
   TEST_ASSERT_TRUE(schedule.next_due_us >= 15'600'000);
   TEST_ASSERT_TRUE(schedule.next_due_us <= 17'600'000);
   TEST_ASSERT_FALSE(registrationSendDue(
       schedule, schedule.next_due_us - 1, mac, REGISTRATION_TEST_CONFIG));
+}
+
+void test_registration_table_repair_releases_radio_hold_early() {
+  const uint8_t mac[6] = {0xc0, 0xcd, 0xd6, 0xc7, 0xf2, 0x0c};
+  RegistrationConfig config = REGISTRATION_TEST_CONFIG;
+  config.slot_spread_us = 0;
+  RegistrationSchedule schedule;
+  registrationInit(schedule);
+  TEST_ASSERT_TRUE(registrationSendDue(
+      schedule, 1'000, mac, config));
+  registrationSendStarted(schedule);
+  registrationSendResult(schedule, 2'000, mac, config, /*delivered*/ true);
+  TEST_ASSERT_TRUE(registrationKeepsRadioAwake(schedule, 2'001));
+
+  registrationRepairReceived(schedule);
+
+  TEST_ASSERT_FALSE(registrationKeepsRadioAwake(schedule, 2'001));
+  TEST_ASSERT_FALSE(schedule.repair_waiting);
 }
 
 void test_registration_delivery_failures_back_off_and_cap() {
@@ -1657,7 +1678,7 @@ void test_calibration_bit_sequence_is_msb_first() {
 
 void test_calibration_roster_msg_fits_espnow() {
   TEST_ASSERT_LESS_OR_EQUAL_UINT16(250, sizeof(RosterMsg));
-  TEST_ASSERT_EQUAL_UINT8(39, ROSTER_MACS_PER_MSG);
+  TEST_ASSERT_EQUAL_UINT8(37, ROSTER_MACS_PER_MSG);
 }
 
 void test_calibration_roster_msg_rank_lookup() {
@@ -2614,6 +2635,196 @@ void test_boot_serial_seed_expires_longest_grace() {
   TEST_ASSERT_TRUE(boot - p.serial_seed_us > flipped.nap_serial_grace_us);
 }
 
+// ---- One-hop relay routing --------------------------------------------------
+
+void test_route_header_v11_packets_fit_espnow() {
+  TEST_ASSERT_EQUAL_UINT8(11, PROTO_VERSION);
+  TEST_ASSERT_EQUAL_UINT32(19, sizeof(MsgHeader));
+  TEST_ASSERT_EQUAL_UINT32(21, sizeof(AckMsg));
+  TEST_ASSERT_EQUAL_UINT32(250, sizeof(TableMsg));
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(RosterMsg));
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(BeaconMsg));
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(OtaChunkMsg));
+}
+
+void test_performer_parent_is_sticky_then_fails_over_for_same_primary() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t relay[6] = {2, 2, 3, 4, 5, 6};
+  const uint8_t performer[6] = {3, 2, 3, 4, 5, 6};
+  const uint8_t other_primary[6] = {4, 2, 3, 4, 5, 6};
+  const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  ParentRoute route;
+  parentRouteInit(route);
+  MsgHeader direct = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  routeHeaderSet(direct, primary, broadcast, 0);
+  TEST_ASSERT_EQUAL(PARENT_ACCEPT_NEW,
+                    parentRouteOnBeacon(route, false, performer, primary,
+                                        direct, 100, 1000));
+
+  MsgHeader relayed = direct;
+  relayed.hops = 1;
+  TEST_ASSERT_EQUAL(PARENT_REJECT,
+                    parentRouteOnBeacon(route, false, performer, relay,
+                                        relayed, 1099, 1000));
+  TEST_ASSERT_TRUE(routeMacEqual(route.parent, primary));
+  TEST_ASSERT_EQUAL(PARENT_ACCEPT_FAILOVER,
+                    parentRouteOnBeacon(route, false, performer, relay,
+                                        relayed, 1100, 1000));
+  TEST_ASSERT_TRUE(routeMacEqual(route.parent, relay));
+  TEST_ASSERT_EQUAL_UINT8(1, route.hops);
+
+  MsgHeader foreign = relayed;
+  routeHeaderSet(foreign, other_primary, broadcast, 1);
+  TEST_ASSERT_EQUAL(PARENT_REJECT,
+                    parentRouteOnBeacon(route, false, performer, relay,
+                                        foreign, 5000, 1000));
+  TEST_ASSERT_TRUE(routeMacEqual(route.primary, primary));
+}
+
+void test_relay_learns_only_a_direct_primary() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t other_relay[6] = {2, 2, 3, 4, 5, 6};
+  const uint8_t local[6] = {3, 2, 3, 4, 5, 6};
+  const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  ParentRoute route;
+  parentRouteInit(route);
+  MsgHeader beacon = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  routeHeaderSet(beacon, primary, broadcast, 1);
+  TEST_ASSERT_EQUAL(PARENT_REJECT,
+                    parentRouteOnBeacon(route, true, local, other_relay,
+                                        beacon, 100, 1000));
+  beacon.hops = 0;
+  TEST_ASSERT_EQUAL(PARENT_ACCEPT_NEW,
+                    parentRouteOnBeacon(route, true, local, primary,
+                                        beacon, 200, 1000));
+}
+
+void test_primary_validates_direct_and_relayed_logical_origins() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t relay[6] = {2, 2, 3, 4, 5, 6};
+  const uint8_t child[6] = {3, 2, 3, 4, 5, 6};
+  MsgHeader uplink = {BEACON_MAGIC, PROTO_VERSION, MSG_REGISTER};
+  routeHeaderSet(uplink, child, primary, 0);
+  TEST_ASSERT_TRUE(routePrimaryReceiveValid(primary, child, false, uplink));
+  TEST_ASSERT_FALSE(routePrimaryReceiveValid(primary, relay, true, uplink));
+  uplink.hops = 1;
+  TEST_ASSERT_TRUE(routePrimaryReceiveValid(primary, relay, true, uplink));
+  TEST_ASSERT_FALSE(routePrimaryReceiveValid(primary, relay, false, uplink));
+}
+
+void test_relay_queue_collapses_copies_and_advances_beacon_time() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  BeaconMsg beacon = {};
+  beacon.hdr = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  routeHeaderSet(beacon.hdr, primary, broadcast, 0);
+  beacon.epoch_us = 10'000;
+  beacon.seq = 7;
+  RelayQueue queue;
+  relayQueueInit(queue);
+  TEST_ASSERT_TRUE(relayQueuePush(queue, (const uint8_t*)&beacon,
+                                  sizeof(beacon), broadcast, 1'000));
+  TEST_ASSERT_TRUE(relayQueuePush(queue, (const uint8_t*)&beacon,
+                                  sizeof(beacon), broadcast, 1'100));
+  TEST_ASSERT_EQUAL_UINT8(1, queue.count);
+  TEST_ASSERT_EQUAL_UINT8(2, relayQueueFront(queue)->copies);
+
+  uint8_t packet[RELAY_PACKET_MAX];
+  TEST_ASSERT_TRUE(relayFramePrepare(*relayQueueFront(queue), 1'250, packet));
+  BeaconMsg forwarded;
+  memcpy(&forwarded, packet, sizeof(forwarded));
+  TEST_ASSERT_EQUAL_UINT8(1, forwarded.hdr.hops);
+  TEST_ASSERT_EQUAL_INT64(10'250, forwarded.epoch_us);
+  relayQueuePopCopy(queue);
+  TEST_ASSERT_EQUAL_UINT8(1, relayQueueFront(queue)->copies);
+  relayQueuePopCopy(queue);
+  TEST_ASSERT_EQUAL_UINT8(0, queue.count);
+}
+
+void test_relay_queue_reports_end_to_end_activation_delivery_after_all_copies() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t child[6] = {3, 2, 3, 4, 5, 6};
+  OtaActivateMsg activate = {};
+  activate.hdr = {BEACON_MAGIC, PROTO_VERSION, MSG_OTA_ACTIVATE};
+  routeHeaderSet(activate.hdr, primary, child, 0);
+  RelayQueue queue;
+  relayQueueInit(queue);
+  TEST_ASSERT_TRUE(relayQueuePush(queue, (const uint8_t*)&activate,
+                                  sizeof(activate), child, 1'000, 4));
+
+  RelayCompletion completion = {};
+  TEST_ASSERT_FALSE(relayQueueCompleteCopy(queue, false, completion));
+  TEST_ASSERT_FALSE(relayQueueCompleteCopy(queue, true, completion));
+  TEST_ASSERT_FALSE(relayQueueCompleteCopy(queue, false, completion));
+  TEST_ASSERT_TRUE(relayQueueCompleteCopy(queue, false, completion));
+  TEST_ASSERT_TRUE(completion.delivered);
+  TEST_ASSERT_EQUAL_UINT8(MSG_OTA_ACTIVATE, completion.type);
+  TEST_ASSERT_TRUE(routeMacEqual(child, completion.destination));
+  TEST_ASSERT_EQUAL_UINT8(0, queue.count);
+
+  RelayReceipt receipt;
+  relayReceiptInit(receipt);
+  TEST_ASSERT_TRUE(relayReceiptSchedule(receipt, completion));
+  TEST_ASSERT_TRUE(receipt.pending);
+  TEST_ASSERT_TRUE(receipt.delivered);
+  TEST_ASSERT_TRUE(routeMacEqual(child, receipt.destination));
+  relayReceiptSendResult(receipt, false);
+  TEST_ASSERT_TRUE(receipt.pending);
+  relayReceiptSendResult(receipt, true);
+  TEST_ASSERT_FALSE(receipt.pending);
+}
+
+void test_relay_queue_rejects_second_hop_and_counts_overflow() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  BeaconMsg beacon = {};
+  beacon.hdr = {BEACON_MAGIC, PROTO_VERSION, MSG_BEACON};
+  routeHeaderSet(beacon.hdr, primary, broadcast, 1);
+  RelayQueue queue;
+  relayQueueInit(queue);
+  TEST_ASSERT_FALSE(relayQueuePush(queue, (const uint8_t*)&beacon,
+                                   sizeof(beacon), broadcast, 100));
+  beacon.hdr.hops = 0;
+  for (uint8_t i = 0; i < RELAY_QUEUE_CAPACITY; i++) {
+    beacon.seq = i;
+    TEST_ASSERT_TRUE(relayQueuePush(queue, (const uint8_t*)&beacon,
+                                    sizeof(beacon), broadcast, 100 + i));
+  }
+  beacon.seq = RELAY_QUEUE_CAPACITY;
+  TEST_ASSERT_FALSE(relayQueuePush(queue, (const uint8_t*)&beacon,
+                                   sizeof(beacon), broadcast, 999));
+  TEST_ASSERT_EQUAL_UINT32(1, queue.dropped);
+}
+
+void test_roster_retains_role_and_immediate_route() {
+  const uint8_t child[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t relay[6] = {2, 2, 3, 4, 5, 6};
+  Roster roster;
+  rosterInit(roster);
+  TEST_ASSERT_TRUE(rosterUpsert(roster, child, 9, PROTO_VERSION, 123, 0,
+                                "0.8.0", 100, ROLE_PERFORMER, relay, 1));
+  TEST_ASSERT_EQUAL_UINT8(ROLE_PERFORMER, roster.entries[0].role);
+  TEST_ASSERT_EQUAL_UINT8(1, roster.entries[0].hops);
+  TEST_ASSERT_TRUE(routeMacEqual(roster.entries[0].via, relay));
+}
+
+void test_relay_peer_kind_keeps_upstream_out_of_rotating_child_lease() {
+  const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t child[6] = {2, 2, 3, 4, 5, 6};
+  const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  ParentRoute route = {};
+  memcpy(route.primary, primary, 6);
+  memcpy(route.parent, primary, 6);
+  route.valid = true;
+
+  TEST_ASSERT_EQUAL(RELAY_PEER_UPSTREAM,
+                    relayPeerKind(route, primary));
+  TEST_ASSERT_EQUAL(RELAY_PEER_DOWNSTREAM,
+                    relayPeerKind(route, child));
+  TEST_ASSERT_EQUAL(RELAY_PEER_BROADCAST,
+                    relayPeerKind(route, broadcast));
+}
+
 // ---- Runner ------------------------------------------------------------------
 
 int main(int, char**) {
@@ -2671,6 +2882,7 @@ int main(int, char**) {
   RUN_TEST(test_roster_overflow_drops_new_keeps_existing);
   RUN_TEST(test_registration_spreads_a_simultaneous_fleet_inside_radio_window);
   RUN_TEST(test_registration_holds_radio_only_through_slot_and_delivery);
+  RUN_TEST(test_registration_table_repair_releases_radio_hold_early);
   RUN_TEST(test_registration_delivery_failures_back_off_and_cap);
   RUN_TEST(test_performer_tx_serializes_same_destination_packet_types);
   RUN_TEST(test_performer_tx_ignores_wrong_callback_and_cancels_queue_failure);
@@ -2788,5 +3000,14 @@ int main(int, char**) {
   RUN_TEST(test_boot_timer_wake_without_day_flag_fails_awake);
   RUN_TEST(test_timer_wake_rendezvous_blocks_sleep_until_beacon_or_deadline);
   RUN_TEST(test_boot_serial_seed_expires_longest_grace);
+  RUN_TEST(test_route_header_v11_packets_fit_espnow);
+  RUN_TEST(test_performer_parent_is_sticky_then_fails_over_for_same_primary);
+  RUN_TEST(test_relay_learns_only_a_direct_primary);
+  RUN_TEST(test_primary_validates_direct_and_relayed_logical_origins);
+  RUN_TEST(test_relay_queue_collapses_copies_and_advances_beacon_time);
+  RUN_TEST(test_relay_queue_reports_end_to_end_activation_delivery_after_all_copies);
+  RUN_TEST(test_relay_queue_rejects_second_hop_and_counts_overflow);
+  RUN_TEST(test_roster_retains_role_and_immediate_route);
+  RUN_TEST(test_relay_peer_kind_keeps_upstream_out_of_rotating_child_lease);
   return UNITY_END();
 }

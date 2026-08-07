@@ -110,6 +110,113 @@ OTA_CHUNK_RETRYABLE_ERRORS = {
     "ota chunk offset mismatch",
     "ota chunk exceeds image size",
 }
+# Protocol v11 is the first routed wire format. A v10 primary cannot observe a
+# performer after that performer reboots into v11, so the one-time migration
+# must dispatch every staged leaf activation before rebooting the primary.
+ROUTED_PROTOCOL_VERSION = 11
+
+
+def ota_activation_order(
+    macs: set[str] | list[str],
+    lanterns: dict[str, dict[str, Any]],
+    *,
+    expected_macs: set[str] | None = None,
+    activated_macs: set[str] | None = None,
+) -> list[str]:
+    """Return eligible one-hop activations: all leaves before any relay."""
+    candidates = {str(mac) for mac in macs}
+    if expected_macs is not None and activated_macs is not None:
+        candidates -= {str(mac) for mac in activated_macs}
+        pending_leaves = {
+            str(mac)
+            for mac in expected_macs
+            if str(lanterns.get(str(mac), {}).get("role") or "performer").lower()
+            != "relay"
+        } - {str(mac) for mac in activated_macs}
+        if pending_leaves:
+            candidates = {
+                mac
+                for mac in candidates
+                if str(lanterns.get(mac, {}).get("role") or "performer").lower()
+                != "relay"
+            }
+    return sorted(
+        candidates,
+        key=lambda mac: (
+            1 if str(lanterns.get(str(mac), {}).get("role") or "performer").lower()
+            == "relay" else 0,
+            str(mac),
+        ),
+    )
+
+
+def routed_protocol_downgrade_nodes(
+    state: dict[str, Any],
+    target_proto: int,
+) -> list[str]:
+    """Return nodes that a pre-routing protocol would strand after reboot."""
+    conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
+    source_proto = int(conductor_firmware.get("proto") or 0)
+    if source_proto < ROUTED_PROTOCOL_VERSION or target_proto >= ROUTED_PROTOCOL_VERSION:
+        return []
+
+    blocked = []
+    for item in state.get("lanterns") or []:
+        mac = str(item.get("mac") or "")
+        if not mac:
+            continue
+        role_value = item.get("role")
+        route_value = item.get("route")
+        route_hops = route_value.get("hops") if isinstance(route_value, dict) else None
+        route_via = route_value.get("via") if isinstance(route_value, dict) else None
+        if (
+            not isinstance(role_value, str)
+            or role_value.lower() not in {"performer", "relay"}
+            or not isinstance(route_value, dict)
+            or isinstance(route_hops, bool)
+            or not isinstance(route_hops, int)
+            or route_hops not in {0, 1}
+            or not isinstance(route_via, str)
+            or not route_via
+        ):
+            blocked.append(mac)
+            continue
+        role = role_value.lower()
+        route = route_value
+        if role == "relay" or route_hops > 0:
+            blocked.append(mac)
+    return sorted(set(blocked))
+
+
+def reject_routed_protocol_downgrade(
+    state: dict[str, Any],
+    target_proto: int,
+) -> None:
+    blocked = routed_protocol_downgrade_nodes(state, target_proto)
+    if not blocked:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "cannot downgrade a routed field to a pre-relay protocol; "
+            "direct-connect relayed performers, remove relay roles, and resolve "
+            "every offline node with unknown route metadata first "
+            f"({', '.join(blocked)})"
+        ),
+    )
+
+
+def require_artifact_protocol(artifact: Any) -> int:
+    protocol = getattr(artifact, "protocol", None)
+    if isinstance(protocol, bool) or not isinstance(protocol, int):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "firmware artifact has unknown protocol metadata; select its "
+                "release again or upload it with the compiled wire protocol"
+            ),
+        )
+    return protocol
 
 
 def ota_reconcile_needed(
@@ -2370,13 +2477,22 @@ def create_app(
         return {"artifact": app.state.ota_store.current()}
 
     @app.put("/api/operations/ota-artifact")
-    async def stage_ota_artifact(request: Request, filename: str = "firmware.bin") -> dict[str, Any]:
+    async def stage_ota_artifact(
+        request: Request,
+        filename: str = "firmware.bin",
+        protocol: int = Query(..., ge=1, le=255),
+    ) -> dict[str, Any]:
         async with app.state.ota_start_lock:
             if app.state.ota_reserved or app.state.ota_install.get("phase") == "ready-to-activate":
                 raise HTTPException(status_code=423, detail="OTA install owns the conductor")
             data = await request.body()
             try:
-                artifact = await asyncio.to_thread(app.state.ota_store.stage, filename, data)
+                artifact = await asyncio.to_thread(
+                    app.state.ota_store.stage,
+                    filename,
+                    data,
+                    protocol=protocol,
+                )
             except OtaArtifactError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
             app.state.ota_install.update({"desired_artifact_sha256": artifact["sha256"]})
@@ -2418,7 +2534,13 @@ def create_app(
             if app.state.ota_reserved or app.state.ota_install.get("phase") == "ready-to-activate":
                 raise HTTPException(status_code=423, detail="OTA install owns the conductor")
             current = app.state.ota_store.current()
-            if current and current.get("source") == "release" and current.get("version") == request.version:
+            if (
+                current
+                and current.get("source") == "release"
+                and current.get("version") == request.version
+                and isinstance(current.get("protocol"), int)
+                and not isinstance(current.get("protocol"), bool)
+            ):
                 result = {"release": None, "artifact": current}
             else:
                 try:
@@ -2465,6 +2587,29 @@ def create_app(
         expected_lanterns = expected_ota_lanterns(state)
         expected_macs = set(str(mac) for mac in app.state.ota_install.get("target_macs") or [])
         conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
+        source_proto = int(conductor_firmware.get("proto") or 0)
+        target_proto = require_artifact_protocol(artifact)
+        reject_routed_protocol_downgrade(state, target_proto)
+        protocol_migration = bool(
+            app.state.ota_install.get("protocol_migration")
+            or (source_proto > 0 and source_proto != target_proto)
+        )
+        activation_attempted = {
+            str(mac)
+            for mac in app.state.ota_install.get("activation_attempted_macs") or []
+        }
+        activation_dispatched = {
+            str(mac)
+            for mac in app.state.ota_install.get("activation_dispatched_macs") or []
+        }
+        migration_activation_started = bool(
+            app.state.ota_install.get("migration_activation_started")
+        )
+        app.state.ota_install.update({
+            "source_proto": source_proto or None,
+            "target_proto": target_proto,
+            "protocol_migration": protocol_migration,
+        })
 
         def already_installed(item: dict[str, Any]) -> bool:
             firmware = item.get("firmware") or {}
@@ -2623,6 +2768,126 @@ def create_app(
                     status_code=503 if error in OTA_CHUNK_RETRYABLE_ERRORS else 400,
                     detail=error,
                 )
+
+        async def dispatch_protocol_migration_activation(mac: str) -> None:
+            """Dispatch once without accepting ambiguous status as proof.
+
+            The attempted marker documents the crash window, but only a
+            positive serial ACK proves that the primary accepted an activation
+            frame. If a restart loses that ACK, the migration remains pending
+            rather than risking reboot of the primary with a stranded node.
+            """
+            activation_attempted.add(mac)
+            app.state.ota_install.update({
+                "activation_attempted_macs": sorted(activation_attempted),
+            })
+            attempt = 0
+            while True:
+                ensure_retry_window()
+                attempt += 1
+                try:
+                    ack = await call("ota_activate", mac)
+                except SerialProtocolError as error:
+                    app.state.ota_install.update({
+                        "phase": "waiting",
+                        "last_retry": {"attempt": attempt, "error": str(error)},
+                    })
+                    await asyncio.sleep(min(5.0, 0.25 * attempt))
+                    continue
+                if ack.get("ok") is True:
+                    return
+                error = str(ack.get("error") or "OTA command failed")
+                if "send failed" in error:
+                    app.state.ota_install.update({
+                        "phase": "waiting",
+                        "last_retry": {"attempt": attempt, "error": error},
+                    })
+                    await asyncio.sleep(min(5.0, 0.25 * attempt))
+                    continue
+                raise HTTPException(status_code=400, detail=error)
+
+        async def recover_dispatched_protocol_migration() -> dict[str, Any] | None:
+            """Finish or truthfully fail a migration whose leaf cohort was sent.
+
+            Once every activation has a positive dispatch ACK, a retry must not
+            rediscover its cohort from the now-incompatible live field. The
+            durable target set remains authoritative through primary activation
+            and post-reboot identity verification.
+            """
+            if not (
+                protocol_migration
+                and migration_activation_started
+                and expected_macs
+                and activation_dispatched == expected_macs
+            ):
+                return None
+            if source_proto != target_proto:
+                app.state.ota_install.update({
+                    "phase": "activating-conductor",
+                    "active_mac": None,
+                })
+                try:
+                    ack = await call("ota_activate", None)
+                except SerialProtocolError as error:
+                    app.state.ota_install.update({
+                        "last_retry": {"attempt": 1, "error": str(error)},
+                    })
+                else:
+                    if ack.get("ok") is not True:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=str(
+                                ack.get("error") or "conductor activation failed"
+                            ),
+                        )
+            nodes = await infer_ota_complete_nodes(
+                artifact.size,
+                artifact.crc32,
+                expected_macs,
+            )
+            verified_macs = {str(node["mac"]) for node in nodes}
+            if verified_macs != expected_macs:
+                expected = {
+                    mac: all_lanterns.get(mac, {"mac": mac, "label": mac})
+                    for mac in expected_macs
+                }
+                nodes = append_unverified_ota_failures(
+                    nodes,
+                    expected,
+                    verified_macs,
+                )
+                app.state.ota_install.update({"nodes": nodes})
+                raise HTTPException(
+                    status_code=503,
+                    detail="ota post-reboot verification failed",
+                )
+            await call_until_ok("set_ota_mode", False)
+            app.state.ota_install.update({
+                "running": False,
+                "complete": True,
+                "phase": "complete",
+                "error": None,
+                "message": "firmware updated across the online field",
+                "nodes": nodes,
+                "completed_at": time.time(),
+                "installed_artifact_sha256": artifact.sha256,
+            })
+            result = {
+                "ok": True,
+                "message": "firmware updated across the online field",
+                "artifact": artifact.as_dict(),
+            }
+            await publish({
+                "type": "ack",
+                "action": "ota-install",
+                "artifact": artifact.as_dict(),
+                "ack": {**result, "nodes": nodes},
+            })
+            return result
+
+        recovered_migration = await recover_dispatched_protocol_migration()
+        if recovered_migration is not None:
+            return recovered_migration
 
         @lru_cache(maxsize=None)
         def checkpoint_crc(offset: int) -> int:
@@ -2871,15 +3136,24 @@ def create_app(
             staged = current.get("staged") is True
             written = int(current.get("written") or 0)
             resumable = (
-                (active or staged)
+                not bool(app.state.ota_install.get("refresh_cohort"))
+                and (active or staged)
                 and int(current.get("size") or 0) == artifact.size
                 and 0 <= written <= artifact.size
                 and int(current.get("crc32") or 0) == checkpoint_crc(written)
             )
             if not resumable:
+                if migration_activation_started:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "cannot resume protocol migration staging after activation began; "
+                            "keep the current primary online and retry recovery"
+                        ),
+                    )
                 ack = await call_until_ok("ota_begin", artifact.size, artifact.crc32)
                 reported_targets = {str(mac) for mac in ack.get("targets") or []}
-                expected_macs = reported_targets or set(expected_lanterns)
+                expected_macs = expected_macs or reported_targets or set(expected_lanterns)
                 # ota_begin broadcasts to the frozen cohort. Even performers
                 # whose live identity already matched now own a fresh writer
                 # and must receive the image and activation with everyone else.
@@ -2890,9 +3164,15 @@ def create_app(
                     delivery_confirmed_offsets.pop(mac, None)
                 app.state.ota_install.update({
                     "activated_macs": [],
+                    "activation_attempted_macs": [],
+                    "activation_dispatched_macs": [],
+                    "migration_activation_started": False,
                     "delivery_confirmed_macs": [],
                     "delivery_confirmed_offsets": {},
                 })
+                activation_attempted.clear()
+                activation_dispatched.clear()
+                migration_activation_started = False
                 written = 0
                 staged = False
             else:
@@ -2994,9 +3274,10 @@ def create_app(
                 ):
                     await repair_checkpoint(offset)
 
-            # Finalize and activate every performer that already has the full
-            # image before spending time repairing stragglers. A slow board
-            # must never hold a verified board in the staged state.
+            # Same-protocol updates activate each verified node independently.
+            # The v10-to-v11 migration is different: an activated v11 node is
+            # invisible to the still-v10 primary, so every target must reach
+            # the staged barrier before any activation is dispatched.
             nodes: list[dict[str, Any]] = []
             while True:
                 app.state.ota_install.update({"phase": "staging", "repairing_macs": []})
@@ -3024,8 +3305,43 @@ def create_app(
                     "activated_macs": sorted(activated),
                 })
 
-                if activate:
-                    for mac in sorted(staged_macs - activated):
+                if activate and protocol_migration:
+                    barrier_reached = staged_macs == expected_macs
+                    if barrier_reached and not migration_activation_started:
+                        migration_activation_started = True
+                        app.state.ota_install.update({
+                            "migration_activation_started": True,
+                            "phase": "activating-protocol-migration",
+                        })
+                    if migration_activation_started:
+                        for mac in ota_activation_order(
+                            expected_macs - activation_dispatched,
+                            expected_lanterns,
+                        ):
+                            ensure_retry_window()
+                            app.state.ota_install.update({
+                                "phase": "activating-protocol-migration",
+                                "active_mac": mac,
+                                "activation_dispatched_macs": sorted(
+                                    activation_dispatched
+                                ),
+                            })
+                            await dispatch_protocol_migration_activation(mac)
+                            activation_dispatched.add(mac)
+                            app.state.ota_install.update({
+                                "activation_dispatched_macs": sorted(
+                                    activation_dispatched
+                                ),
+                            })
+                        if activation_dispatched == expected_macs:
+                            break
+                elif activate:
+                    for mac in ota_activation_order(
+                        staged_macs - activated,
+                        expected_lanterns,
+                        expected_macs=expected_macs,
+                        activated_macs=activated,
+                    ):
                         while mac not in activated:
                             ensure_retry_window()
                             app.state.ota_install.update({
@@ -3208,6 +3524,10 @@ def create_app(
                         raise HTTPException(status_code=409, detail="OTA install already running")
                     state = await asyncio.to_thread(app.state.conductor.snapshot)
                     state = enrich_state(state)
+                    reject_routed_protocol_downgrade(
+                        state,
+                        require_artifact_protocol(artifact),
+                    )
                     ota = state.get("ota") or {}
                     if not ota_ready_for_install(state):
                         blockers = ", ".join(ota.get("blocked") or ["field is not OTA-ready"])
@@ -3246,6 +3566,16 @@ def create_app(
             same_artifact_retry = (
                 app.state.ota_install.get("sha256") == artifact.sha256
             )
+            completed_same_artifact = bool(
+                same_artifact_retry
+                and app.state.ota_install.get("complete") is True
+            )
+            preserve_migration_recovery = bool(
+                same_artifact_retry
+                and app.state.ota_install.get("complete") is not True
+                and app.state.ota_install.get("protocol_migration") is True
+                and app.state.ota_install.get("migration_activation_started") is True
+            )
             preserved_activated = (
                 sorted(
                     str(mac)
@@ -3260,6 +3590,34 @@ def create_app(
                     for mac in app.state.ota_install.get("delivery_confirmed_macs") or []
                 )
                 if same_artifact_retry
+                else []
+            )
+            preserved_activation_attempted = (
+                sorted(
+                    str(mac)
+                    for mac in app.state.ota_install.get(
+                        "activation_attempted_macs"
+                    ) or []
+                )
+                if preserve_migration_recovery
+                else []
+            )
+            preserved_activation_dispatched = (
+                sorted(
+                    str(mac)
+                    for mac in app.state.ota_install.get(
+                        "activation_dispatched_macs"
+                    ) or []
+                )
+                if preserve_migration_recovery
+                else []
+            )
+            preserved_targets = (
+                sorted(
+                    str(mac)
+                    for mac in app.state.ota_install.get("target_macs") or []
+                )
+                if preserve_migration_recovery
                 else []
             )
             previous_delivery_offsets = dict(
@@ -3299,6 +3657,22 @@ def create_app(
                 "retry_deadline_at": started_at + OTA_RETRY_TIMEOUT_S,
                 "automatic": automatic,
                 "activated_macs": preserved_activated,
+                "activation_attempted_macs": preserved_activation_attempted,
+                "activation_dispatched_macs": preserved_activation_dispatched,
+                "target_macs": preserved_targets,
+                "target_count": len(preserved_targets),
+                "migration_activation_started": bool(
+                    preserve_migration_recovery
+                    and app.state.ota_install.get("migration_activation_started")
+                ),
+                "protocol_migration": bool(
+                    preserve_migration_recovery
+                    and app.state.ota_install.get("protocol_migration")
+                ),
+                # A completed conductor may retain a staged local image but no
+                # performer cohort. Force ota_begin so newly returned nodes are
+                # frozen into a fresh cohort instead of resuming that residue.
+                "refresh_cohort": completed_same_artifact,
                 "delivery_confirmed_macs": preserved_delivery,
                 "delivery_confirmed_offsets": dict(
                     sorted(preserved_delivery_offsets.items())
@@ -3337,6 +3711,11 @@ def create_app(
             try:
                 async with app.state.conductor_lock:
                     state = await asyncio.to_thread(app.state.conductor.snapshot)
+                    state = enrich_state(state)
+                    reject_routed_protocol_downgrade(
+                        state,
+                        require_artifact_protocol(artifact),
+                    )
                     app.state.ota_reserved = True
             except Exception as error:
                 if operation_lock is not None:

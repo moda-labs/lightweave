@@ -20,7 +20,7 @@ pio run -e devkitc -t upload --upload-port /dev/cu.usbserial-XXXX
 
 # 4. Provision + watch it run
 pio device monitor -p /dev/cu.usbserial-XXXX -b 115200   # Ctrl-A then K to quit
-#   then type:  role performer   (or 'role conductor' for the one conductor)
+#   then type:  role performer   (or `role conductor` / `role relay`)
 #               id <unused-positive-id> / pos 0 0   as needed
 ```
 
@@ -30,7 +30,7 @@ label. Manual `id` assignment is a fallback only; first verify the number is not
 already present in the conductor inventory or the watcher's `devices.json`.
 
 Every node runs the **same image**; role lives in NVS (default performer) and is
-set over serial with `role conductor|performer`. A healthy performer prints
+set over serial with `role conductor|performer|relay`. A healthy performer prints
 `LOCKED ... gaps=0` within ~1 s; a conductor prints `[conductor] ... seq=` climbing
 once per second.
 
@@ -75,16 +75,16 @@ Consequences:
   reconnected, you can flash the same one twice and leave another untouched
   (this is how we ended up with a board still on factory firmware).
 
-### 3. Exactly ONE conductor
-Role is a runtime NVS value (set over serial with `role conductor|performer`),
-not a build flag — every node runs the same image. There must be **only one
-conductor** powered at a time.
+### 3. Exactly ONE primary conductor
+Role is a runtime NVS value (set over serial with
+`role conductor|performer|relay`), not a build flag. There must be **only one
+conductor** powered at a time. Relay boards extend that conductor and never
+originate a separate clock.
 
-Symptom of two conductors: a performer shows **`gaps ≈ rx`** (almost every
-beacon counted as a gap) and its `offset`/`seq` jump between two very different
-values — it's ping-ponging between two clocks. Fix: power down the extra
-conductor. (With one conductor, a locked performer holds `gaps=0` and a steady
-offset.)
+Protocol v11 performers keep the first logical conductor identity they accept,
+so a second conductor no longer causes rapid clock ping-pong. It is still unsafe:
+different nodes may cold-boot onto different primaries and split the field into
+two authorities. Fix the provisioning error and power down the extra conductor.
 
 ### 3.5 Don't leave a USB power meter (ET900) inline while flashing/debugging
 A pass-through USB power meter in the cable between the Mac and the board will
@@ -233,8 +233,9 @@ and a flashed board still blinks its GPIO2 LED.
 | `native` | host unit tests (`pio test -e native`) |
 
 One field image across both board types; **role is set at runtime** over serial
-(`role conductor|performer`, default performer). Multi-board setup = flash the
-same field image everywhere, then set exactly one node to `role conductor`.
+(`role conductor|performer|relay`, default performer). Multi-board setup = flash
+the same field image everywhere, set exactly one node to `role conductor`, and
+set only the planned always-on coverage nodes to `role relay`.
 
 **Bench vs field:** `field` is the one artifact used on both board types, with
 the onboard heartbeat LED compiled out — inside an opaque lantern it is

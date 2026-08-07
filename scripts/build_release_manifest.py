@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import zlib
 from datetime import datetime, timezone
@@ -15,6 +16,18 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from control.releases import load_release_catalog, parse_release_manifest
+
+
+def firmware_protocol() -> int:
+    source = (REPO_ROOT / "include" / "beacon.h").read_text(encoding="utf-8")
+    match = re.search(
+        r"^static constexpr uint8_t PROTO_VERSION = ([0-9]+);$",
+        source,
+        re.MULTILINE,
+    )
+    if match is None:
+        raise ValueError("include/beacon.h does not define PROTO_VERSION")
+    return int(match.group(1))
 
 
 def build_manifest(
@@ -51,6 +64,7 @@ def build_manifest(
             "sha256": hashlib.sha256(firmware_bytes).hexdigest(),
             "size": len(firmware_bytes),
             "crc32": zlib.crc32(firmware_bytes) & 0xFFFFFFFF,
+            "protocol": firmware_protocol(),
         },
         "serial_flash": {
             "filename": serial_flash.name,

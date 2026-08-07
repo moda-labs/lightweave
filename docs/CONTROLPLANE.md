@@ -79,7 +79,7 @@ Snapshot shape:
     "sync": "locked",
     "firmware": {
       "version": "0.3.0",
-      "proto": 10,
+      "proto": 11,
       "build_id": 3225866068,
       "build_label": "c046bf54",
       "dirty": false
@@ -139,8 +139,10 @@ Snapshot shape:
       "group_id": 1,
       "group": "Group 2",
       "led_count": 16,
+      "role": "performer",
+      "route": {"hops": 1, "via": "68:FE:71:A6:30:84"},
       "attention": "None",
-      "firmware": {"version": "0.3.0", "proto": 10, "build_id": 3225866068, "build_label": "c046bf54", "dirty": false},
+      "firmware": {"version": "0.3.0", "proto": 11, "build_id": 3225866068, "build_label": "c046bf54", "dirty": false},
       "power": {"wh": 0.38, "avg_w": 0.71, "last_report_label": "4s ago"},
       "updated_at": 1720123456.0
     }
@@ -157,6 +159,23 @@ Snapshot shape:
   "events": [{"ts": 1720123456.0, "message": "mock conductor started"}]
 }
 ```
+
+`lanterns[].role` is `performer` or `relay` when a fresh registration exists and
+`null` for an offline or missing row. `route.hops` is zero for a direct radio
+path and one behind a relay. During same-protocol OTA the server may activate
+verified performers independently, but it keeps every relay online until all
+non-relay targets have activated. It then activates relays and finally the
+USB-attached primary conductor. For the v10-to-v11 transition, all nodes must
+first reach the staged barrier; the control plane dispatches every activation
+while the v10 primary can still address them, reboots the primary last, and
+verifies the whole field only after v11 connectivity returns.
+The reverse transition is permitted only when every node is direct and no board
+has the relay role. A pre-v11 artifact is rejected before activation if the live
+inventory contains a relay, a one-hop route, or an offline row whose last route
+is unknown, because that firmware cannot preserve an unverified topology after
+reboot. Routed activations return success only after the relay drains the
+targeted packet and acknowledges downstream delivery; this keeps relay reboot
+ordering safe during later routed-protocol migrations.
 
 The `patterns` array contains all eight group configs. The singular `pattern`
 field remains a Group 1 compatibility view for older clients.
@@ -260,8 +279,12 @@ The map renders only positioned lanterns.
 - `POST /api/operations/ota-mode` with `{"enabled":true}` or
   `{"enabled":false}`.
 - `GET /api/operations/ota-artifact` -> current staged firmware metadata.
-- `PUT /api/operations/ota-artifact?filename=firmware.bin` with raw
-  `application/octet-stream` firmware bytes -> stage a `.bin` artifact.
+- `PUT /api/operations/ota-artifact?filename=firmware.bin&protocol=11` with raw
+  `application/octet-stream` firmware bytes -> stage a `.bin` artifact. The
+  protocol is required for every manual binary because arbitrary bytes cannot
+  be inspected safely for their wire version. The browser asks for it before
+  upload. Published release artifacts carry this value in their immutable
+  manifest instead.
 - `PUT /api/operations/ota-auto-update` with `{"enabled":true}` or
   `{"enabled":false}` -> persist automatic companion-firmware reconciliation.
   Disabling prevents new automatic jobs and requests a safe pause of an active

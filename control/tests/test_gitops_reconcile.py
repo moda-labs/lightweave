@@ -57,6 +57,7 @@ def release_manifest(data: bytes = b"firmware") -> dict:
             "sha256": hashlib.sha256(data).hexdigest(),
             "size": len(data),
             "crc32": zlib.crc32(data) & 0xFFFFFFFF,
+            "protocol": 6,
         },
         "serial_flash": {
             "filename": f"lightweave-serial-flash-{RELEASE}.zip",

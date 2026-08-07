@@ -1159,6 +1159,7 @@ def test_build_manifest_binds_code_notes_and_firmware(tmp_path: Path) -> None:
     assert isinstance(document["notes"]["firmware_changes"], list)
     assert document["notes"]["control_changes"] or document["notes"]["firmware_changes"]
     assert document["firmware"]["sha256"] == hashlib.sha256(b"field firmware").hexdigest()
+    assert document["firmware"]["protocol"] == 11
     assert document["serial_flash"]["sha256"] == hashlib.sha256(b"serial bundle").hexdigest()
 
 

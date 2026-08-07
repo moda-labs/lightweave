@@ -1259,7 +1259,11 @@ function renderOta() {
   renderOtaProgress();
   renderOtaNodes();
   const fileInput = $("#ota-file");
+  const protocolInput = $("#ota-file-protocol");
+  const uploadButton = $('[data-action="upload-ota-artifact"]');
   fileInput.disabled = installing || readyToActivate || otaArtifactUploading;
+  protocolInput.disabled = installing || readyToActivate || otaArtifactUploading;
+  uploadButton.disabled = installing || readyToActivate || otaArtifactUploading || !fileInput.files?.length;
   const installButton = $('[data-action="install-ota"]');
   installButton.textContent = readyToActivate
     ? "Install firmware on field"
@@ -2573,11 +2577,16 @@ async function runAction(action) {
     if (action === "upload-ota-artifact") {
       const file = $("#ota-file")?.files?.[0];
       if (!file) return;
+      const protocol = Number($("#ota-file-protocol")?.value);
+      if (!Number.isInteger(protocol) || protocol < 1 || protocol > 255) {
+        toast("enter the firmware wire protocol before uploading", true);
+        return;
+      }
       otaArtifactUploading = true;
       renderOta();
       toast("uploading firmware file to control plane");
       try {
-        const ack = await apiBinary(`/api/operations/ota-artifact?filename=${encodeURIComponent(file.name)}`, file);
+        const ack = await apiBinary(`/api/operations/ota-artifact?filename=${encodeURIComponent(file.name)}&protocol=${protocol}`, file);
         otaArtifact = ack.artifact;
         toast(ack.message);
       } finally {
@@ -2837,7 +2846,7 @@ $$("[data-action]").forEach((button) => {
   button.addEventListener("click", () => runAction(button.dataset.action));
 });
 
-$("#ota-file")?.addEventListener("change", () => runAction("upload-ota-artifact"));
+$("#ota-file")?.addEventListener("change", renderOta);
 $("#calibration-files")?.addEventListener("change", () => {
   calibrationProposal = null;
   calibrationSaveStatus = "";

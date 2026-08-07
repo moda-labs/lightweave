@@ -337,6 +337,7 @@ def test_manual_install_authorizes_unknown_board_and_returns_label_instruction(
         unknown = wait_for(
             client,
             lambda value: value["jobs"]
+            and value["jobs"][0]["state"] == "queued"
             and value["jobs"][0]["update_status"] == "unknown",
         )
         assert factory_values == []

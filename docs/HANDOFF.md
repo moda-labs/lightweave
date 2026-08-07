@@ -8,8 +8,36 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**170 pass**) is green; **430 control tests** are green; all three
+(**180 pass**) is green; **446 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+
+Latest in this feature branch (2026-08-06): **one-hop conductor relays are
+code-complete; hardware verification is pending.** Protocol v11 gives every
+packet a logical origin, logical destination, and hop count. The Pi-attached
+primary remains the only authority. A board provisioned with `role relay` learns
+only a direct primary, stays radio-on, forwards broadcasts downstream and child
+unicasts upstream, and never forwards a hop-one packet or promotes itself.
+Performers keep a sticky direct/relay parent for the same primary and fail over
+only after a 12-second stale timeout. The primary roster retains node role and
+next hop, so targeted OTA repair and activation traverse relays without losing
+performer identity. After REGISTER delivery, a duty-cycled child holds its radio
+for the bounded table-repair return path and releases it early when its row
+arrives. Rolling OTA activates verified performers independently,
+but no relay is eligible to reboot until every non-relay target has activated;
+the primary waits for each relay to acknowledge downstream activation delivery,
+then relays activate and the conductor remains last. Native routing tests,
+control activation-order tests, and device builds cover the software boundary.
+Field proof still needs one primary, one relay, one direct performer, and one
+performer shielded from the primary.
+
+**Protocol-v11 rollout seam:** v10 and v11 reject each other. The control plane
+detects a v10 primary and changes activation semantics for this one transition:
+it first stages and verifies the entire reachable cohort, dispatches every
+performer activation while the v10 primary can still address them, activates
+the primary last, and verifies the field only after v11 registrations return.
+Do not manually switch the primary first. Provision/direct-flash new relay
+boards after that coordinated migration. Any performer not reachable during
+the final v10 transfer needs USB provisioning before it can join the v11 field.
 
 Latest in this branch (2026-08-06): **release v0.8.0 packages the running
 control plane and field firmware as one release by default.** Its checksum-verified companion
@@ -621,7 +649,7 @@ revised cost roll-up.
   Protocol v8 extends that same reply to restore `#2` automatically.
 - **GPIO2 heartbeat** blinks on the synced beat (zero-wiring sync check).
 - **Serial commands:** `info`, `roster` / `table` / `assign` / `group` / `leds` / `forget`
-  (conductor), `role conductor|performer`, `id <n>`, `pos <x> <y>`,
+  (conductor), `role conductor|performer|relay`, `id <n>`, `pos <x> <y>`,
   `pattern <n>`, `bri <n>`, `param <i> <v>`, `powersave on|off`,
   `dusk on|off` (performer; daytime deep-sleep, default off),
   `wake on|off` (conductor; FIELD_AWAKE beacon flag, summons dusk-sleeping
@@ -631,18 +659,20 @@ revised cost roll-up.
   serial input** — hit Enter in a monitor to revive a quiet node (see
   FLASHING.md). Exception: the conductor's `[power]` telemetry log is
   deliberately ungated (it's the overnight audit trail).
-- **Wire protocol is v10** (`PROTO_VERSION 10`; `MSG_TABLE` includes permanent
+- **Wire protocol is v11** (`PROTO_VERSION 11`; the common header preserves
+  logical origin/destination across at most one relay hop; REGISTER reports role
+  and the primary retains each node's immediate next hop. `MSG_TABLE` includes permanent
   board ID, optional-position flags, group ID, and 16/32/64 LED count; BEACON includes eight group
   `PatternConfig`s and runtime `PowerPolicy` with UTC epoch seconds. Six bytes
   from the retired v7 keepalive experiment remain reserved to preserve the v10
-  layout; REGISTER includes board/group/LED-count identity
+  layout; REGISTER includes board/group/LED-count/role identity
   plus release version, protocol, build id, and dirty flag
   for OTA version consistency; OTA begin/chunk/end messages carry
   the staged firmware image during manual maintenance updates).
   Protocol-mismatched nodes silently reject each other — **flash every board
   together**. A same-protocol stale version/build is reported as
   `Firmware mismatch`.
-- **Host unit tests** (`test/test_logic/`, 155) and control tests (314): sync
+- **Host unit tests** (`test/test_logic/`, 180) and control tests (446): sync
   core, pattern math, roster, layout table, radio duty-cycle, nap scheduler (Stage B), dusk detector +
   fail-awake gates (Lever 2), pattern static-ids + boot-guard, glow warm-hue
   color, power telemetry (conversions / plausibility gate / report scheduler),
@@ -767,6 +797,7 @@ reset` then verify E climbs from 0.
 **Code layout:** `include/` — `config.h` (pins/constants), `beacon.h` (wire
 packets), `sync.h` (clock core, tested), `pattern_math.h` (pure pattern fns,
 tested), `patterns.h` (LED binding), `roster.h` + `table.h` (pure, tested),
+`relay.h` (one-hop authority, parent, validation, and queue logic, pure and tested),
 `table_wire.h` (table chunking / validation / broadcast cadence, pure, tested),
 `powersave.h` (radio duty-cycle schedule, pure, tested), `powermon.h` (INA228
 telemetry logic, pure, tested), `macaddr.h` (MAC text parse/format, pure,

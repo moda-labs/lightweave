@@ -30,12 +30,16 @@ scope (it would break resilience and the power budget).
 ## 2. Roles **[done]**
 
 Every board runs **one identical firmware image**. Role is a runtime value in NVS
-(default **performer**), set once over serial (`role conductor|performer`). One
-conductor per field; it is typically a **ring-less, headless timekeeper** so all
+(default **performer**), set once over serial
+(`role conductor|performer|relay`). One primary conductor per field; it is
+typically a **ring-less, headless timekeeper** so all
 visible rings are on performers.
 
-- Conductor: broadcasts the clock beacon + group pattern configs; renders against its own
+- Conductor: the only authority; broadcasts the clock beacon + group pattern configs; renders against its own
   clock (if it has a ring).
+- Relay: an always-on, one-hop transport node. It follows only a direct primary,
+  forwards primary traffic downstream and performer replies upstream, renders
+  against the primary clock if it has LEDs, and never self-promotes.
 - Performer: locks an offset to the conductor's clock; renders against synced time;
   free-runs on missed beacons.
 
@@ -227,9 +231,11 @@ not remove its inventory row or change its number.
   a stale group or LED count** gets an immediate **single-row reply** (28 B). The row reply
   is the delivery guarantee under radio duty-cycling: a
   REGISTER is the one moment the conductor provably knows that node's radio is
-  on (TX is gated on radio-up), so the reply lands inside the sender's open
-  listen window instead of playing the ~13%-per-broadcast lottery, and a missed
-  reply is retried for free by the node's next REGISTER (10–12 s). Steady state
+  on (TX is gated on radio-up). After radio delivery, the sender holds that
+  listen window for at most another 750 ms and releases it as soon as its row
+  arrives. This covers the primary→relay→child return queue instead of playing
+  the ~13%-per-broadcast lottery; a missed reply is retried for free by the
+  node's next REGISTER (10–12 s). Steady state
   (all nodes known + provisioned + profile-matched) costs zero table traffic beyond
   the backstop.
 
@@ -412,20 +418,28 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
 
 ## 7. Wire protocol **[partly done]**
 
-- **[done]** Common header `MsgHeader {uint32 magic; uint8 version; uint8 type;}`
-  on every packet; receiver validates magic+version then dispatches on `type`.
+- **[done]** Protocol v11 common header
+  `MsgHeader {magic, version, type, origin, destination, hops}` on every packet.
+  Receivers validate the logical addresses and one-hop limit before dispatching
+  on `type`. A relay increments `hops` but preserves logical origin and
+  destination, so normal and OTA traffic share one routing boundary.
   Types: `MSG_BEACON` (hot path), `MSG_REGISTER`, `MSG_TABLE` (live);
   `MSG_ROSTER`/`MSG_ACK` reserved. `PROTO_VERSION` is rejected on mismatch.
 - **[done]** `MSG_BEACON` (clock + pattern) broadcast on a fixed channel to
   `FF:FF:FF:FF:FF:FF`, `WIFI_STA`. The hot path (sync.h) reads `epoch_us`+`seq`.
-- **[done]** Bidirectional ESP-NOW: a performer learns the conductor's MAC from the
-  recv-info, adds it as a peer, and unicasts
-  `MSG_REGISTER {mac, id, group_id, led_count, fw, build, dirty, version}` every
+- **[done]** Bidirectional ESP-NOW: a performer learns one logical primary and a
+  sticky physical parent from beacons, adds the parent as a peer, and unicasts
+  `MSG_REGISTER {mac, id, group_id, led_count, role, fw, build, dirty, version}` every
   10–12 s; the conductor builds a MAC-keyed roster (`roster` serial command).
+  A performer may change physical parent only after 12 seconds without a beacon,
+  and only to another direct or one-hop path for the same primary. A relay learns
+  only a hop-zero primary, which prevents relay chains by construction. The
+  roster retains role, hop count, and immediate next hop for targeted replies.
   Shared radio sleep windows do not create a return-traffic herd: after a window
   opens, each expired performer selects a stable MAC-derived slot across 500 ms,
-  holds the radio only through its own queued delivery, and uses 100 ms–2 s
-  bounded backoff when the ESP-NOW unicast delivery callback fails. Performer
+  holds the radio through delivery plus a bounded 750 ms table-repair return
+  window (released early by its row), and uses 100 ms–2 s bounded backoff when
+  the ESP-NOW unicast delivery callback fails. Performer
   unicasts are serialized by purpose so a power or OTA-status callback cannot be
   mistaken for REGISTER completion. `fw` is wire
   compatibility (`PROTO_VERSION`); `version` + `build` + `dirty` are the OTA
@@ -447,8 +461,8 @@ need a manual `pos` fallback. (Optional periodic all-flash re-anchors long runs.
   status with offset and prefix CRC, and the API filters stale statuses.
 - **[done]** `MSG_OTA_QUERY` and `MSG_OTA_ACTIVATE`: the conductor requests
   deterministically time-slotted status replies and activates a fully staged
-  performer. These additive v10 message types preserve compatibility with
-  already-flashed v10 receivers, which ignore unknown types.
+  performer. These message types were additive in v10; protocol v11 routes them
+  without changing their OTA payload semantics.
 - **[planned]** `MSG_ACK` + richer machine Pi↔conductor serial (lands with the Pi
   UI).
 - Time base: 64-bit `esp_timer` microseconds throughout (no 32-bit `millis` wrap).
@@ -496,7 +510,10 @@ full-size/full-CRC staged; there is no fleet-wide verification barrier. The
 normal UI and automatic reconciler use one operation: upload, verify, activate
 each ready performer, verify its re-registration, keep repairing laggards, then
 activate the conductor last. One performer's failure therefore cannot block a
-different verified performer. The stage-only and explicit-activation API
+different verified performer. With relays, verified leaf performers still
+activate independently, but every relay remains online until all non-relay
+targets have activated; relays then activate, followed by the conductor. The
+stage-only and explicit-activation API
 routes remain recovery tools. The durable install journal and checksum-pinned
 artifact survive browser disconnects and service restarts. The control plane
 recognizes already-installed members of a partially migrated legacy cohort so
@@ -584,6 +601,40 @@ force-sleep bit, Wake field sets force-awake, and Follow schedule clears both.
 old photodiode/dusk path remains off by default as a fallback/experiment; it is
 not required for the main installation behavior.
 
+### 8.3 One-hop relay coverage **[done; hardware verification pending]**
+
+Protocol v11 separates logical packet identity from the immediate ESP-NOW radio
+sender. Performers in overlapping primary/relay coverage keep one parent while
+it remains fresh, preventing route flapping. If that parent disappears, they may
+select another direct or one-hop path carrying the same primary identity after a
+12-second timeout. They never adopt a different conductor identity without a
+reboot or explicit reprovisioning.
+
+Relays stay radio-on and ignore the performer sleep schedule. Forwarding is
+queued outside the receive callback, bounded to one in-flight send and 16 queued
+logical packets, and never forwards a packet already at hop one. Repeated OTA
+copies collapse into a bounded repeat count. A forwarded beacon advances its
+epoch by queue residence time so relay-zone clocks do not inherit a fixed relay
+delay. If upstream disappears, the relay and its performers continue rendering
+the last show state; the relay does not become a conductor.
+
+The primary learns each online node's immediate next hop from REGISTER. Targeted
+OTA repairs and activations use that next hop while retaining the performer as
+logical destination. Offset, prefix CRC, and full-image CRC remain the durable
+staging proof. Activation adds one stronger relay boundary: after every queued
+copy finishes downstream, the relay returns `MSG_ACK` for that logical child.
+The primary's serial activation call does not succeed until that receipt arrives,
+so a protocol migration cannot reboot a relay while a child's activation is
+still queued. Post-reboot REGISTER remains the final installed-image proof.
+
+The v10-to-v11 rollout is a coordinated protocol migration, not the ordinary
+same-protocol rolling activation. Because a v11 performer becomes invisible to
+the still-v10 primary as soon as it reboots, the control plane requires every
+reachable node to reach the staged barrier, dispatches all performer
+activations through v10, then activates the primary. Only the post-reboot v11
+firmware identities count as completion. Durable attempted/dispatched markers
+make this sequence resumable across a control-service restart.
+
 ## 9. Milestone mapping
 
 | Milestone | Status |
@@ -600,6 +651,7 @@ not required for the main installation behavior.
 | 3 — power management (radio duty-cycle, schedule deep-sleep, optional LDR fallback, INA228 energy monitor) | 🛠 in progress — Lever 1 Stage A (performer radio duty-cycle) ✅ done + host-tested + hardware-verified + measured (85→~55 mA @ 12V); Stage B (CPU light-sleep between work, `napsched.h`) ✅ hardware-verified on bench 2026-07-03 (power re-measure owed); schedule-driven deep sleep ✅ code-complete + host-tested + UI/API built, hardware verification owed; photodiode dusk sensing is now optional/fallback; INA228 instrumentation (§4.3) ✅ firmware done + host-tested (`powermon.h`, `MSG_POWER`), awaiting the chip |
 | 4 — battery power + ET900 draw measurement (go/no-go) | 📐 planned |
 | 5 — OTA + enclosure | 🛠 OTA transfer/recovery done and 3-board bench-verified; enclosure/RF still planned |
+| One-hop relay coverage | ✅ code-complete + host/control tested; field hardware verification pending |
 
 ## 10. Resolved & open decisions
 

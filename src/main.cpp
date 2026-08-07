@@ -43,6 +43,7 @@
 #include "powersave.h"
 #include "performer_tx.h"
 #include "registration.h"
+#include "relay.h"
 #include "roster.h"
 #include "serial_json.h"
 #include "sync.h"
@@ -155,11 +156,23 @@ static OtaStatusTable g_state_ota_status_snapshot;
 static const RegistrationConfig REGISTER_CONFIG = {
     REGISTER_INTERVAL_US, REGISTER_INTERVAL_JITTER_US,
     REGISTER_SLOT_SPREAD_US, REGISTER_RETRY_BASE_US,
-    REGISTER_RETRY_MAX_US};
+    REGISTER_RETRY_MAX_US, REGISTER_REPAIR_WAIT_US};
 static RegistrationSchedule g_register_schedule;
 static PerformerTxState      g_performer_tx;
 static portMUX_TYPE g_register_mux = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE g_performer_tx_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// A relay copies packets out of the Wi-Fi callback into this bounded queue, then
+// performs all peer management and sends from loop(). One send is in flight at
+// a time so the ESP-NOW callback remains attributable.
+static RelayQueue     g_relay_queue;
+static RelayReceipt   g_relay_receipt;
+static OtaPeerLease   g_relay_peer = {{0}, false};
+static bool           g_relay_send_pending = false;
+static uint8_t        g_relay_send_mac[6] = {0};
+static portMUX_TYPE   g_relay_mux = portMUX_INITIALIZER_UNLOCKED;
+static OtaSendAck      g_ota_relay_delivery_ack = {{0}, OTA_SEND_ACK_IDLE};
+static constexpr uint16_t OTA_RELAY_DELIVERY_TIMEOUT_MS = 3000;
 
 static bool otaMaintenanceActive(int64_t t);
 static void otaWriteAbort();
@@ -180,6 +193,8 @@ static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
 static bool otaUnicastBegin(const uint8_t mac[6], uint32_t size,
                             uint32_t crc32);
 static bool otaUnicastActivate(const uint8_t mac[6]);
+static void maybeRelayDeliveryReceipt();
+static void drainRelayQueue();
 
 static void onSend(const uint8_t* mac, esp_now_send_status_t status) {
   bool delivered = status == ESP_NOW_SEND_SUCCESS;
@@ -190,10 +205,29 @@ static void onSend(const uint8_t* mac, esp_now_send_status_t status) {
     return;
   }
 
+  if (g_role == ROLE_RELAY) {
+    bool relay_completion = false;
+    portENTER_CRITICAL(&g_relay_mux);
+    if (g_relay_send_pending && routeMacEqual(g_relay_send_mac, mac)) {
+      g_relay_send_pending = false;
+      RelayCompletion completion;
+      if (relayQueueCompleteCopy(g_relay_queue, delivered, completion))
+        relayReceiptSchedule(g_relay_receipt, completion);
+      relay_completion = true;
+    }
+    portEXIT_CRITICAL(&g_relay_mux);
+    if (relay_completion) return;
+  }
+
   PerformerTxCompletion completion;
   portENTER_CRITICAL(&g_performer_tx_mux);
   completion = performerTxComplete(g_performer_tx, mac, delivered);
   portEXIT_CRITICAL(&g_performer_tx_mux);
+  if (completion.matched && completion.purpose == PERFORMER_TX_RELAY_ACK) {
+    portENTER_CRITICAL(&g_relay_mux);
+    relayReceiptSendResult(g_relay_receipt, completion.delivered);
+    portEXIT_CRITICAL(&g_relay_mux);
+  }
   if (completion.matched && completion.purpose == PERFORMER_TX_REGISTER) {
     portENTER_CRITICAL(&g_register_mux);
     registrationSendResult(g_register_schedule, esp_timer_get_time(), g_mac,
@@ -203,6 +237,12 @@ static void onSend(const uint8_t* mac, esp_now_send_status_t status) {
 }
 
 static bool performerTxReserve(const uint8_t mac[6], uint8_t purpose) {
+  if (g_role == ROLE_RELAY) {
+    portENTER_CRITICAL(&g_relay_mux);
+    bool forwarding = g_relay_send_pending;
+    portEXIT_CRITICAL(&g_relay_mux);
+    if (forwarding) return false;
+  }
   bool reserved;
   portENTER_CRITICAL(&g_performer_tx_mux);
   reserved = performerTxBegin(g_performer_tx, mac, purpose);
@@ -268,6 +308,8 @@ static PowerTable   g_power_table;
 static LayoutTable  g_table;
 
 static inline bool isConductor() { return g_role == ROLE_CONDUCTOR; }
+static inline bool isRelay() { return g_role == ROLE_RELAY; }
+static inline bool isPerformer() { return g_role == ROLE_PERFORMER; }
 
 static void configLoad() {
   g_prefs.begin("node", /*readonly*/ true);
@@ -276,7 +318,7 @@ static void configLoad() {
   g_id.y = g_prefs.getFloat("y", 0.0f);
   g_id.group_id = groupIdSafe(g_prefs.getUChar("grp", 0));
   g_id.led_count = ledCountSafe(g_prefs.getUChar("leds", DEFAULT_LED_COUNT));
-  g_role = g_prefs.getUChar("role", DEFAULT_ROLE);
+  g_role = nodeRoleSafe(g_prefs.getUChar("role", DEFAULT_ROLE));
   g_powersave = g_prefs.getBool("ps", POWERSAVE_DEFAULT != 0);
   g_dusk_on = g_prefs.getBool("dusk", DUSK_DEFAULT != 0);
   g_wake_flag = g_prefs.getBool("wake", false);
@@ -408,13 +450,12 @@ static BlackoutState g_blackout_state = {};
 static uint32_t g_tx_seq = 0;
 static portMUX_TYPE g_sync_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Performer -> conductor registration state. The conductor's MAC is learned from
-// the recv-info of an incoming beacon (written in the recv callback under
-// g_sync_mux); the actual peer-add + unicast happens from loop(), since doing
-// radio work inside the recv callback is unsafe.
-static uint8_t  g_conductor_mac[6] = {0};
-static bool     g_have_conductor = false;
-static bool     g_conductor_peer_added = false;
+// Performer/relay -> primary routing state. The logical primary and physical
+// parent are learned together from a valid beacon. They differ behind a relay.
+// Peer-add and sends remain in loop context; the receive callback only updates
+// this pure state under g_sync_mux.
+static ParentRoute g_parent_route = {};
+static OtaPeerLease g_parent_peer = {{0}, false};
 
 // Conductor roster: every node that has registered, keyed on MAC. The logic lives
 // in roster.h (host-tested); here we hold one instance and a spinlock, since it is
@@ -625,6 +666,17 @@ static void powerPolicyApplyCommand(const SerialJsonCommand& cmd) {
 // Registered on every node. Validates the common header, then dispatches on the
 // message type. The recv callback signature changed in Arduino-ESP32 3.x —
 // support both, and grab the sender MAC, which we need for bidirectional traffic.
+static bool relayQueuePacket(const uint8_t* data, size_t len,
+                             const uint8_t transport_destination[6],
+                             int64_t received_us, uint8_t copies = 1) {
+  bool queued;
+  portENTER_CRITICAL(&g_relay_mux);
+  queued = relayQueuePush(g_relay_queue, data, len, transport_destination,
+                          received_us, copies);
+  portEXIT_CRITICAL(&g_relay_mux);
+  return queued;
+}
+
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
 void onRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   const uint8_t* src = info->src_addr;
@@ -635,48 +687,90 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
   if (len < (int)sizeof(MsgHeader)) return;
   MsgHeader hdr;
   memcpy(&hdr, data, sizeof(hdr));
-  if (hdr.magic != BEACON_MAGIC || hdr.version != PROTO_VERSION) return;
-  bool from_learned_conductor = false;
-  if (!isConductor()) {
+  if (!routeHeaderBasicValid(hdr)) return;
+  int64_t received_us = now_us();
+
+  // Beacons establish the single logical primary and a sticky physical parent.
+  // A relay accepts only a direct primary beacon, then emits the same logical
+  // beacon at hop one. Performers may fail over between direct/relay parents
+  // only after the current path is stale and only for the same primary.
+  if (hdr.type == MSG_BEACON) {
+    if (isConductor() || len != (int)sizeof(BeaconMsg)) return;
+    ParentDecision decision;
     portENTER_CRITICAL(&g_sync_mux);
-    from_learned_conductor =
-        g_have_conductor && memcmp(src, g_conductor_mac, 6) == 0;
+    decision = parentRouteOnBeacon(g_parent_route, isRelay(), g_mac, src, hdr,
+                                   received_us, ROUTE_PARENT_STALE_US);
+    if (decision != PARENT_REJECT) {
+      BeaconMsg b;
+      memcpy(&b, data, sizeof(b));
+      syncOnBeacon(g_sync, b.epoch_us, b.seq, received_us);
+      g_beacon = b;
+      if (b.flags & BEACON_FLAG_FIELD_AWAKE)
+        g_last_wake_flag_us = received_us;
+    }
     portEXIT_CRITICAL(&g_sync_mux);
+    if (decision != PARENT_REJECT && isRelay())
+      relayQueuePacket(data, len, BROADCAST_ADDR, received_us);
+    return;
+  }
+
+  bool from_primary = false;
+  if (isConductor()) {
+    bool via_is_relay = false;
+    if (hdr.hops == 1) {
+      portENTER_CRITICAL(&g_roster_mux);
+      int via = rosterFind(g_roster, src);
+      via_is_relay = via >= 0 && g_roster.entries[via].role == ROLE_RELAY &&
+                     g_roster.entries[via].hops == 0;
+      portEXIT_CRITICAL(&g_roster_mux);
+    }
+    if (!routePrimaryReceiveValid(g_mac, src, via_is_relay, hdr)) return;
+  } else {
+    ParentRoute route;
+    portENTER_CRITICAL(&g_sync_mux);
+    route = g_parent_route;
+    portEXIT_CRITICAL(&g_sync_mux);
+    if (isRelay()) {
+      if (routeFromCurrentParentAnyDestination(route, src, hdr)) {
+        from_primary = true;
+        if (routeMacBroadcast(hdr.destination)) {
+          relayQueuePacket(data, len, BROADCAST_ADDR, received_us);
+        } else if (!routeMacEqual(hdr.destination, g_mac)) {
+          relayQueuePacket(data, len, hdr.destination, received_us,
+                           relayTargetCopies(hdr.type));
+          return;
+        }
+      } else if (routeChildUplinkValid(route, src, hdr)) {
+        uint8_t copies = (hdr.type == MSG_REGISTER ||
+                          hdr.type == MSG_OTA_STATUS ||
+                          hdr.type == MSG_POWER) ? 2 : 1;
+        relayQueuePacket(data, len, route.primary, received_us, copies);
+        return;
+      } else {
+        return;
+      }
+    } else {
+      if (!routeFromCurrentParent(route, src, hdr, g_mac)) return;
+      from_primary = true;
+    }
   }
 
   switch (hdr.type) {
-    case MSG_BEACON: {
-      if (isConductor()) return;  // a conductor follows no one
-      if (len != (int)sizeof(BeaconMsg)) return;
-      BeaconMsg b;
-      memcpy(&b, data, sizeof(b));
-      int64_t local = now_us();
-      portENTER_CRITICAL(&g_sync_mux);
-      syncOnBeacon(g_sync, b.epoch_us, b.seq, local);
-      g_beacon = b;
-      memcpy(g_conductor_mac, src, 6);  // remember who to register with
-      g_have_conductor = true;
-      // Field-awake override: a flagged beacon blocks dusk-sleep for
-      // DUSK_WAKE_TTL_US — this is what a resample rendezvous checks for.
-      if (b.flags & BEACON_FLAG_FIELD_AWAKE) g_last_wake_flag_us = local;
-      portEXIT_CRITICAL(&g_sync_mux);
-      break;
-    }
     case MSG_REGISTER: {
       if (!isConductor()) return;  // only the conductor keeps a roster
       if (len != (int)sizeof(RegisterMsg)) return;
       RegisterMsg r;
       memcpy(&r, data, sizeof(r));
-      // The packet body is diagnostic data, not an identity authority. Binding
-      // it to ESP-NOW's transport sender address prevents a buggy peer from
-      // permanently claiming another board's MAC in conductor NVS.
-      if (memcmp(r.mac, src, 6) != 0) return;
+      // The packet body is diagnostic data, not an identity authority. Bind it
+      // to the routed logical origin; the route validator above separately
+      // proves a direct sender or a known direct relay carried that origin.
+      if (!routeMacEqual(r.mac, hdr.origin)) return;
       portENTER_CRITICAL(&g_roster_mux);
       // Known-ness is checked BEFORE the upsert so a full roster (which drops
       // the insert without a count change) can't mask a new node.
       bool known = rosterFind(g_roster, r.mac) >= 0;
       rosterUpsert(g_roster, r.mac, r.id, r.fw, r.build, r.dirty, r.version,
-                   now_us());
+                   received_us, nodeRoleSafe(r.role), src, hdr.hops);
       // Loop owns the persistent inventory and NVS writes. Queue every report
       // so it can learn a factory-assigned ID, detect conflicts, and decide
       // whether this performer needs the authoritative ID/group row sent back.
@@ -719,9 +813,28 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       }
       break;
     }
+    case MSG_ACK: {
+      if (!isConductor() || len != (int)sizeof(AckMsg)) return;
+      AckMsg m;
+      memcpy(&m, data, sizeof(m));
+      if (m.acked_type != MSG_OTA_ACTIVATE || m.delivered > 1) return;
+      bool expected_route = false;
+      portENTER_CRITICAL(&g_roster_mux);
+      int child = rosterFind(g_roster, hdr.origin);
+      expected_route = child >= 0 && g_roster.entries[child].hops == 1 &&
+                       g_roster.entries[child].role != ROLE_RELAY &&
+                       routeMacEqual(g_roster.entries[child].via, src);
+      portEXIT_CRITICAL(&g_roster_mux);
+      if (!expected_route) return;
+      portENTER_CRITICAL(&g_ota_send_ack_mux);
+      otaSendAckComplete(g_ota_relay_delivery_ack, hdr.origin,
+                         m.delivered != 0);
+      portEXIT_CRITICAL(&g_ota_send_ack_mux);
+      break;
+    }
     case MSG_TABLE: {
       if (isConductor()) return;  // conductor is the source, never adopts
-      if (!g_have_conductor || memcmp(src, g_conductor_mac, 6) != 0) return;
+      if (!from_primary) return;
       // Two-step validation (table_wire.h, host-tested): bounds before the
       // copy, exact length-vs-row-count after it.
       if (!tableMsgLenPlausible(len)) return;
@@ -732,6 +845,9 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       // adopt and persist outside the radio callback.
       TableAssignment assignment;
       if (tableMsgFindRow(m, g_mac, assignment)) {
+        portENTER_CRITICAL(&g_register_mux);
+        registrationRepairReceived(g_register_schedule);
+        portEXIT_CRITICAL(&g_register_mux);
         portENTER_CRITICAL(&g_sync_mux);
         g_assignment_pending = true;
         g_assignment_pending_value = assignment;
@@ -742,9 +858,12 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     case MSG_POWER: {
       if (!isConductor()) return;  // reports flow performer -> conductor only
       if (len != (int)sizeof(PowerMsg)) return;
+      PowerMsg m;
+      memcpy(&m, data, sizeof(m));
+      if (!routeMacEqual(m.mac, hdr.origin)) return;
       portENTER_CRITICAL(&g_power_mux);
       if (g_power_q_n < POWER_Q_MAX) {
-        memcpy(&g_power_q[g_power_q_n], data, sizeof(PowerMsg));
+        g_power_q[g_power_q_n] = m;
         g_power_q_n++;
       } else {
         g_power_q_dropped++;  // can't happen at 1–2 nodes / 60 s, but never lie
@@ -754,7 +873,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     }
     case MSG_OTA_BEGIN: {
       if (isConductor()) return;
-      if (!from_learned_conductor) return;
+      if (!from_primary) return;
       if (len != (int)sizeof(OtaBeginMsg)) return;
       OtaBeginMsg m;
       memcpy(&m, data, sizeof(m));
@@ -763,7 +882,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     }
     case MSG_OTA_CHUNK: {
       if (isConductor()) return;
-      if (!from_learned_conductor) return;
+      if (!from_primary) return;
       if (len < (int)offsetof(OtaChunkMsg, data)) return;
       OtaChunkMsg m;
       memcpy(&m, data, len);
@@ -774,7 +893,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     }
     case MSG_OTA_END: {
       if (isConductor()) return;
-      if (!from_learned_conductor) return;
+      if (!from_primary) return;
       if (len != (int)sizeof(OtaEndMsg)) return;
       otaRadioEnd();
       break;
@@ -782,10 +901,10 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     case MSG_OTA_STATUS: {
       if (!isConductor()) return;
       if (len != (int)sizeof(OtaStatusMsg)) return;
-      if (!otaCohortContains(g_ota_cohort, src)) return;
+      if (!otaCohortContains(g_ota_cohort, hdr.origin)) return;
       OtaStatusMsg m;
       memcpy(&m, data, sizeof(m));
-      if (memcmp(m.mac, src, 6) != 0) return;
+      if (!routeMacEqual(m.mac, hdr.origin)) return;
       portENTER_CRITICAL(&g_ota_status_mux);
       otaStatusUpsert(g_ota_status, m.mac, m.phase, m.error, m.offset,
                       m.crc32, now_us());
@@ -793,14 +912,14 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       break;
     }
     case MSG_OTA_QUERY: {
-      if (isConductor() || !from_learned_conductor) return;
+      if (isConductor() || !from_primary) return;
       if (len != (int)sizeof(OtaQueryMsg)) return;
       otaSetLocalStatus(g_ota_local_phase, g_ota_local_error,
                         g_ota_write_written, g_ota_write_crc);
       break;
     }
     case MSG_OTA_ACTIVATE: {
-      if (isConductor() || !from_learned_conductor) return;
+      if (isConductor() || !from_primary) return;
       if (len != (int)sizeof(OtaActivateMsg) || !g_ota_local_staged) return;
       otaSetLocalStatus(OTA_PHASE_ACTIVATING, OTA_ERR_NONE,
                         g_ota_write_written, g_ota_write_crc);
@@ -864,12 +983,12 @@ static void radioSleep() {
 
 // Power the radio back UP for a listen window. esp_wifi_stop() dropped the peer
 // table, so espnowStart() re-adds the broadcast peer and recv callback; the
-// learned conductor unicast peer is gone too, so flag it for re-add on the next
-// register.
+// learned conductor unicast peer is gone too, so clear its lease for re-add on
+// the next register.
 static void radioWake() {
   esp_wifi_start();
   espnowStart();
-  g_conductor_peer_added = false;
+  otaPeerLeaseInit(g_parent_peer);
   g_radio_on = true;
 }
 
@@ -878,6 +997,7 @@ static void broadcastBeacon() {
   b.hdr.magic = BEACON_MAGIC;
   b.hdr.version = PROTO_VERSION;
   b.hdr.type = MSG_BEACON;
+  routeHeaderSet(b.hdr, g_mac, BROADCAST_ADDR);
   b.epoch_us = now_us();
   b.seq = g_tx_seq++;
   b.power = powerPolicySnapshot(b.epoch_us);
@@ -891,23 +1011,108 @@ static void broadcastBeacon() {
 // re-adds the peer whenever it's missing — call it before ANY unicast to the
 // conductor (REGISTER, POWER). Peer-add happens here in loop context, never in
 // the recv callback. Returns true when a unicast can be sent to cmac.
-static bool conductorPeerReady(uint8_t cmac[6]) {
+static bool conductorPeerReady(uint8_t cmac[6], uint8_t primary[6] = nullptr) {
   bool have;
   portENTER_CRITICAL(&g_sync_mux);
-  have = g_have_conductor;
-  if (have) memcpy(cmac, g_conductor_mac, 6);
+  have = g_parent_route.valid;
+  if (have) {
+    memcpy(cmac, g_parent_route.parent, 6);
+    if (primary) memcpy(primary, g_parent_route.primary, 6);
+  }
   portEXIT_CRITICAL(&g_sync_mux);
   if (!have) return false;
 
-  if (!g_conductor_peer_added) {
+  if (g_parent_peer.active && !otaPeerLeaseMatches(g_parent_peer, cmac)) {
+    esp_now_del_peer(g_parent_peer.mac);
+    otaPeerLeaseInit(g_parent_peer);
+  }
+  if (!esp_now_is_peer_exist(cmac)) {
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, cmac, 6);
     peer.channel = WIFI_CHANNEL;
     peer.encrypt = false;
     esp_err_t err = esp_now_add_peer(&peer);
-    if (err == ESP_OK || err == ESP_ERR_ESPNOW_EXIST) g_conductor_peer_added = true;
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) return false;
   }
-  return g_conductor_peer_added;
+  otaPeerLeaseSet(g_parent_peer, cmac);
+  return true;
+}
+
+static bool relayPeerReady(const uint8_t mac[6]) {
+  ParentRoute route;
+  portENTER_CRITICAL(&g_sync_mux);
+  route = g_parent_route;
+  portEXIT_CRITICAL(&g_sync_mux);
+  RelayPeerKind kind = relayPeerKind(route, mac);
+  if (kind == RELAY_PEER_BROADCAST) return true;
+  if (kind == RELAY_PEER_UPSTREAM) {
+    uint8_t parent[6];
+    return conductorPeerReady(parent) && routeMacEqual(parent, mac);
+  }
+  if (g_relay_peer.active && !otaPeerLeaseMatches(g_relay_peer, mac)) {
+    esp_now_del_peer(g_relay_peer.mac);
+    otaPeerLeaseInit(g_relay_peer);
+  }
+  if (esp_now_is_peer_exist(mac)) return true;
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, mac, 6);
+  peer.channel = WIFI_CHANNEL;
+  peer.encrypt = false;
+  esp_err_t error = esp_now_add_peer(&peer);
+  if (error != ESP_OK && error != ESP_ERR_ESPNOW_EXIST) return false;
+  if (error == ESP_OK) otaPeerLeaseSet(g_relay_peer, mac);
+  return true;
+}
+
+static void maybeRelayDeliveryReceipt() {
+  if (!isRelay() || !g_radio_on || !performerTxReady()) return;
+  RelayReceipt receipt;
+  portENTER_CRITICAL(&g_relay_mux);
+  receipt = g_relay_receipt;
+  portEXIT_CRITICAL(&g_relay_mux);
+  if (!receipt.pending) return;
+
+  uint8_t parent[6], primary[6];
+  if (!conductorPeerReady(parent, primary)) return;
+  AckMsg ack = {{BEACON_MAGIC, PROTO_VERSION, MSG_ACK}, receipt.type,
+                (uint8_t)(receipt.delivered ? 1 : 0)};
+  // This is a relay-certified receipt for the logical child, sent directly to
+  // the primary after the child's queued activation copies have drained.
+  routeHeaderSet(ack.hdr, receipt.destination, primary, 1);
+  performerSend(parent, (const uint8_t*)&ack, sizeof(ack),
+                PERFORMER_TX_RELAY_ACK);
+}
+
+static void drainRelayQueue() {
+  if (!isRelay() || !g_radio_on || !performerTxReady()) return;
+
+  RelayFrame frame;
+  portENTER_CRITICAL(&g_relay_mux);
+  if (g_relay_send_pending || !g_relay_queue.count) {
+    portEXIT_CRITICAL(&g_relay_mux);
+    return;
+  }
+  frame = *relayQueueFront(g_relay_queue);
+  portEXIT_CRITICAL(&g_relay_mux);
+
+  if (!relayPeerReady(frame.transport_destination)) return;
+  uint8_t packet[RELAY_PACKET_MAX];
+  if (!relayFramePrepare(frame, now_us(), packet)) {
+    portENTER_CRITICAL(&g_relay_mux);
+    relayQueuePopCopy(g_relay_queue);
+    portEXIT_CRITICAL(&g_relay_mux);
+    return;
+  }
+
+  portENTER_CRITICAL(&g_relay_mux);
+  g_relay_send_pending = true;
+  memcpy(g_relay_send_mac, frame.transport_destination, 6);
+  portEXIT_CRITICAL(&g_relay_mux);
+  if (esp_now_send(frame.transport_destination, packet, frame.len) != ESP_OK) {
+    portENTER_CRITICAL(&g_relay_mux);
+    g_relay_send_pending = false;
+    portEXIT_CRITICAL(&g_relay_mux);
+  }
 }
 
 // Performer: announce ourselves to the conductor we've heard. Expired periodic
@@ -923,7 +1128,8 @@ static void maybeRegister(int64_t t) {
   if (!due) return;
 
   uint8_t cmac[6];
-  if (!conductorPeerReady(cmac)) {
+  uint8_t primary[6];
+  if (!conductorPeerReady(cmac, primary)) {
     portENTER_CRITICAL(&g_register_mux);
     registrationSendResult(g_register_schedule, t, g_mac, REGISTER_CONFIG,
                            /*delivered*/ false);
@@ -941,11 +1147,13 @@ static void maybeRegister(int64_t t) {
 
   RegisterMsg r = {{BEACON_MAGIC, PROTO_VERSION, MSG_REGISTER}, {0}, g_id.id,
                    groupIdSafe(g_id.group_id), ledCountSafe(g_id.led_count),
+                   nodeRoleSafe(g_role),
                    PROTO_VERSION,
                    (uint32_t)FIRMWARE_BUILD_ID,
                    (uint8_t)FIRMWARE_BUILD_DIRTY, {0}};
   firmwareCopyVersion(r.version, FIRMWARE_VERSION);
   memcpy(r.mac, g_mac, 6);
+  routeHeaderSet(r.hdr, g_mac, primary);
   if (esp_now_send(cmac, (const uint8_t*)&r, sizeof(r)) != ESP_OK) {
     performerTxRelease(cmac, PERFORMER_TX_REGISTER);
     portENTER_CRITICAL(&g_register_mux);
@@ -955,10 +1163,10 @@ static void maybeRegister(int64_t t) {
   }
 }
 
-static bool registrationHoldingRadio() {
+static bool registrationHoldingRadio(int64_t t) {
   bool hold;
   portENTER_CRITICAL(&g_register_mux);
-  hold = registrationKeepsRadioAwake(g_register_schedule);
+  hold = registrationKeepsRadioAwake(g_register_schedule, t);
   portEXIT_CRITICAL(&g_register_mux);
   return hold;
 }
@@ -1001,11 +1209,14 @@ static void maybePowerReport(int64_t t) {
   // report. powerReportDue re-checks and stays authoritative.
   if (t < g_power_sched.next_us) return;
   uint8_t cmac[6];
-  bool can_send = g_radio_on && performerTxReady() && conductorPeerReady(cmac);
+  uint8_t primary[6];
+  bool can_send = g_radio_on && performerTxReady() &&
+                  conductorPeerReady(cmac, primary);
   if (!powerReportDue(g_power_sched, t, POWER_REPORT_INTERVAL_US, can_send)) return;
 
   PowerMsg m = {{BEACON_MAGIC, PROTO_VERSION, MSG_POWER}, {0}, readPowerSample(t)};
   memcpy(m.mac, g_mac, 6);
+  routeHeaderSet(m.hdr, g_mac, primary);
   performerSend(cmac, (const uint8_t*)&m, sizeof(m), PERFORMER_TX_POWER);
 }
 
@@ -1043,6 +1254,7 @@ static void broadcastTable() {
   for (uint8_t c = 0; c < chunks; c++) {
     TableMsg m;
     size_t len = tableChunkBuild(g_table, c, m);
+    routeHeaderSet(m.hdr, g_mac, BROADCAST_ADDR);
     esp_now_send(BROADCAST_ADDR, (const uint8_t*)&m, len);
   }
 }
@@ -1085,6 +1297,7 @@ static void broadcastCalibrationRoster() {
     m.hdr.magic = BEACON_MAGIC;
     m.hdr.version = PROTO_VERSION;
     m.hdr.type = MSG_ROSTER;
+    routeHeaderSet(m.hdr, g_mac, BROADCAST_ADDR);
     m.chunk = c;
     m.chunks = chunks;
     m.base_rank = (uint16_t)(c * ROSTER_MACS_PER_MSG);
@@ -1189,12 +1402,13 @@ static void printDiag() {
   bool stale = syncIsStale(s, t, BEACON_STALE_US);
   int64_t age = beaconAge(s, t);
   Serial.printf(
-      "[performer] %s  offset=%lld us  last_beacon=%lld ms ago  rx=%lu  gaps=%lu  rej=%lu  seq=%lu\n",
+      "[%s] %s  offset=%lld us  last_beacon=%lld ms ago  rx=%lu  gaps=%lu  rej=%lu  seq=%lu\n",
+      isRelay() ? "relay" : "performer",
       stale ? "FREE-RUN" : "LOCKED  ", (long long)s.offset_us,
       (long long)(age < 0 ? -1 : age / 1000), (unsigned long)s.beacons_rx,
       (unsigned long)s.seq_gaps, (unsigned long)s.offset_rejects,
       (unsigned long)s.last_seq);
-  if (g_powersave) {
+  if (isPerformer() && g_powersave) {
     // windows/missed_windows tell whether the listen window is reliably catching a
     // beacon — the main risk of the duty-cycle (HANDOFF gotcha #1). naps/slept are
     // Stage B: slept is measured, so slept≈0 with a climbing nap count would mean
@@ -1204,11 +1418,19 @@ static void printDiag() {
                   (unsigned long)g_duty.missed_windows, (unsigned long)g_naps,
                   (double)g_napped_us / 1e6);
   }
-  if (g_dusk_on) {
+  if (isPerformer() && g_dusk_on) {
     // day=DAY means deep sleep is pending only the fail-awake gates (boot
     // hold-off / serial grace / wake-flag TTL) — the node will vanish soon.
     Serial.printf("  [dusk] light=%u mV  %s\n", g_light_mv,
                   g_dusk.day ? "DAY — sleep pending gates" : "night");
+  }
+  if (isRelay()) {
+    portENTER_CRITICAL(&g_relay_mux);
+    uint8_t queued = g_relay_queue.count;
+    uint32_t dropped = g_relay_queue.dropped;
+    portEXIT_CRITICAL(&g_relay_mux);
+    Serial.printf("  [relay] queued=%u dropped=%lu\n", queued,
+                  (unsigned long)dropped);
   }
 }
 
@@ -1222,7 +1444,7 @@ static void printDiag() {
 //   forget <mac>         (conductor) clear position; permanent ID remains
 //   group <mac> <1..8>  (conductor) assign any inventoried node to a show group
 //   leds <mac> <16|32|64> (conductor) set a board's active RGBW emitter count
-//   role <conductor|performer>   set this node's role and save to NVS
+//   role <conductor|performer|relay> set this node's role and save to NVS
 //   id <n>               set this node's id and save to NVS
 //   pos <x> <y>          set this node's own (x,y) coordinate and save to NVS
 //   powersave <on|off>   (performer) radio duty-cycle on/off; saved to NVS ("ps").
@@ -1254,8 +1476,10 @@ static void printInfo() {
   b = g_beacon;
   portEXIT_CRITICAL(&g_sync_mux);
   const PatternConfig& pattern_config = beaconPattern(b, g_id.group_id);
+  const char* role_name = isConductor() ? "CONDUCTOR" :
+                          (isRelay() ? "RELAY" : "PERFORMER");
   Serial.printf("role=%s  id=%u  mac=%s  x=%.2f  y=%.2f  group=%u  leds=%u\n",
-                isConductor() ? "CONDUCTOR" : "PERFORMER", g_id.id,
+                role_name, g_id.id,
                 macStr(g_mac, mac), g_id.x, g_id.y,
                 (unsigned)(g_id.group_id + 1), (unsigned)g_id.led_count);
   Serial.printf("  firmware: v%s  proto=%u  build=%08lx%s\n", FIRMWARE_VERSION,
@@ -1267,9 +1491,24 @@ static void printInfo() {
                 pattern_config.params[0], pattern_config.params[1],
                 pattern_config.params[2], pattern_config.params[3]);
   Serial.printf("  powersave=%s%s  dusk=%s%s\n", g_powersave ? "on" : "off",
-                isConductor() ? " (conductor: radio always on)" : "",
+                !isPerformer() ? " (infrastructure role: radio always on)" : "",
                 g_dusk_on ? "on" : "off",
-                isConductor() ? " (conductor: never dusk-sleeps)" : "");
+                !isPerformer() ? " (infrastructure role: never dusk-sleeps)" : "");
+  if (!isConductor()) {
+    ParentRoute route;
+    portENTER_CRITICAL(&g_sync_mux);
+    route = g_parent_route;
+    portEXIT_CRITICAL(&g_sync_mux);
+    char primary[18];
+    char parent[18];
+    if (route.valid) {
+      Serial.printf("  route: primary=%s parent=%s hops=%u\n",
+                    macStr(route.primary, primary), macStr(route.parent, parent),
+                    route.hops);
+    } else {
+      Serial.println("  route: waiting for primary beacon");
+    }
+  }
   PowerPolicy p = isConductor() ? powerPolicySnapshot(now_us()) : b.power;
   Serial.printf("  power policy: light-check=%us  deep-check=%umin  schedule=%s "
                 "on=%02u:%02u off=%02u:%02u  now=%02u:%02u  epoch=%lu  leds=%s\n",
@@ -1306,8 +1545,11 @@ static void printRoster() {
   Serial.printf("roster: %u node(s)\n", snap.count);
   for (uint8_t i = 0; i < snap.count; i++) {
     char mac[18];
-    Serial.printf("  [%u] %s  id=%u  v%s  fw=%u  build=%08lx%s  last_seen=%lld ms ago\n", i,
+    char via[18];
+    Serial.printf("  [%u] %s  id=%u  role=%s route=%u via=%s  v%s  fw=%u  build=%08lx%s  last_seen=%lld ms ago\n", i,
                   macStr(snap.entries[i].mac, mac), snap.entries[i].id,
+                  nodeRoleName(snap.entries[i].role), snap.entries[i].hops,
+                  macStr(snap.entries[i].via, via),
                   snap.entries[i].version, snap.entries[i].fw,
                   (unsigned long)snap.entries[i].build,
                   snap.entries[i].dirty ? " dirty" : "",
@@ -1535,7 +1777,9 @@ static void otaStatusReport(bool keep_pending) {
   if (!keep_pending && now_us() < due_us) return;
 
   uint8_t conductor_mac[6];
-  if (!conductorPeerReady(conductor_mac)) return;
+  uint8_t primary[6];
+  if (!conductorPeerReady(conductor_mac, primary)) return;
+  routeHeaderSet(msg.hdr, g_mac, primary);
   if (performerSend(conductor_mac, (const uint8_t*)&msg, sizeof(msg),
                     PERFORMER_TX_OTA_STATUS) && !keep_pending) {
     portENTER_CRITICAL(&g_ota_status_mux);
@@ -1682,6 +1926,7 @@ static void otaSendRepeated(const uint8_t* data, size_t len, uint8_t copies,
 static void otaBroadcastBegin(uint32_t size, uint32_t crc32) {
   if (!isConductor()) return;
   OtaBeginMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_BEGIN}, size, crc32};
+  routeHeaderSet(msg.hdr, g_mac, BROADCAST_ADDR);
   otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
                   OTA_RADIO_STRONG_MAX_ATTEMPTS);
 }
@@ -1690,6 +1935,7 @@ static void otaBroadcastChunk(uint32_t offset, const uint8_t* data, uint8_t len,
                               bool strong) {
   if (!isConductor() || len == 0 || len > OTA_SERIAL_CHUNK_MAX) return;
   OtaChunkMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_CHUNK}, offset, len, {0}};
+  routeHeaderSet(msg.hdr, g_mac, BROADCAST_ADDR);
   memcpy(msg.data, data, len);
   otaSendRepeated((const uint8_t*)&msg, offsetof(OtaChunkMsg, data) + len,
                   strong ? OTA_RADIO_STRONG_COPIES : OTA_RADIO_SEND_COPIES,
@@ -1701,24 +1947,34 @@ static void otaBroadcastChunk(uint32_t offset, const uint8_t* data, uint8_t len,
 static void otaBroadcastEnd() {
   if (!isConductor()) return;
   OtaEndMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_END}};
+  routeHeaderSet(msg.hdr, g_mac, BROADCAST_ADDR);
   otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
                   OTA_RADIO_STRONG_MAX_ATTEMPTS);
 }
 
 static bool otaUnicastRepeated(const uint8_t mac[6], const uint8_t* data,
                                size_t len) {
+  uint8_t next_hop[6];
+  memcpy(next_hop, mac, 6);
+  portENTER_CRITICAL(&g_roster_mux);
+  int route = rosterFind(g_roster, mac);
+  if (route >= 0 && g_roster.entries[route].hops == 1 &&
+      g_roster.entries[route].role != ROLE_RELAY) {
+    memcpy(next_hop, g_roster.entries[route].via, 6);
+  }
+  portEXIT_CRITICAL(&g_roster_mux);
   if (g_ota_unicast_peer.active &&
-      !otaPeerLeaseMatches(g_ota_unicast_peer, mac)) {
+      !otaPeerLeaseMatches(g_ota_unicast_peer, next_hop)) {
     otaUnicastPeerRelease();
   }
-  if (!esp_now_is_peer_exist(mac)) {
+  if (!esp_now_is_peer_exist(next_hop)) {
     esp_now_peer_info_t peer = {};
-    memcpy(peer.peer_addr, mac, 6);
+    memcpy(peer.peer_addr, next_hop, 6);
     peer.channel = WIFI_CHANNEL;
     peer.encrypt = false;
     esp_err_t add_error = esp_now_add_peer(&peer);
     if (add_error != ESP_OK && add_error != ESP_ERR_ESPNOW_EXIST) return false;
-    if (add_error == ESP_OK) otaPeerLeaseSet(g_ota_unicast_peer, mac);
+    if (add_error == ESP_OK) otaPeerLeaseSet(g_ota_unicast_peer, next_hop);
   }
   uint8_t accepted = 0;
   for (uint8_t attempt = 0;
@@ -1726,9 +1982,9 @@ static bool otaUnicastRepeated(const uint8_t mac[6], const uint8_t* data,
        attempt < OTA_RADIO_REPAIR_MAX_ATTEMPTS;
        attempt++) {
     portENTER_CRITICAL(&g_ota_send_ack_mux);
-    otaSendAckBegin(g_ota_send_ack, mac);
+    otaSendAckBegin(g_ota_send_ack, next_hop);
     portEXIT_CRITICAL(&g_ota_send_ack_mux);
-    if (esp_now_send(mac, data, len) != ESP_OK) {
+    if (esp_now_send(next_hop, data, len) != ESP_OK) {
       portENTER_CRITICAL(&g_ota_send_ack_mux);
       otaSendAckInit(g_ota_send_ack);
       portEXIT_CRITICAL(&g_ota_send_ack_mux);
@@ -1758,6 +2014,7 @@ static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
                             const uint8_t* data, uint8_t len) {
   if (!isConductor() || len == 0 || len > OTA_SERIAL_CHUNK_MAX) return false;
   OtaChunkMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_CHUNK}, offset, len, {0}};
+  routeHeaderSet(msg.hdr, g_mac, mac);
   memcpy(msg.data, data, len);
   return otaUnicastRepeated(mac, (const uint8_t*)&msg,
                             offsetof(OtaChunkMsg, data) + len);
@@ -1766,12 +2023,48 @@ static bool otaUnicastChunk(const uint8_t mac[6], uint32_t offset,
 static bool otaUnicastBegin(const uint8_t mac[6], uint32_t size,
                             uint32_t crc32) {
   OtaBeginMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_BEGIN}, size, crc32};
+  routeHeaderSet(msg.hdr, g_mac, mac);
   return otaUnicastRepeated(mac, (const uint8_t*)&msg, sizeof(msg));
 }
 
 static bool otaUnicastActivate(const uint8_t mac[6]) {
   OtaActivateMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_ACTIVATE}};
-  return otaUnicastRepeated(mac, (const uint8_t*)&msg, sizeof(msg));
+  routeHeaderSet(msg.hdr, g_mac, mac);
+  bool relayed = false;
+  portENTER_CRITICAL(&g_roster_mux);
+  int route = rosterFind(g_roster, mac);
+  relayed = route >= 0 && g_roster.entries[route].hops == 1 &&
+            g_roster.entries[route].role != ROLE_RELAY;
+  portEXIT_CRITICAL(&g_roster_mux);
+  if (relayed) {
+    portENTER_CRITICAL(&g_ota_send_ack_mux);
+    otaSendAckBegin(g_ota_relay_delivery_ack, mac);
+    portEXIT_CRITICAL(&g_ota_send_ack_mux);
+  }
+  if (!otaUnicastRepeated(mac, (const uint8_t*)&msg, sizeof(msg))) {
+    if (relayed) {
+      portENTER_CRITICAL(&g_ota_send_ack_mux);
+      otaSendAckInit(g_ota_relay_delivery_ack);
+      portEXIT_CRITICAL(&g_ota_send_ack_mux);
+    }
+    return false;
+  }
+  if (!relayed) return true;
+
+  int64_t deadline = now_us() +
+      (int64_t)OTA_RELAY_DELIVERY_TIMEOUT_MS * 1000LL;
+  uint8_t state = OTA_SEND_ACK_PENDING;
+  while (state == OTA_SEND_ACK_PENDING && now_us() < deadline) {
+    delay(1);
+    portENTER_CRITICAL(&g_ota_send_ack_mux);
+    state = g_ota_relay_delivery_ack.state;
+    portEXIT_CRITICAL(&g_ota_send_ack_mux);
+  }
+  portENTER_CRITICAL(&g_ota_send_ack_mux);
+  bool delivered = g_ota_relay_delivery_ack.state == OTA_SEND_ACK_SUCCESS;
+  otaSendAckInit(g_ota_relay_delivery_ack);
+  portEXIT_CRITICAL(&g_ota_send_ack_mux);
+  return delivered;
 }
 
 static void handleOtaBegin(const SerialJsonCommand& cmd) {
@@ -1989,6 +2282,7 @@ static void handleOtaProbe(const SerialJsonCommand& cmd) {
     return;
   }
   OtaQueryMsg msg = {{BEACON_MAGIC, PROTO_VERSION, MSG_OTA_QUERY}};
+  routeHeaderSet(msg.hdr, g_mac, BROADCAST_ADDR);
   otaSendRepeated((const uint8_t*)&msg, sizeof(msg), OTA_RADIO_STRONG_COPIES,
                   OTA_RADIO_STRONG_MAX_ATTEMPTS);
   jsonOk(cmd.id, "ota status requested");
@@ -2045,6 +2339,7 @@ static void printLanternJson(const uint8_t mac_bytes[6], const char* label,
                              float y, bool has_position, uint8_t group_id,
                              uint8_t led_count,
                              const char* attention,
+                             const RosterEntry* roster_entry,
                              const FirmwareVersion* firmware,
                              const PowerEntry* power, int64_t t) {
   char mac[18];
@@ -2066,6 +2361,14 @@ static void printLanternJson(const uint8_t mac_bytes[6], const char* label,
                   groupIdSafe(group_id), groupIdSafe(group_id) + 1);
   }
   Serial.printf("\"led_count\":%u,", (unsigned)ledCountSafe(led_count));
+  if (roster_entry) {
+    char via[18];
+    Serial.printf("\"role\":\"%s\",\"route\":{\"hops\":%u,\"via\":\"%s\"},",
+                  nodeRoleName(roster_entry->role), roster_entry->hops,
+                  macStr(roster_entry->via, via));
+  } else {
+    Serial.print("\"role\":null,\"route\":null,");
+  }
   Serial.printf("\"attention\":\"%s\",", attention);
   if (firmware) {
     Serial.printf("\"firmware\":{\"version\":\"%s\",\"proto\":%u,\"build_id\":%lu,"
@@ -2229,7 +2532,9 @@ static void printMachineState(uint32_t id) {
                      r >= 0 ? "alive" : "missing", age_s, row.x,
                      row.y, tableHasPosition(row), row.group_id,
                      row.led_count,
-                     attention_text, fw_ptr,
+                     attention_text,
+                     r >= 0 ? &g_state_roster_snapshot.entries[r] : nullptr,
+                     fw_ptr,
                      p >= 0 ? &g_power_table.entries[p] : nullptr, t);
   }
   for (uint8_t i = 0; i < g_state_roster_snapshot.count; i++) {
@@ -2257,7 +2562,7 @@ static void printMachineState(uint32_t id) {
     int p = powerTableFind(g_power_table, row.mac);
     printLanternJson(row.mac, label, id_conflict ? 0 : row.id, "alive", age_s,
                      0.0f, 0.0f, false, 0, DEFAULT_LED_COUNT,
-                     attention_text, &fw,
+                     attention_text, &row, &fw,
                      p >= 0 ? &g_power_table.entries[p] : nullptr, t);
   }
   Serial.print("],\"events\":[]}}\n");
@@ -2538,7 +2843,8 @@ static void handleCommand(char* line) {
     if (a) {
       if (!strcmp(a, "conductor") || !strcmp(a, "1")) g_role = ROLE_CONDUCTOR;
       else if (!strcmp(a, "performer") || !strcmp(a, "0")) g_role = ROLE_PERFORMER;
-      else { Serial.println("? role conductor|performer"); return; }
+      else if (!strcmp(a, "relay") || !strcmp(a, "2")) g_role = ROLE_RELAY;
+      else { Serial.println("? role conductor|performer|relay"); return; }
       roleSave();
       // Reconcile radio + duty state with the new role: a conductor must have
       // the radio up to beacon, and a (re-)performer must not resume a stale
@@ -2555,6 +2861,16 @@ static void handleCommand(char* line) {
       portENTER_CRITICAL(&g_performer_tx_mux);
       performerTxInit(g_performer_tx);
       portEXIT_CRITICAL(&g_performer_tx_mux);
+      portENTER_CRITICAL(&g_sync_mux);
+      parentRouteInit(g_parent_route);
+      portEXIT_CRITICAL(&g_sync_mux);
+      if (g_parent_peer.active) esp_now_del_peer(g_parent_peer.mac);
+      otaPeerLeaseInit(g_parent_peer);
+      portENTER_CRITICAL(&g_relay_mux);
+      relayQueueInit(g_relay_queue);
+      relayReceiptInit(g_relay_receipt);
+      g_relay_send_pending = false;
+      portEXIT_CRITICAL(&g_relay_mux);
       g_next_table_us = 0;
       printInfo();
     }
@@ -2745,6 +3061,11 @@ void setup() {
   rosterInit(g_roster);
   registrationInit(g_register_schedule);
   performerTxInit(g_performer_tx);
+  parentRouteInit(g_parent_route);
+  otaPeerLeaseInit(g_parent_peer);
+  relayQueueInit(g_relay_queue);
+  relayReceiptInit(g_relay_receipt);
+  otaPeerLeaseInit(g_relay_peer);
   powerTableInit(g_power_table);
   otaStatusInit(g_ota_status);
   otaCohortInit(g_ota_cohort);
@@ -2902,7 +3223,10 @@ void loop() {
         if (!reply) continue;
         TableMsg m;
         size_t len = tableRowBuild(g_table, req[i].mac, m);
-        if (len) esp_now_send(BROADCAST_ADDR, (const uint8_t*)&m, len);
+        if (len) {
+          routeHeaderSet(m.hdr, g_mac, BROADCAST_ADDR);
+          esp_now_send(BROADCAST_ADDR, (const uint8_t*)&m, len);
+        }
       }
       if (inventory_changed) tableSave();
     }
@@ -2929,10 +3253,11 @@ void loop() {
     // whether this shared listen window may close. A pending slot/delivery is
     // the only registration state that extends the window.
     if (g_radio_on) maybeRegister(t);
-    bool register_holds_radio = registrationHoldingRadio();
-    if ((g_ota_write_active || g_ota_local_staged) && !g_radio_on) radioWake();
+    bool register_holds_radio = registrationHoldingRadio(t);
+    if ((g_ota_write_active || g_ota_local_staged || isRelay()) && !g_radio_on)
+      radioWake();
     if (field_awake && !g_radio_on) radioWake();
-    if (g_powersave && !g_ota_write_active && !g_ota_local_staged &&
+    if (isPerformer() && g_powersave && !g_ota_write_active && !g_ota_local_staged &&
         !field_awake && !register_holds_radio) {
       DutyAction act = dutyStep(g_duty, currentDutyConfig(policy), t);
       if (act == DUTY_WAKE) radioWake();
@@ -2942,12 +3267,14 @@ void loop() {
     if (g_radio_on) maybeRegister(t);  // TX only when the radio is powered
     maybePowerReport(t);   // no-op without the INA228; defers until radio-on
     maybeOtaStatusReport();
+    maybeRelayDeliveryReceipt();
+    drainRelayQueue();
     maybeAdoptTableAssignment();  // flush pending identity/position NVS adoption
 
     // Primary field sleep policy: when the broadcast schedule says LEDs are off,
     // clear the pixels and deep-sleep until the next check interval. A recent
     // serial session still wins, so a board on the bench stays reachable.
-    if (!wake_rendezvous &&
+    if (isPerformer() && !wake_rendezvous &&
         powerPolicyShouldDeepSleep(policy) &&
         t - g_last_serial_us >= DUSK_SERIAL_GRACE_US) {
       duskEnterDeepSleep(powerPolicyDeepSleepUs(policy), policy);
@@ -2958,7 +3285,7 @@ void loop() {
     // hold-off passed + no recent serial + no recent FIELD_AWAKE beacon. The
     // conductor never dusk-sleeps (it's the wall-powered clock anchor), and the
     // whole feature is off until `dusk on` (GPIO34 floats until wired).
-    if (g_dusk_on) {
+    if (isPerformer() && g_dusk_on) {
       static int64_t next_dusk_sample = 0;
       if (t >= next_dusk_sample) {
         next_dusk_sample = t + DUSK_SAMPLE_US;
@@ -3035,7 +3362,7 @@ void loop() {
   // biggest constant draw after Stage A. napPlan (host-tested) picks the length;
   // 0 means "stay awake" (radio on, serial grace, or nothing worth sleeping for).
   int64_t nap = 0;
-  if (!isConductor() && g_powersave) {
+  if (isPerformer() && g_powersave) {
     NapInputs in;
     in.now_us = now_us();
     in.synced_us = syncedTime(s, in.now_us);

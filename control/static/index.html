@@ -218,8 +218,14 @@
                 <label class="control-label" for="ota-file">Manual firmware binary
                   <input id="ota-file" type="file" accept=".bin,application/octet-stream">
                 </label>
+                <label class="control-label" for="ota-file-protocol">Wire protocol
+                  <input id="ota-file-protocol" type="number" min="1" max="255" placeholder="e.g. 11">
+                </label>
               </div>
-              <p>Selecting a file uploads it immediately and makes it the desired field firmware.</p>
+              <div class="button-row">
+                <button data-action="upload-ota-artifact">Upload manual binary</button>
+              </div>
+              <p>Choose a file and enter the protocol compiled into it, then upload it to make it the desired field firmware.</p>
             </details>
           </div>
           <div class="section-head">

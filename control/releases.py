@@ -27,6 +27,21 @@ ALLOWED_RELEASE_REPOSITORIES = (
 )
 MAX_RELEASE_MANIFEST_BYTES = 128 * 1024
 
+# Schema-v1 manifests published before protocol metadata was added are
+# immutable. Keep their audited wire versions here so those exact releases can
+# still be selected for a coordinated rollback. Every new release emits the
+# protocol explicitly.
+LEGACY_RELEASE_PROTOCOLS = {
+    "0.3.0": 6,
+    "0.4.0": 7,
+    "0.5.0": 8,
+    "0.5.1": 8,
+    "0.6.0": 10,
+    "0.7.0": 10,
+    "0.7.1": 10,
+    "0.8.0": 10,
+}
+
 
 class ReleaseMetadataError(ValueError):
     pass
@@ -257,7 +272,18 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
     if notes.version != version:
         raise ReleaseMetadataError("release manifest notes version mismatch")
     firmware = _object(manifest["firmware"], "release manifest.firmware")
-    _exact_keys(firmware, {"filename", "url", "sha256", "size", "crc32"}, "release manifest.firmware")
+    firmware_keys = set(firmware)
+    expected_firmware_keys = {"filename", "url", "sha256", "size", "crc32"}
+    allowed_firmware_keys = {
+        frozenset(expected_firmware_keys),
+        frozenset(expected_firmware_keys | {"protocol"}),
+    }
+    if frozenset(firmware_keys) not in allowed_firmware_keys:
+        _exact_keys(
+            firmware,
+            expected_firmware_keys | {"protocol"},
+            "release manifest.firmware",
+        )
     filename = _string(firmware["filename"], "release manifest.firmware.filename")
     expected_filename = f"lightweave-field-{release}.bin"
     if filename != expected_filename:
@@ -274,6 +300,11 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
         raise ReleaseMetadataError("firmware size must be a positive integer")
     if not isinstance(crc32, int) or isinstance(crc32, bool) or not 0 <= crc32 <= 0xFFFFFFFF:
         raise ReleaseMetadataError("firmware crc32 must be an unsigned 32-bit integer")
+    protocol = firmware.get("protocol", LEGACY_RELEASE_PROTOCOLS.get(version))
+    if not isinstance(protocol, int) or isinstance(protocol, bool) or not 1 <= protocol <= 255:
+        raise ReleaseMetadataError(
+            "release manifest.firmware protocol must be an integer from 1 to 255"
+        )
     serial_flash = _object(manifest["serial_flash"], "release manifest.serial_flash")
     _exact_keys(
         serial_flash,
@@ -311,6 +342,7 @@ def parse_release_manifest(value: Any) -> ReleaseManifest:
             "sha256": sha256,
             "size": size,
             "crc32": crc32,
+            "protocol": protocol,
         },
         serial_flash={
             "filename": serial_filename,
@@ -390,6 +422,7 @@ def stage_deployment_firmware(ota_store: OtaArtifactStore, record: Mapping[str, 
         and current.get("sha256") == manifest.firmware["sha256"]
         and current.get("source") == "release"
         and current.get("version") == manifest.version
+        and current.get("protocol") == manifest.firmware["protocol"]
     ):
         try:
             ota_store.read_verified()
@@ -412,6 +445,7 @@ def stage_deployment_firmware(ota_store: OtaArtifactStore, record: Mapping[str, 
         release=manifest.release,
         version=manifest.version,
         commit=manifest.commit,
+        protocol=int(manifest.firmware["protocol"]),
     )
     if staged["crc32"] != manifest.firmware["crc32"]:
         raise ReleaseMetadataError("deployment firmware CRC32 mismatch")
@@ -460,6 +494,7 @@ def stage_known_release_firmware(
                 release=manifest.release,
                 version=manifest.version,
                 commit=manifest.commit,
+                protocol=int(manifest.firmware["protocol"]),
             )
             return {"release": manifest.as_dict(), "artifact": artifact}
         except (
