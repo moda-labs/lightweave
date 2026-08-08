@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 import control.app as app_module
-from control.adapters import SerialProtocolError
+from control.adapters import JsonLineSerialConductor, SerialProtocolError
 from control.app import (
     create_app,
     ota_activation_order,
@@ -129,6 +129,77 @@ def test_release_api_reuses_latest_state_snapshot(managed_client) -> None:
     client.app.state.latest_snapshot_at = 0
     assert client.get("/api/releases").status_code == 200
     assert conductor.snapshot_calls == 2
+
+
+def test_state_endpoint_reuses_recent_snapshot_and_mutations_do_not_wait_for_refresh() -> None:
+    class CountingConductor(MockConductor):
+        def __init__(self):
+            super().__init__()
+            self.snapshot_calls = 0
+
+        def snapshot(self):
+            self.snapshot_calls += 1
+            return super().snapshot()
+
+    conductor = CountingConductor()
+    client = TestClient(create_app(conductor))
+
+    assert client.get("/api/state?fresh=false").status_code == 200
+    assert client.get("/api/state?fresh=false").status_code == 200
+    assert conductor.snapshot_calls == 1
+
+    changed = client.post(
+        "/api/show/pattern",
+        json={"pattern": "Sweep", "brightness": 64, "params": {"period": 8000}},
+    )
+    assert changed.status_code == 200
+    assert conductor.snapshot_calls == 1
+
+    refreshed = client.get("/api/state?fresh=false")
+    assert refreshed.json()["pattern"]["pattern"] == "Sweep"
+    assert conductor.snapshot_calls == 2
+
+
+def test_state_snapshot_has_its_own_long_timeout_budget() -> None:
+    class RecordingTransport:
+        def __init__(self) -> None:
+            self.timeouts = []
+            self.replies = [
+                json.dumps({"id": 1, "ok": True, "state": {}}),
+                json.dumps({"id": 2, "ok": True, "message": "identify acknowledged"}),
+            ]
+
+        def write_line(self, _line: str) -> None:
+            pass
+
+        def read_line(self, timeout_s: float) -> str | None:
+            self.timeouts.append(timeout_s)
+            return self.replies.pop(0)
+
+    transport = RecordingTransport()
+    conductor = JsonLineSerialConductor(transport, timeout_s=5.0, state_timeout_s=30.0)
+
+    conductor.snapshot()
+    conductor.identify("00:00:00:00:00:01")
+
+    assert transport.timeouts == pytest.approx([30.0, 5.0], abs=0.01)
+
+
+def test_default_serial_conductor_reads_distinct_state_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = object()
+    monkeypatch.setenv("CONTROL_CONDUCTOR", "serial")
+    monkeypatch.setenv("CONTROL_SERIAL_PORT", "/dev/cu.test")
+    monkeypatch.setenv("CONTROL_SERIAL_TIMEOUT_S", "4.5")
+    monkeypatch.setenv("CONTROL_SERIAL_STATE_TIMEOUT_S", "42")
+    monkeypatch.setattr(app_module, "PySerialTransport", lambda *_args, **_kwargs: transport)
+
+    conductor = app_module.create_default_conductor()
+
+    assert conductor.transport is transport
+    assert conductor.timeout_s == 4.5
+    assert conductor.state_timeout_s == 42
 
 
 def test_ota_status_offset_only_moves_backward_after_an_explicit_restart() -> None:
@@ -594,6 +665,13 @@ class PausableOtaConductor(MockConductor):
         self.chunk_started.set()
         time.sleep(0.005)
         return super().ota_chunk(offset, data)
+
+
+class RejectingOtaExitConductor(PausableOtaConductor):
+    def set_ota_mode(self, enabled: bool) -> dict:
+        if not enabled:
+            return {"ok": False, "error": "radio maintenance stuck"}
+        return super().set_ota_mode(enabled)
 
 
 class LegacyOtaCommandConductor(MockConductor):
@@ -1757,8 +1835,10 @@ def test_power_policy_update_round_trips_to_state() -> None:
     assert state["power"]["leds_on"] is False
 
 
-def test_field_power_actions_preserve_schedule_and_toggle_overrides() -> None:
-    client = TestClient(create_app(MockConductor()))
+def test_field_power_actions_preserve_schedule_and_toggle_overrides(tmp_path: Path) -> None:
+    conductor = MockConductor()
+    conductor.set_ota_mode(True)
+    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
     original = client.get("/api/state").json()["power"]
 
     sleeping = client.post("/api/operations/field-power", json={"mode": "sleep"})
@@ -1768,6 +1848,7 @@ def test_field_power_actions_preserve_schedule_and_toggle_overrides() -> None:
     assert sleep_state["force_sleep"] is True
     assert sleep_state["force_awake"] is False
     assert sleep_state["leds_on"] is False
+    assert conductor.ota_started_at is None
 
     waking = client.post("/api/operations/field-power", json={"mode": "wake"})
     wake_state = client.get("/api/state").json()["power"]
@@ -1783,6 +1864,30 @@ def test_field_power_actions_preserve_schedule_and_toggle_overrides() -> None:
     assert schedule_state["force_awake"] is False
     assert schedule_state["led_on_start_min"] == original["led_on_start_min"]
     assert schedule_state["led_on_end_min"] == original["led_on_end_min"]
+
+
+def test_field_sleep_requires_running_ota_to_pause_first(tmp_path: Path) -> None:
+    app = create_app(MockConductor(), ota_store=OtaArtifactStore(tmp_path))
+    app.state.ota_install.update({"running": True, "phase": "writing"})
+    client = TestClient(app)
+
+    response = client.post("/api/operations/field-power", json={"mode": "sleep"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "pause the firmware update before sleeping the field"
+
+
+def test_field_sleep_stops_if_conductor_cannot_exit_ota_mode(tmp_path: Path) -> None:
+    conductor = RejectingOtaExitConductor()
+    client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+
+    response = client.post("/api/operations/field-power", json={"mode": "sleep"})
+    power = client.get("/api/state").json()["power"]
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "radio maintenance stuck"
+    assert power["force_sleep"] is False
+    assert power["leds_on"] is True
 
 
 def test_power_monitor_settings_and_manual_full_sync() -> None:
@@ -2021,6 +2126,11 @@ def test_auto_reconcile_detects_late_old_performer() -> None:
     }
 
     assert ota_reconcile_needed({"lanterns": [matching]}, artifact, install) is False
+    assert ota_reconcile_needed(
+        {"power": {"force_sleep": True}, "lanterns": [matching, old]},
+        artifact,
+        install,
+    ) is False
     assert ota_reconcile_needed(
         {
             "conductor": {
@@ -3157,6 +3267,7 @@ def test_ota_install_can_pause_and_resume_from_the_conductor_prefix(
     paused_install = paused.json()["install"]
     assert paused_install["running"] is False
     assert paused_install["phase"] == "paused"
+    assert conductor.ota_started_at is None
     prefix = int(paused_install["bytes_sent"])
     assert 0 < prefix < len(firmware)
 
@@ -3164,6 +3275,30 @@ def test_ota_install_can_pause_and_resume_from_the_conductor_prefix(
     resumed = wait_for_ota_terminal(client)
     assert resumed["complete"] is True
     assert resumed["bytes_sent"] == len(firmware)
+
+
+def test_ota_pause_reports_when_conductor_remains_in_maintenance(
+    tmp_path, managed_client
+) -> None:
+    conductor = RejectingOtaExitConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin&protocol=11",
+        content=b"\xe9" + bytes(range(255)) * 80,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    assert conductor.chunk_started.wait(timeout=2)
+    paused = client.delete("/api/operations/ota-install")
+    install = client.get("/api/operations/ota-install").json()["install"]
+
+    assert paused.status_code == 503
+    assert "did not exit OTA maintenance" in paused.json()["detail"]
+    assert install["phase"] == "paused"
+    assert install["ota_mode_error"] == "radio maintenance stuck"
 
 
 def test_pause_does_not_overwrite_an_install_that_completes_during_the_request(

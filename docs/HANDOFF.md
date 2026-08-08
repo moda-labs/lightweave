@@ -8,8 +8,23 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**188 pass**) is green; **450 control tests** are green; all three
+(**188 pass**) is green; **457 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+
+Latest in this feature branch (2026-08-08): control mutations now return as soon
+as the conductor accepts and persists desired state; field health is reported
+later by the state ticker. The old mutation path synchronously fetched
+a full fleet snapshot before responding, and the browser fetched another one,
+which made successful commands look failed or take 6–14 seconds. Recent snapshots
+are now shared across tabs, the full-state cadence is 15 seconds instead of 5,
+and state reads have a separate 30-second serial budget. Routine show, group,
+placement, and power mutations update
+the browser optimistically instead of forcing another fleet read. Group Off is
+now an Off/On toggle that remembers the previous brightness. Sleep field pauses a
+running OTA at a safe boundary, exits OTA maintenance mode, then applies
+force-sleep; direct API sleep refuses a still-running OTA, and automatic
+reconciliation stays paused while the sleep override is active. This is a
+control-plane-only working-tree change and has not been released to the Pi yet.
 
 Latest in this feature branch (2026-08-07): **automatic OTA reconciliation now
 targets only stale nodes once the primary already runs the exact immutable

@@ -46,9 +46,11 @@ persistent show-safety off switch.
    `{`; the existing human CLI and diag lines coexist on the same port.
    Protocol logic lives in a dependency-free, host-tested header per
    project convention.
-4. **Honest write semantics.** Every mutation surfaces its serial-protocol
-   ack or failure. Conductor unplugged → the UI/API says so loudly, never
-   pretends.
+4. **Honest desired-state semantics.** Every serial-backed mutation surfaces the
+   conductor's ack or failure. A successful ack means the conductor accepted and
+   persisted the requested state; performer delivery converges later through
+   recurring beacons and is observed in periodic fleet snapshots. Conductor
+   unplugged → the UI/API says so loudly, never pretends.
 5. **Fully offline.** All assets local; nothing assumes internet. The real
    client is a phone on the Pi's AP on the playa.
 
@@ -59,13 +61,17 @@ these endpoints, so agents can drive the same workflows without a browser.
 
 ### State
 
-- `GET /api/state` → full control-plane snapshot.
+- `GET /api/state` → full control-plane snapshot. Use `fresh=false` to reuse a
+  recent shared snapshot when one is available; the operator UI does this on
+  its normal 15-second refresh cadence.
 - `GET /api/lanterns` → `state.lanterns` only.
 - `GET /api/releases` → separate running control-plane, desired/staged firmware,
   and user-facing release-history state.
-- `WS /ws` → pushes `{"type":"state","state":...}` snapshots and `error`
-  events. It also pushes `{"type":"provisioning","provisioning":...}` when
-  the local flashing station changes.
+- `WS /ws` → pushes `{"type":"state","state":...}` snapshots, `error`
+  events, and `{"type":"desired-state","action":...}` when the conductor
+  accepts a mutation. It also pushes
+  `{"type":"provisioning","provisioning":...}` when the local flashing
+  station changes.
 
 Snapshot shape:
 
@@ -247,8 +253,8 @@ The map renders only positioned lanterns.
   of the saved pattern config: pass/reject, score, issues, recommendations, and
   sequence metrics.
 - `POST /api/patterns/{id}/broadcast?group_id=2` -> broadcast that saved pattern
-  config to Group 3 and push a state update. Omit `group_id` only for the legacy
-  all-groups behavior.
+  config to Group 3 and publish a desired-state acceptance event. Omit
+  `group_id` only for the legacy all-groups behavior.
 - `POST /api/show/pattern` with
   `{"pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300},"group_id":2}`
   -> change only Group 3. Omitting `group_id` updates all eight groups for
@@ -257,6 +263,10 @@ The map renders only positioned lanterns.
 - `POST /api/show/restore` -> restore all eight brightness values captured by
   the most recent blackout. Returns an error when no restore point is available.
 - `POST /api/operations/power-policy` with the runtime sleep/check policy.
+- `POST /api/operations/field-power` with `{"mode":"sleep"}`, `{"mode":"wake"}`,
+  or `{"mode":"schedule"}`. Sleep refuses a still-running OTA job; the UI first
+  pauses that job at a safe command boundary, verifies that the conductor left
+  OTA maintenance mode, and then applies forced sleep.
 - `GET /api/provisioning/status` -> local USB flashing station, approved
   production artifact, session, connected boards, and the last 100 jobs.
 - `POST /api/provisioning/session` with
@@ -365,12 +375,15 @@ The map renders only positioned lanterns.
 - `GET /review?pattern=Sweep&duration_ms=8000&fps=4` -> automated review for a
   draft pattern without saving it first.
 
-Every mutation returns an ack:
+Every serial-backed mutation returns an ack after the conductor accepts and
+persists desired state; it does not wait for each performer to check in or
+acknowledge delivery:
 
 ```json
 {"ok": true, "message": "assigned #2"}
 ```
 
+Performer convergence and health remain visible in later periodic snapshots.
 Adapter errors such as serial timeout surface as HTTP `503`. Command-level
 errors such as unknown MAC or invalid replacement return `404` with the
 adapter's `error` text. Rejected pattern changes return `400`; the UI should
@@ -412,10 +425,12 @@ JSON and is tested with a fake transport. The serial transport deasserts
 DTR/RTS by default after opening so a running conductor is not intentionally
 reset just because the web server connected. FastAPI serial calls run through
 a serialized `asyncio.to_thread` helper so a blocking serial read does not pin
-the event loop. Normal serial requests default to an 8-second timeout because a
-full 128-board state snapshot is roughly 50 KiB and needs more than four seconds
-on a 115200-baud UART. The transport reads all currently available bytes at once
-instead of polling one byte at a time.
+the event loop. Ordinary commands default to an 8-second timeout. Full state
+snapshots use a separate 30-second timeout because a populated 128-board response
+is roughly 50 KiB on a 115200-baud UART. Recent snapshots are shared across
+browser and WebSocket sessions and normally refreshed every 15 seconds. The
+transport reads all currently available bytes at once instead of polling one
+byte at a time.
 
 ### Machine serial protocol
 
@@ -505,7 +520,10 @@ number while showing "Not seen".
   Also the backbone of the agent-assisted pattern-authoring workflow (see
   the "Pattern authoring" section), including its headless
   `GET /preview` PNG render endpoint. **[done for PNG still frames]**
-- Blackout button (bri 0).
+- Per-group Off/On control: Off broadcasts brightness 0; On restores that
+  browser's remembered nonzero brightness, falling back to 48 and respecting
+  the firmware ceiling of 192.
+- Reversible field-wide blackout and restore controls.
 
 ### 4. Power & energy
 
@@ -516,6 +534,9 @@ number while showing "Not seen".
   **Sleep field**, **Wake field**, and **Follow schedule** overrides without
   rewriting the saved schedule. These are runtime-broadcast in beacons, so
   changing them does not require another firmware update.
+- Sleep pauses an active OTA at its next safe command boundary, exits OTA
+  maintenance, and only then applies force-sleep. Automatic firmware
+  reconciliation remains suppressed while force-sleep is active.
 - Nightly history persisted server-side (sqlite or CSV) — trend across the
   event, not just tonight.
 - `power reset` button for the dusk ritual.

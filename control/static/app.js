@@ -36,6 +36,7 @@ const MIN_ZOOM = 1;
 const MAX_ZOOM = 3;
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const TIMEZONE_STORAGE_KEY = "baskets.sleepTimezone";
+const GROUP_BRIGHTNESS_STORAGE_KEY = "baskets.groupBrightnessRestore";
 const PATTERN_DEFAULTS = {
   Pulse: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
   Glow: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
@@ -214,6 +215,84 @@ function patternForGroup(groupId) {
 
 function activePatternState() {
   return patternForGroup(selectedGroup);
+}
+
+function storedGroupBrightness(groupId) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(GROUP_BRIGHTNESS_STORAGE_KEY) || "{}");
+    const brightness = Number(saved[String(groupId)]);
+    return Number.isFinite(brightness) && brightness > 0 ? Math.min(192, brightness) : 48;
+  } catch (_error) {
+    return 48;
+  }
+}
+
+function rememberGroupBrightness(groupId, brightness) {
+  if (!Number.isFinite(Number(brightness)) || Number(brightness) <= 0) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(GROUP_BRIGHTNESS_STORAGE_KEY) || "{}");
+    saved[String(groupId)] = Math.min(192, Number(brightness));
+    localStorage.setItem(GROUP_BRIGHTNESS_STORAGE_KEY, JSON.stringify(saved));
+  } catch (_error) {
+    // Storage can be unavailable in private browsing. The turn-on fallback is 48.
+  }
+}
+
+function applyOptimisticPattern(groupId, config) {
+  state = {
+    ...state,
+    pattern: Number(groupId) === 0 ? config : state.pattern,
+    patterns: (state.patterns || []).some((entry) => Number(entry.group_id) === Number(groupId))
+      ? state.patterns.map((entry) => Number(entry.group_id) === Number(groupId)
+        ? { ...entry, config }
+        : entry)
+      : [...(state.patterns || []), { group_id: Number(groupId), config }],
+  };
+}
+
+function updateLanternState(mac, changes) {
+  state = {
+    ...state,
+    lanterns: (state?.lanterns || []).map((lantern) => lantern.mac === mac
+      ? { ...lantern, ...changes }
+      : lantern),
+  };
+}
+
+function updateLanternPosition(mac, position) {
+  const current = (state?.lanterns || []).find((lantern) => lantern.mac === mac);
+  updateLanternState(mac, {
+    ...position,
+    position: "Set",
+    attention: current?.attention === "Needs position" ? "None" : current?.attention,
+  });
+}
+
+function applyOptimisticBlackout(enabled) {
+  const patterns = (state?.patterns || []).map((entry) => {
+    const groupId = Number(entry.group_id);
+    const config = entry.config || {};
+    if (enabled) rememberGroupBrightness(groupId, config.brightness);
+    return {
+      ...entry,
+      config: {
+        ...config,
+        brightness: enabled ? 0 : storedGroupBrightness(groupId),
+      },
+    };
+  });
+  let primary = patterns.find((entry) => Number(entry.group_id) === 0)?.config;
+  if (!primary) {
+    const current = state?.pattern || { pattern: "Glow", brightness: 48, params: {} };
+    if (enabled) rememberGroupBrightness(0, current.brightness);
+    primary = { ...current, brightness: enabled ? 0 : storedGroupBrightness(0) };
+  }
+  state = {
+    ...state,
+    pattern: primary,
+    patterns,
+    blackout: { ...(state?.blackout || {}), restore_available: enabled },
+  };
 }
 
 function groupEntry(groupId) {
@@ -729,8 +808,9 @@ function renderPatternControls() {
   changeButton.disabled = !isPatternDirty();
   changeButton.ariaDisabled = String(changeButton.disabled);
   const groupOffButton = $('[data-action="turn-off-group"]');
-  groupOffButton.textContent = `Turn off ${groupLabel(selectedGroup)}`;
-  groupOffButton.disabled = Number(activePatternState()?.brightness || 0) === 0;
+  const selectedGroupIsOff = Number(activePatternState()?.brightness || 0) === 0;
+  groupOffButton.textContent = `${selectedGroupIsOff ? "Turn on" : "Turn off"} ${groupLabel(selectedGroup)}`;
+  groupOffButton.disabled = false;
   groupOffButton.ariaDisabled = String(groupOffButton.disabled);
   const restoreButton = $('[data-action="restore-blackout"]');
   restoreButton.disabled = state?.blackout?.restore_available !== true;
@@ -859,11 +939,12 @@ async function assignLanternGroup(mac, groupId, control = null) {
       method: "POST",
       body: JSON.stringify({ group_id: groupId }),
     });
+    updateLanternState(mac, { group_id: groupId, group: groupLabel(groupId) });
+    render();
     toast(ack.message);
   } catch (error) {
     toast(error.message, true);
-  } finally {
-    await refresh();
+    render();
   }
 }
 
@@ -875,11 +956,12 @@ async function assignLanternLedCount(mac, ledCount, control = null) {
       method: "POST",
       body: JSON.stringify({ led_count: ledCount }),
     });
+    updateLanternState(mac, { led_count: ledCount });
+    render();
     toast(ack.message);
   } catch (error) {
     toast(error.message, true);
-  } finally {
-    await refresh();
+    render();
   }
 }
 
@@ -2165,14 +2247,23 @@ async function confirmReplace() {
   if (!oldLantern || !replacementMac) return;
   const oldMac = oldLantern.mac;
   const newMac = replacementMac;
+  const transferred = {
+    x: oldLantern.x,
+    y: oldLantern.y,
+    position: "Set",
+    group_id: oldLantern.group_id,
+    group: oldLantern.group,
+  };
   const ack = await api("/api/lanterns/replace", {
     method: "POST",
     body: JSON.stringify({ old_mac: oldMac, new_mac: newMac }),
   });
   selectedMac = ack.new_mac || newMac;
+  updateLanternState(oldMac, { x: null, y: null, position: "Missing", attention: "Needs position" });
+  updateLanternPosition(newMac, transferred);
   closeReplacePanel();
+  render();
   toast(ack.message);
-  await refresh();
 }
 
 function startMoveMode() {
@@ -2220,11 +2311,12 @@ async function finishLanternMove(clientX, clientY) {
       method: "POST",
       body: JSON.stringify(position),
     });
+    updateLanternPosition(mac, position);
+    render();
     toast(ack.message);
-    await refresh();
   } catch (error) {
     toast(error.message, true);
-    await refresh();
+    render();
   }
 }
 
@@ -2241,18 +2333,19 @@ async function placeSelectedLantern(clientX, clientY) {
       method: "POST",
       body: JSON.stringify(position),
     });
+    updateLanternPosition(mac, position);
+    render();
     toast(ack.message);
-    await refresh();
   } catch (error) {
     toast(error.message, true);
-    await refresh();
+    render();
   }
 }
 
 async function refresh() {
   otaInstall = (await api("/api/operations/ota-install")).install;
   try {
-    state = await api("/api/state");
+    state = await api("/api/state?fresh=false");
   } catch (error) {
     if (error.status === 423) {
       if (otaInstall?.running) {
@@ -2396,8 +2489,9 @@ async function runAction(action) {
     if (action === "forget") {
       if (!confirm(`Forget position for ${lantern.label}?`)) return;
       const ack = await api(`/api/lanterns/${encodeURIComponent(lantern.mac)}/forget`, { method: "POST" });
+      updateLanternState(lantern.mac, { x: null, y: null, position: "Missing", attention: "Needs position" });
+      render();
       toast(ack.message);
-      await refresh();
       return;
     }
     if (action === "broadcast") {
@@ -2415,16 +2509,9 @@ async function runAction(action) {
         brightness,
         params: patternStateParams(patternDraft),
       };
-      state = {
-        ...state,
-        pattern: selectedGroup === 0 ? nextConfig : state.pattern,
-        patterns: (state.patterns || []).map((entry) => Number(entry.group_id) === selectedGroup
-          ? { ...entry, config: nextConfig }
-          : entry),
-      };
+      applyOptimisticPattern(selectedGroup, nextConfig);
       render();
       toast(ack.message);
-      await refresh();
       return;
     }
     if (action === "save-pattern") {
@@ -2456,39 +2543,44 @@ async function runAction(action) {
       $("#group-name").value = ack.group.name;
       render();
       toast(ack.message);
-      await refresh();
       return;
     }
     if (action === "blackout") {
       if (!confirm("Black out all groups? You can restore their previous brightness afterward.")) return;
       const ack = await api("/api/show/blackout", { method: "POST" });
+      applyOptimisticBlackout(true);
       patternDraft = null;
+      render();
       toast(ack.message, true);
-      await refresh();
       return;
     }
     if (action === "restore-blackout") {
       const ack = await api("/api/show/restore", { method: "POST" });
+      applyOptimisticBlackout(false);
       patternDraft = null;
+      render();
       toast(ack.message);
-      await refresh();
       return;
     }
     if (action === "turn-off-group") {
       const live = activePatternState();
-      if (!confirm(`Turn off ${groupLabel(selectedGroup)}?`)) return;
+      const isOff = Number(live.brightness || 0) === 0;
+      if (!isOff && !confirm(`Turn off ${groupLabel(selectedGroup)}?`)) return;
+      const brightness = isOff ? storedGroupBrightness(selectedGroup) : 0;
+      if (!isOff) rememberGroupBrightness(selectedGroup, live.brightness);
       const ack = await api("/api/show/pattern", {
         method: "POST",
         body: JSON.stringify({
           pattern: live.pattern,
-          brightness: 0,
+          brightness,
           params: live.params || {},
           group_id: selectedGroup,
         }),
       });
+      applyOptimisticPattern(selectedGroup, { ...live, brightness });
       patternDraft = null;
+      render();
       toast(ack.message);
-      await refresh();
       return;
     }
     if (action === "save-power-policy") {
@@ -2500,9 +2592,11 @@ async function runAction(action) {
       });
       localStorage.setItem(TIMEZONE_STORAGE_KEY, selectedTimezone());
       powerBaseline = powerSnapshotFromForm();
-      updateSleepScheduleDirtyState();
+      const nextPower = { ...(state.power || {}), ...policy };
+      nextPower.leds_on = powerLedsOn(nextPower);
+      state = { ...state, power: nextPower };
+      render();
       toast(ack.message);
-      await refresh();
       return;
     }
     if (["sleep-field", "wake-field", "follow-schedule"].includes(action)) {
@@ -2511,12 +2605,27 @@ async function runAction(action) {
         "wake-field": "wake",
         "follow-schedule": "schedule",
       }[action];
+      if (mode === "sleep" && otaInstall?.running) {
+        if (!confirm("A firmware update is keeping the field awake. Pause it at the next safe boundary, then sleep the field?")) return;
+        toast("Pausing firmware update before sleeping the field...");
+        const paused = await api("/api/operations/ota-install", { method: "DELETE" });
+        otaInstall = paused.install;
+        renderOta();
+      }
       const ack = await api("/api/operations/field-power", {
         method: "POST",
         body: JSON.stringify({ mode }),
       });
+      const overrides = {
+        sleep: { force_awake: false, force_sleep: true },
+        wake: { force_awake: true, force_sleep: false },
+        schedule: { force_awake: false, force_sleep: false },
+      }[mode];
+      const nextPower = { ...(state.power || {}), ...overrides };
+      nextPower.leds_on = powerLedsOn(nextPower);
+      state = { ...state, power: nextPower };
+      render();
       toast(ack.message || `${mode} command sent`);
-      await refresh();
       return;
     }
     if (action === "save-power-monitor") {
@@ -2792,9 +2901,15 @@ document.addEventListener("click", (event) => {
   if (!id || !action) return;
   if (action === "broadcast-saved") {
     api(`/api/patterns/${encodeURIComponent(id)}/broadcast?group_id=${selectedGroup}`, { method: "POST" })
-      .then(async (ack) => {
+      .then((ack) => {
+        applyOptimisticPattern(selectedGroup, {
+          pattern: ack.pattern.pattern,
+          brightness: Number(ack.pattern.brightness),
+          params: ack.pattern.params || {},
+        });
+        patternDraft = null;
+        render();
         toast(ack.message);
-        await refresh();
       })
       .catch((error) => toast(error.message, true));
   }

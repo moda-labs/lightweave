@@ -159,7 +159,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=15"' in index_html
+    assert 'src="/static/app.js?v=16"' in index_html
     assert 'href="/static/styles.css?v=4"' in index_html
     assert 'data-view="power"' in index_html
     assert 'id="view-power"' in index_html
@@ -209,6 +209,84 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "event.code === 4401" in app_js
     assert 'await api("/api/auth/logout", { method: "POST" })' in app_js
     assert "JSON.stringify({password: passwordInput.value})" in login_js
+
+
+def test_group_power_toggle_remembers_brightness_and_live_controls_do_not_force_refresh() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    helper_start = app_js.index("function storedGroupBrightness")
+    helper_end = app_js.index("\n\nfunction groupEntry", helper_start)
+    helper_source = app_js[helper_start:helper_end]
+    script = f"""
+const GROUP_BRIGHTNESS_STORAGE_KEY = "test.groupBrightnessRestore";
+const saved = new Map();
+const localStorage = {{
+  getItem(key) {{ return saved.has(key) ? saved.get(key) : null; }},
+  setItem(key, value) {{ saved.set(key, value); }},
+}};
+let state = {{
+  pattern: {{pattern: "Glow", brightness: 48, params: {{}}}},
+  patterns: [{{group_id: 0, config: {{pattern: "Glow", brightness: 48, params: {{}}}}}}],
+  lanterns: [{{mac: "AA", group_id: 0, led_count: 16, attention: "Needs position"}}],
+}};
+{helper_source}
+if (storedGroupBrightness(0) !== 48) process.exit(1);
+rememberGroupBrightness(0, 73);
+if (storedGroupBrightness(0) !== 73) process.exit(2);
+applyOptimisticPattern(0, {{pattern: "Glow", brightness: 0, params: {{}}}});
+if (state.pattern.brightness !== 0 || state.patterns[0].config.brightness !== 0) process.exit(3);
+saved.set(GROUP_BRIGHTNESS_STORAGE_KEY, "not json");
+if (storedGroupBrightness(1) !== 48) process.exit(4);
+saved.set(GROUP_BRIGHTNESS_STORAGE_KEY, "{{}}");
+rememberGroupBrightness(1, 300);
+if (storedGroupBrightness(1) !== 192) process.exit(5);
+state.patterns.push({{group_id: 1, config: {{pattern: "Glow", brightness: 48, params: {{}}}}}});
+applyOptimisticPattern(1, {{pattern: "Sweep", brightness: 80, params: {{period: 8000}}}});
+if (state.pattern.pattern !== "Glow" || state.patterns[1].config.pattern !== "Sweep") process.exit(6);
+updateLanternState("AA", {{group_id: 2, led_count: 32}});
+if (state.lanterns[0].group_id !== 2 || state.lanterns[0].led_count !== 32) process.exit(7);
+updateLanternPosition("AA", {{x: 1, y: 2}});
+if (state.lanterns[0].position !== "Set" || state.lanterns[0].attention !== "None") process.exit(8);
+applyOptimisticBlackout(true);
+if (state.pattern.brightness !== 0 || state.blackout.restore_available !== true) process.exit(9);
+applyOptimisticBlackout(false);
+if (state.pattern.brightness !== 48 || state.blackout.restore_available !== false) process.exit(10);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    group_action = app_js[
+        app_js.index('if (action === "turn-off-group")'):
+        app_js.index('if (action === "save-power-policy")')
+    ]
+    field_power_action = app_js[
+        app_js.index('if (["sleep-field", "wake-field", "follow-schedule"].includes(action))'):
+        app_js.index('if (action === "save-power-monitor")')
+    ]
+    pattern_action = app_js[
+        app_js.index('if (action === "broadcast")'):
+        app_js.index('if (action === "save-pattern")')
+    ]
+    assert "storedGroupBrightness" in group_action
+    assert "rememberGroupBrightness" in group_action
+    assert "await refresh()" not in group_action
+    assert 'api("/api/operations/ota-install", { method: "DELETE" })' in field_power_action
+    assert "await refresh()" not in field_power_action
+    assert "await refresh()" not in pattern_action
+    assert "await refresh()" not in app_js[
+        app_js.index("async function assignLanternGroup"):
+        app_js.index("function renderRows()")
+    ]
+    assert "await refresh()" not in app_js[
+        app_js.index('if (action === "forget")'):
+        app_js.index('if (action === "turn-off-group")')
+    ]
 
 
 def test_performer_lists_sort_by_numeric_id() -> None:
@@ -486,7 +564,7 @@ async function api(path) {{
   if (path === "/api/operations/ota-install") {{
     return {{install: {{running: false, complete: true}}}};
   }}
-  if (path === "/api/state") {{
+  if (path === "/api/state?fresh=false") {{
     stateCalls += 1;
     if (stateCalls === 1) {{
       const error = new Error("locked");
