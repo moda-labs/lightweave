@@ -290,12 +290,15 @@ def test_worker_limit_bounds_parallel_flashes(tmp_path: Path) -> None:
     ]
     discovery = Discovery(ports)
     release = threading.Event()
+    workers_entered = threading.Event()
     entered: list[str] = []
     entered_lock = threading.Lock()
 
     def processor(port, *_args, progress, **_kwargs):
         with entered_lock:
             entered.append(port)
+            if len(entered) == 5:
+                workers_entered.set()
         progress("flashing", "Writing firmware")
         release.wait(2)
         return f"AA:BB:CC:DD:EE:{int(port[-1]):02X} flashed; permanent ID #54 verified"
@@ -308,6 +311,7 @@ def test_worker_limit_bounds_parallel_flashes(tmp_path: Path) -> None:
             wait_for(client, lambda value: len(value["jobs"]) == 6)
             client.post("/session", json={"max_workers": 5, "factory": False}).raise_for_status()
             wait_for(client, lambda value: value["running"] == 5)
+            assert workers_entered.wait(2)
             with entered_lock:
                 assert len(entered) == 5
             release.set()
