@@ -72,18 +72,20 @@ OTA_FINALIZE_TIMEOUT_S = 120.0
 # A full 128-board state snapshot is roughly 50 KiB. At the field UART's
 # 115200 baud that needs over four seconds on the wire before Python overhead.
 DEFAULT_SERIAL_REQUEST_TIMEOUT_S = 8.0
+DEFAULT_SERIAL_STATE_TIMEOUT_S = 30.0
 
 
 @dataclass
 class JsonLineSerialConductor:
     transport: JsonLineTransport
     timeout_s: float = DEFAULT_SERIAL_REQUEST_TIMEOUT_S
+    state_timeout_s: float = DEFAULT_SERIAL_STATE_TIMEOUT_S
     _next_id: int = field(default=1, init=False)
     _last_state: dict[str, Any] | None = field(default=None, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def snapshot(self) -> dict[str, Any]:
-        response = self._request("state")
+        response = self._request("state", _timeout_s=self.state_timeout_s)
         state = response.get("state")
         if not isinstance(state, dict):
             raise SerialProtocolError("state response missing state object")

@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .adapters import (
     DEFAULT_SERIAL_REQUEST_TIMEOUT_S,
+    DEFAULT_SERIAL_STATE_TIMEOUT_S,
     ConductorAdapter,
     JsonLineSerialConductor,
     SerialProtocolError,
@@ -80,7 +81,7 @@ OTA_ACTIVATION_POLL_S = 0.5
 OTA_POST_REBOOT_ATTEMPTS = 31
 OTA_POST_REBOOT_POLL_S = 1.0
 OTA_RETRY_TIMEOUT_S = 6 * 60 * 60
-CONTROL_TICK_INTERVAL_S = 5.0
+CONTROL_TICK_INTERVAL_S = float(os.getenv("CONTROL_STATE_POLL_INTERVAL_S", "15.0"))
 OTA_AUTO_RETRY_INTERVAL_S = 60.0
 
 
@@ -226,6 +227,8 @@ def ota_reconcile_needed(
 ) -> bool:
     """Return whether the desired image is missing from any online performer."""
     if install.get("auto_update_enabled") is not True or artifact is None:
+        return False
+    if (state.get("power") or {}).get("force_sleep") is True:
         return False
     alive = [
         item
@@ -449,10 +452,14 @@ def create_default_conductor() -> ConductorAdapter:
     timeout_s = float(
         os.getenv("CONTROL_SERIAL_TIMEOUT_S", str(DEFAULT_SERIAL_REQUEST_TIMEOUT_S))
     )
+    state_timeout_s = float(
+        os.getenv("CONTROL_SERIAL_STATE_TIMEOUT_S", str(DEFAULT_SERIAL_STATE_TIMEOUT_S))
+    )
     reset_on_open = os.getenv("CONTROL_SERIAL_RESET_ON_OPEN", "0").strip().lower() in {"1", "true", "yes"}
     return JsonLineSerialConductor(
         PySerialTransport(port, baud=baud, reset_on_open=reset_on_open),
         timeout_s=timeout_s,
+        state_timeout_s=state_timeout_s,
     )
 
 
@@ -1162,6 +1169,12 @@ def create_app(
             return enriched
         return result
 
+    def cached_snapshot(max_age_s: float = CONTROL_TICK_INTERVAL_S) -> dict[str, Any] | None:
+        snapshot = app.state.latest_snapshot
+        if snapshot is None or time.monotonic() - app.state.latest_snapshot_at > max_age_s:
+            return None
+        return snapshot
+
     async def pattern_store_call(method: str, *args: Any) -> Any:
         return await asyncio.to_thread(getattr(app.state.pattern_store, method), *args)
 
@@ -1187,15 +1200,12 @@ def create_app(
         for ws in dead:
             app.state.ws_clients.pop(ws, None)
 
-    async def publish_state(action: str) -> None:
-        try:
-            state = await conductor_call("snapshot")
-        except (SerialProtocolError, HTTPException) as error:
-            if isinstance(error, HTTPException) and error.status_code == 423:
-                return
-            await publish({"type": "error", "action": action, "message": str(error)})
-            return
-        await publish({"type": "state", "action": action, "state": state})
+    async def publish_command_accepted(action: str) -> None:
+        # The serial ACK means the conductor accepted and persisted the desired
+        # state. Performer convergence is observed later through the periodic
+        # snapshot instead of blocking the operator command.
+        app.state.latest_snapshot_at = 0.0
+        await publish({"type": "desired-state", "action": action})
 
     async def provisioning_call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         try:
@@ -1626,7 +1636,9 @@ def create_app(
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/api/state")
-    async def get_state() -> dict[str, Any]:
+    async def get_state(fresh: bool = True) -> dict[str, Any]:
+        if not fresh and (snapshot := cached_snapshot()) is not None:
+            return snapshot
         try:
             return await conductor_call("snapshot")
         except SerialProtocolError as error:
@@ -1781,7 +1793,7 @@ def create_app(
             group = await group_store_call("update", group_id, request.name)
         except GroupStoreError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        await publish_state("group-name")
+        await publish_command_accepted("group-name")
         return {"ok": True, "message": f"renamed {group['label']}", "group": group}
 
     @app.post("/api/patterns")
@@ -1857,7 +1869,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("pattern")
+        await publish_command_accepted("pattern")
         return {"ok": True, "message": ack.get("message", "pattern broadcast"), "pattern": pattern, "ack": ack}
 
     @app.get("/api/calibration/frames")
@@ -1978,7 +1990,7 @@ def create_app(
                         "error": str(ack.get("error") or "assign failed"),
                     })
         if saved:
-            await publish_state("calibration-apply")
+            await publish_command_accepted("calibration-apply")
         skipped = list(request.missing) + list(request.ambiguous)
         message = f"saved {len(saved)} lantern location{'s' if len(saved) != 1 else ''}"
         if skipped:
@@ -2308,7 +2320,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=404, detail=ack["error"])
-        await publish_state("assign")
+        await publish_command_accepted("assign")
         return ack
 
     @app.post("/api/lanterns/{mac}/forget")
@@ -2319,7 +2331,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=404, detail=ack["error"])
-        await publish_state("forget")
+        await publish_command_accepted("forget")
         return ack
 
     @app.post("/api/lanterns/{mac}/group")
@@ -2330,7 +2342,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("group")
+        await publish_command_accepted("group")
         return ack
 
     @app.post("/api/lanterns/{mac}/led-count")
@@ -2341,7 +2353,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("led-count")
+        await publish_command_accepted("led-count")
         return ack
 
     @app.post("/api/lanterns/replace")
@@ -2352,7 +2364,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=404, detail=ack["error"])
-        await publish_state("replace")
+        await publish_command_accepted("replace")
         return ack
 
     @app.post("/api/show/pattern")
@@ -2368,7 +2380,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("pattern")
+        await publish_command_accepted("pattern")
         return ack
 
     @app.post("/api/show/blackout")
@@ -2377,7 +2389,7 @@ def create_app(
             ack = await conductor_call("blackout")
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
-        await publish_state("blackout")
+        await publish_command_accepted("blackout")
         return ack
 
     @app.post("/api/show/restore")
@@ -2388,7 +2400,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("blackout-restore")
+        await publish_command_accepted("blackout-restore")
         return ack
 
     @app.post("/api/operations/calibration-mode")
@@ -2401,7 +2413,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("calibration-mode")
+        await publish_command_accepted("calibration-mode")
         return ack
 
     @app.post("/api/operations/power-policy")
@@ -2412,7 +2424,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("power-policy")
+        await publish_command_accepted("power-policy")
         return ack
 
     @app.post("/api/operations/field-power")
@@ -2422,14 +2434,23 @@ def create_app(
             "wake": {"force_awake": True, "force_sleep": False},
             "schedule": {"force_awake": False, "force_sleep": False},
         }
+        if request.mode == "sleep" and app.state.ota_install.get("running") is True:
+            raise HTTPException(
+                status_code=409,
+                detail="pause the firmware update before sleeping the field",
+            )
         try:
+            if request.mode == "sleep":
+                ota_ack = await conductor_call("set_ota_mode", False)
+                if not ota_ack["ok"]:
+                    raise HTTPException(status_code=400, detail=ota_ack["error"])
             ack = await conductor_call("update_power_policy", overrides[request.mode])
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
         ack["mode"] = request.mode
-        await publish_state("field-power")
+        await publish_command_accepted("field-power")
         return ack
 
     @app.post("/api/operations/power-monitor")
@@ -2437,7 +2458,7 @@ def create_app(
         async with app.state.conductor_lock:
             app.state.power_monitor_config = request.model_dump()
             save_power_monitor_state()
-        await publish_state("power-monitor")
+        await publish_command_accepted("power-monitor")
         return {"ok": True, "message": "power monitor settings changed", "power_monitor": app.state.power_monitor_config}
 
     @app.post("/api/lanterns/{mac}/power-sync-full")
@@ -2456,7 +2477,7 @@ def create_app(
         anchor = {"wh": float(wh), "ts": time.time(), "manual": True, "bus_v": power.get("bus_v")}
         app.state.power_full_anchors[mac] = anchor
         save_power_monitor_state()
-        await publish_state("power-sync-full")
+        await publish_command_accepted("power-sync-full")
         return {"ok": True, "message": f"{lantern.get('label') or mac} synced to 100%", "anchor": anchor}
 
     @app.post("/api/operations/ota-mode")
@@ -2469,7 +2490,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
             raise HTTPException(status_code=400, detail=ack["error"])
-        await publish_state("ota-mode")
+        await publish_command_accepted("ota-mode")
         return ack
 
     @app.get("/api/operations/ota-artifact")
@@ -3594,6 +3615,7 @@ def create_app(
                 for mac in sorted(field_installed_macs)
             )
             await call_until_ok("set_ota_mode", False)
+            app.state.latest_snapshot_at = 0.0
         except asyncio.CancelledError:
             app.state.ota_install.update({
                 "running": True,
@@ -3639,12 +3661,24 @@ def create_app(
         except asyncio.CancelledError:
             raise
         except OtaPauseRequested:
+            ota_mode_error = None
+            try:
+                ack = await conductor_call("set_ota_mode", False)
+                if ack.get("ok") is not True:
+                    ota_mode_error = str(ack.get("error") or "conductor rejected OTA shutdown")
+            except SerialProtocolError as error:
+                ota_mode_error = str(error)
             app.state.ota_install.update({
                 "running": False,
                 "complete": False,
                 "phase": "paused",
                 "error": None,
-                "message": "firmware update paused by operator; start it again to resume",
+                "message": (
+                    "firmware update paused by operator; start it again to resume"
+                    if ota_mode_error is None
+                    else "firmware transfer paused, but OTA maintenance mode is still active"
+                ),
+                "ota_mode_error": ota_mode_error,
             })
         except HTTPException as error:
             app.state.ota_install.update({
@@ -3972,6 +4006,14 @@ def create_app(
                 "message": "firmware update paused by operator; start it again to resume",
             })
             app.state.ota_pause_requested = False
+            if app.state.ota_install.get("ota_mode_error"):
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "firmware transfer paused, but the conductor did not exit OTA maintenance: "
+                        f"{app.state.ota_install['ota_mode_error']}"
+                    ),
+                )
             return {
                 "ok": True,
                 "message": "firmware update paused",
@@ -4000,7 +4042,9 @@ def create_app(
         await ws.accept()
         app.state.ws_clients[ws] = token
         try:
-            state = await conductor_call("snapshot")
+            state = cached_snapshot()
+            if state is None:
+                state = await conductor_call("snapshot")
         except (SerialProtocolError, HTTPException) as error:
             if app.state.auth_manager.enabled and live_session(token) is None:
                 app.state.ws_clients.pop(ws, None)
