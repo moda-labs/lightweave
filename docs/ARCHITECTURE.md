@@ -302,6 +302,16 @@ controls, and calibration wizard are far better visually than a CLI. The protoco
 must support **bulk table transfer** (60 rows won't fit a typed line) and clean
 acks/errors so a program can drive the conductor reliably.
 
+Operator mutations follow a **desired-state / eventual-convergence** contract.
+The Pi waits only for the conductor to accept and persist the requested state;
+it never waits for every performer to receive it. The conductor immediately
+includes that state in its recurring beacons, while performer contact and health
+appear later in periodic snapshots. Repeated beacons provide eventual convergence;
+any future per-performer desired-state generation ACK is observability only, never
+an operator-command gate. Full fleet snapshots are cached
+across browser sessions and polled on a relaxed cadence because their UART cost
+grows with fleet size; they are observability, not part of the command ACK path.
+
 **Not a runtime dependency:** unplug the admin host and the conductor + field
 continue on their stored table and program.
 
