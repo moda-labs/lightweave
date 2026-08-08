@@ -2962,7 +2962,9 @@ def test_ota_protocol_bump_dispatches_all_nodes_before_primary_and_verifies_afte
 def test_ota_protocol_downgrade_uses_the_coordinated_activation_barrier(
     tmp_path, managed_client, monkeypatch
 ) -> None:
-    monkeypatch.setattr(app_module, "OTA_RETRY_TIMEOUT_S", 0.05)
+    # Keep a bounded failure window without making the happy path depend on
+    # sub-50 ms CI scheduling and filesystem latency.
+    monkeypatch.setattr(app_module, "OTA_RETRY_TIMEOUT_S", 1.0)
     conductor = ProtocolDowngradeConductor()
     for lantern in conductor._lanterns:
         lantern.status = "alive"

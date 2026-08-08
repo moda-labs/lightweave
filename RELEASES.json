@@ -2,6 +2,22 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.2",
+      "date": "2026-08-08",
+      "title": "Responsive controls and selective updates",
+      "control_changes": [
+        "Made operator commands return as soon as the conductor accepts the desired state, while performer convergence continues through normal radio beacons and later fleet snapshots.",
+        "Made group power reversible, separated long inventory reads from command timeouts, and kept routine controls responsive with shared periodic snapshots.",
+        "Made field sleep pause active firmware work safely, leave OTA maintenance mode, and prevent automatic updates from restarting until the field is awake again.",
+        "Limited automatic firmware repair to the nodes that are actually stale, preserving progress across restarts and updating relays before their downstream performers."
+      ],
+      "firmware_changes": [
+        "Added selective protocol-v11 OTA delivery so begin, data, repair, completion, and activation traffic can target only stale nodes without reopening an up-to-date primary conductor's writer.",
+        "Preserved the exact update cohort across retries and restarts, with tokened relay delivery receipts and relay-first repair when stale downstream performers depend on them.",
+        "Kept radio protocol v11, so existing v0.9.x relay topologies remain compatible while stale nodes move independently to this build."
+      ]
+    },
+    {
       "version": "0.9.1",
       "date": "2026-08-07",
       "title": "Protocol-safe field updates",
