@@ -89,6 +89,14 @@ While OTA owns the conductor, other serial-backed operations fail promptly with 
 The staged artifact persists, but the in-memory OTA job does not survive a Pi process restart.
 An interrupted update returns to the existing staged-artifact and live-firmware-consistency recovery workflow.
 
+Routine serial-backed operator writes return when the conductor has accepted
+and persisted the requested desired state; performer delivery is observed later
+through periodic fleet snapshots. Full snapshots use a separate longer serial
+budget and are shared across browser sessions. Sleeping the field pauses an
+active OTA at a safe command boundary, verifies that OTA maintenance ended, and
+then sends the force-sleep policy. Automatic reconciliation stays suppressed
+while that override is active.
+
 The single-radio Pi must not change its own field network remotely.
 `CONTROL_ALLOW_NETWORK_CHANGES` defaults off in field and serial deployment, and a missing or malformed field setting fails startup.
 Bench development enables network mutation only through explicit development configuration or injected test dependencies.
@@ -129,6 +137,8 @@ CONTROL_CONDUCTOR=serial
 CONTROL_SERIAL_PORT=/dev/serial/by-path/<conductor-path>
 CONTROL_SERIAL_RESET_ON_OPEN=0
 CONTROL_SERIAL_TIMEOUT_S=8.0
+CONTROL_SERIAL_STATE_TIMEOUT_S=30.0
+CONTROL_STATE_POLL_INTERVAL_S=15.0
 CONTROL_DATA_DIR=/var/lib/lightweave
 CONTROL_ALLOWED_ORIGINS=https://control.example.com
 CONTROL_REQUIRE_HTTPS=true

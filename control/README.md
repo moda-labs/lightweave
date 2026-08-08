@@ -40,6 +40,8 @@ export CONTROL_PASSWORD_HASH="$(
 CONTROL_CONDUCTOR=serial \
 CONTROL_SERIAL_PORT=/dev/cu.usbserial-XXXX \
 CONTROL_SERIAL_TIMEOUT_S=8.0 \
+CONTROL_SERIAL_STATE_TIMEOUT_S=30.0 \
+CONTROL_STATE_POLL_INTERVAL_S=15.0 \
 CONTROL_DATA_DIR=/tmp/lightweave-control \
 CONTROL_ALLOWED_ORIGINS=https://control.example.com \
 CONTROL_REQUIRE_HTTPS=true \
@@ -60,11 +62,13 @@ running conductor does not intentionally reset it. Set
 `CONTROL_SERIAL_RESET_ON_OPEN=1` only when you want normal serial-open reset
 behavior.
 
-Serial requests default to an 8-second timeout so a full 128-board state
-snapshot has time to cross the 115200-baud UART. Keep that default for field
-deployments. If a response times out mid-frame, the transport discards the rest
-of that newline-delimited frame before accepting a later response, so one slow
-snapshot cannot corrupt the next request.
+Ordinary serial commands default to an 8-second timeout. Full state snapshots
+have a separate 30-second budget because a populated 128-board response is
+roughly 50 KiB at 115200 baud. The browser and WebSocket clients share recent
+snapshots on a 15-second cadence instead of forcing a new inventory read after
+each accepted mutation. If a response times out mid-frame, the transport
+discards the rest of that newline-delimited frame before accepting a later
+response, so one slow snapshot cannot corrupt the next request.
 
 Open:
 
@@ -91,6 +95,10 @@ pio test -e native
 - API-backed Map/Node List/Patterns/Operations UI shell
 - Shared lantern detail sheet
 - Actions for identify, assign, forget, replace, pattern changes, and blackout
+- Desired-state acknowledgements that return after conductor persistence while
+  performer convergence is observed by later fleet snapshots
+- Reversible per-group Off/On controls and safe field sleep that pauses active
+  OTA before leaving maintenance mode
 - Shared-password sessions that protect HTTP, previews, uploads, and WebSockets
 - Durable background field OTA with checkpoint repair, a six-hour retry window,
   per-performer verified staging and independent one-action activation, and

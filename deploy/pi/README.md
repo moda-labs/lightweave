@@ -165,6 +165,8 @@ CONTROL_ALLOW_NETWORK_CHANGES=false
 CONTROL_DATA_DIR=/var/lib/lightweave
 CONTROL_SERIAL_RESET_ON_OPEN=0
 CONTROL_SERIAL_TIMEOUT_S=8.0
+CONTROL_SERIAL_STATE_TIMEOUT_S=30.0
+CONTROL_STATE_POLL_INTERVAL_S=15.0
 ```
 
 Generate the scoped same-host provisioning credential without putting it in
@@ -179,8 +181,11 @@ The control plane uses this token only for the provisioner's permanent-ID
 reservation endpoint. The USB daemon itself is reachable only through a Unix
 socket owned by `lightweave`; it does not listen on TCP.
 
-The 8-second serial timeout leaves enough wire time for the conductor's full
-inventory snapshot at 115200 baud, including a populated 128-board field.
+Ordinary conductor commands use the 8-second serial timeout. Full inventory
+snapshots use the separate 30-second budget, and the control plane normally
+shares them across browser sessions on a 15-second cadence. This keeps operator
+writes responsive while leaving enough wire time for a populated 128-board
+field at 115200 baud.
 
 The GitOps installer is a prerequisite for this control unit because it installs
 the root recovery gate that must run before control. The initial production
