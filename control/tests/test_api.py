@@ -1835,7 +1835,7 @@ def test_power_policy_update_round_trips_to_state() -> None:
     assert state["power"]["leds_on"] is False
 
 
-def test_field_power_actions_preserve_schedule_and_toggle_overrides(tmp_path: Path) -> None:
+def test_field_power_actions_select_one_canonical_mode(tmp_path: Path) -> None:
     conductor = MockConductor()
     conductor.set_ota_mode(True)
     client = TestClient(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
@@ -1845,6 +1845,7 @@ def test_field_power_actions_preserve_schedule_and_toggle_overrides(tmp_path: Pa
     sleep_state = client.get("/api/state").json()["power"]
     assert sleeping.status_code == 200
     assert sleeping.json()["mode"] == "sleep"
+    assert sleep_state["schedule_enabled"] is False
     assert sleep_state["force_sleep"] is True
     assert sleep_state["force_awake"] is False
     assert sleep_state["leds_on"] is False
@@ -1853,6 +1854,7 @@ def test_field_power_actions_preserve_schedule_and_toggle_overrides(tmp_path: Pa
     waking = client.post("/api/operations/field-power", json={"mode": "wake"})
     wake_state = client.get("/api/state").json()["power"]
     assert waking.status_code == 200
+    assert wake_state["schedule_enabled"] is False
     assert wake_state["force_sleep"] is False
     assert wake_state["force_awake"] is True
     assert wake_state["leds_on"] is True
@@ -1860,10 +1862,35 @@ def test_field_power_actions_preserve_schedule_and_toggle_overrides(tmp_path: Pa
     following = client.post("/api/operations/field-power", json={"mode": "schedule"})
     schedule_state = client.get("/api/state").json()["power"]
     assert following.status_code == 200
+    assert schedule_state["schedule_enabled"] is True
     assert schedule_state["force_sleep"] is False
     assert schedule_state["force_awake"] is False
     assert schedule_state["led_on_start_min"] == original["led_on_start_min"]
     assert schedule_state["led_on_end_min"] == original["led_on_end_min"]
+
+
+def test_power_policy_settings_update_preserves_active_mode() -> None:
+    client = TestClient(create_app(MockConductor()))
+    client.post("/api/operations/field-power", json={"mode": "sleep"})
+
+    response = client.post(
+        "/api/operations/power-policy",
+        json={
+            "light_sleep_check_s": 20,
+            "deep_sleep_check_min": 45,
+            "led_on_start_min": 18 * 60,
+            "led_on_end_min": 6 * 60,
+            "current_min": 12 * 60,
+            "current_epoch_s": 1_720_123_400,
+        },
+    )
+    power = client.get("/api/state").json()["power"]
+
+    assert response.status_code == 200
+    assert power["schedule_enabled"] is False
+    assert power["force_awake"] is False
+    assert power["force_sleep"] is True
+    assert power["led_on_start_min"] == 18 * 60
 
 
 def test_field_sleep_requires_running_ota_to_pause_first(tmp_path: Path) -> None:

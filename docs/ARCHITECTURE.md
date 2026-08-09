@@ -644,11 +644,13 @@ configured check interval; inside the window they render normally. The Operation
 UI sends the current local minute whenever the policy is saved, so the conductor
 can keep evaluating the wall-clock schedule without NTP.
 
-The `wake on|off` concept is now the same force-awake bit as the UI override.
-It keeps boards on for debugging/field testing and wins over the schedule. The
-one-click Field power controls preserve the schedule: Sleep field sets the
-force-sleep bit, Wake field sets force-awake, and Follow schedule clears both.
-old photodiode/dusk path remains off by default as a fallback/experiment; it is
+The UI presents power as one three-state mode: **Sleep on schedule**, **Always
+on**, or **Off**. Every transition writes `schedule_enabled`, `force_awake`, and
+`force_sleep` together so stale overrides cannot overlap. Sleep field selects
+Off, Wake field selects Always on, and enabling the sleep schedule selects the
+scheduled mode; disabling the schedule also returns to Always on. Editing the
+schedule times or check intervals does not change the active mode.
+The old photodiode/dusk path remains off by default as a fallback/experiment; it is
 not required for the main installation behavior.
 
 ### 8.3 One-hop relay coverage **[done; hardware verification pending]**

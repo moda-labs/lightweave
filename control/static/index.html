@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Do Baskets Dream Control Plane</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4">
+  <link rel="stylesheet" href="/static/styles.css?v=5">
 </head>
 <body>
   <div class="app">
@@ -48,6 +48,79 @@
           </div>
           <div class="map-content" id="map-content"></div>
           <div class="unpositioned-tray" id="unpositioned-tray" aria-label="Unpositioned lanterns"></div>
+        </div>
+        <div class="panel map-locations-panel">
+          <div class="ops-section">
+            <div class="section-head">
+              <h3>Lantern Locations</h3>
+              <div class="chip" id="calibration-status">--</div>
+            </div>
+            <div class="ops-grid">
+              <div><div class="label">Frames</div><div class="ops-value" id="calibration-frame-count">--</div></div>
+              <div><div class="label">Assignments</div><div class="ops-value" id="calibration-assignment-count">--</div></div>
+              <div><div class="label">Code plan</div><div class="ops-value" id="calibration-code-plan">--</div></div>
+            </div>
+            <div class="calibration-simple">
+              <button class="primary" data-action="toggle-calibration-mode">Play lantern locator pattern</button>
+              <label class="control-label" for="calibration-video">Video
+                <input id="calibration-video" type="file" accept="video/*">
+              </label>
+              <button class="primary" data-action="analyze-calibration-video" disabled>Analyze video</button>
+            </div>
+            <details class="advanced-panel">
+              <summary>Advanced</summary>
+              <div class="ops-form-grid">
+                <label class="control-label" for="calibration-files">Image sequence
+                  <input id="calibration-files" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple>
+                </label>
+                <label class="control-label" for="calibration-video-start">Video start (s)
+                  <input id="calibration-video-start" type="number" min="0" max="3600" step="0.1" value="0">
+                </label>
+                <label class="control-label" for="calibration-video-interval">Frame interval (s)
+                  <input id="calibration-video-interval" type="number" min="0.1" max="60" step="0.1" value="1">
+                </label>
+                <label class="control-label" for="calibration-threshold">Threshold
+                  <input id="calibration-threshold" type="number" min="0" max="255" step="1" value="180">
+                </label>
+                <label class="control-label" for="calibration-min-area">Min area
+                  <input id="calibration-min-area" type="number" min="1" max="100000" step="1" value="4">
+                </label>
+                <label class="control-label" for="calibration-first-code">First code
+                  <input id="calibration-first-code" type="number" min="1" max="100000" step="1" value="1">
+                </label>
+                <label class="control-label" for="calibration-jitter">Synthetic jitter (px)
+                  <input id="calibration-jitter" type="number" min="0" max="80" step="0.1" value="0">
+                </label>
+                <label class="control-label" for="calibration-led-value">Synthetic LED value
+                  <input id="calibration-led-value" type="number" min="0" max="255" step="1" value="255">
+                </label>
+                <label class="control-label" for="calibration-glare-count">Synthetic glare
+                  <input id="calibration-glare-count" type="number" min="0" max="500" step="1" value="0">
+                </label>
+                <label class="control-label" for="calibration-perspective">Perspective
+                  <input id="calibration-perspective" type="number" min="0" max="0.45" step="0.01" value="0">
+                </label>
+                <label class="control-label" for="calibration-missing-frames">Missing frames
+                  <input id="calibration-missing-frames" type="text" placeholder="0,2">
+                </label>
+              </div>
+              <div class="button-row">
+                <button data-action="plan-calibration">Plan codes</button>
+                <button data-action="upload-calibration-frames" disabled>Upload frames</button>
+                <button data-action="extract-calibration-video" disabled>Extract video</button>
+                <button data-action="refresh-calibration">Refresh frames</button>
+                <button data-action="simulate-calibration">Simulate</button>
+                <button class="primary" data-action="propose-calibration" disabled>Propose layout</button>
+              </div>
+            </details>
+            <div class="location-preview" id="location-preview" hidden></div>
+            <div class="location-summary" id="location-summary" hidden></div>
+            <div class="location-save-row" id="location-save-row" hidden>
+              <button class="primary" data-action="save-calibration-proposal" disabled>Save Lantern Locations</button>
+              <span id="location-save-status"></span>
+            </div>
+            <div class="location-issues" id="calibration-results" hidden></div>
+          </div>
         </div>
       </section>
 
@@ -166,6 +239,45 @@
 
       <section class="view" id="view-flash">
         <div class="panel flash-station">
+          <div class="ops-grid">
+            <div><div class="label">Field firmware</div><div class="ops-value" id="firmware-build">--</div></div>
+            <div><div class="label">Version consistency</div><div class="ops-value" id="firmware-consistency">--</div></div>
+          </div>
+          <div class="ops-section release-section">
+            <div class="section-head">
+              <h3>Deployed changes</h3>
+              <div class="chip" id="release-overall-status">--</div>
+            </div>
+            <p class="release-intro">The web control plane and field firmware move independently. This shows what is actually running, not only what was published.</p>
+            <div class="release-grid">
+              <article class="release-card">
+                <div class="release-card-head">
+                  <div><div class="label">Web control plane</div><div class="release-version" id="control-release-version">--</div></div>
+                  <div class="chip" id="control-release-status">--</div>
+                </div>
+                <div class="release-meta" id="control-release-meta">--</div>
+                <h4 id="control-release-title">Release notes unavailable</h4>
+                <ul class="release-changes" id="control-release-changes"></ul>
+              </article>
+              <article class="release-card">
+                <div class="release-card-head">
+                  <div><div class="label">Field firmware</div><div class="release-version" id="field-release-version">--</div></div>
+                  <div class="chip" id="field-release-status">--</div>
+                </div>
+                <div class="release-meta" id="field-release-meta">--</div>
+                <h4 id="field-release-title">Release notes unavailable</h4>
+                <ul class="release-changes" id="field-release-changes"></ul>
+                <div class="release-pending" id="field-release-pending" hidden>
+                  <h4 id="field-release-pending-title">Staged firmware changes</h4>
+                  <ul class="release-changes" id="field-release-pending-changes"></ul>
+                </div>
+              </article>
+            </div>
+            <details class="release-history">
+              <summary>Full release changelog</summary>
+              <div id="release-history-list"></div>
+            </details>
+          </div>
           <div class="ops-section">
             <div class="section-head">
               <h3>OTA firmware update</h3>
@@ -311,57 +423,6 @@
         <div class="panel">
           <h2>Operations</h2>
           <p>Technical escape hatch. This stays out of the default operator path.</p>
-          <div class="ops-grid">
-            <div>
-              <div class="label">Field firmware</div>
-              <div class="ops-value" id="firmware-build">--</div>
-            </div>
-            <div>
-              <div class="label">Version consistency</div>
-              <div class="ops-value" id="firmware-consistency">--</div>
-            </div>
-          </div>
-          <div class="ops-section release-section">
-            <div class="section-head">
-              <h3>Deployed changes</h3>
-              <div class="chip" id="release-overall-status">--</div>
-            </div>
-            <p class="release-intro">The web control plane and field firmware move independently. This shows what is actually running, not only what was published.</p>
-            <div class="release-grid">
-              <article class="release-card">
-                <div class="release-card-head">
-                  <div>
-                    <div class="label">Web control plane</div>
-                    <div class="release-version" id="control-release-version">--</div>
-                  </div>
-                  <div class="chip" id="control-release-status">--</div>
-                </div>
-                <div class="release-meta" id="control-release-meta">--</div>
-                <h4 id="control-release-title">Release notes unavailable</h4>
-                <ul class="release-changes" id="control-release-changes"></ul>
-              </article>
-              <article class="release-card">
-                <div class="release-card-head">
-                  <div>
-                    <div class="label">Field firmware</div>
-                    <div class="release-version" id="field-release-version">--</div>
-                  </div>
-                  <div class="chip" id="field-release-status">--</div>
-                </div>
-                <div class="release-meta" id="field-release-meta">--</div>
-                <h4 id="field-release-title">Release notes unavailable</h4>
-                <ul class="release-changes" id="field-release-changes"></ul>
-                <div class="release-pending" id="field-release-pending" hidden>
-                  <h4 id="field-release-pending-title">Staged firmware changes</h4>
-                  <ul class="release-changes" id="field-release-pending-changes"></ul>
-                </div>
-              </article>
-            </div>
-            <details class="release-history">
-              <summary>Full release changelog</summary>
-              <div id="release-history-list"></div>
-            </details>
-          </div>
           <div class="ops-section recovery-section" id="recovery-section">
             <div class="section-head">
               <h3>Recovery</h3>
@@ -370,17 +431,6 @@
             <div class="recovery-title" id="recovery-title">--</div>
             <p id="recovery-action">--</p>
             <div class="recovery-list" id="recovery-list" hidden></div>
-          </div>
-          <div class="ops-section">
-            <div class="section-head">
-              <h3>Field power</h3>
-              <div class="chip" id="field-power-state">--</div>
-            </div>
-            <div class="button-row">
-              <button class="danger" data-action="sleep-field">Sleep field</button>
-              <button class="primary" data-action="wake-field">Wake field</button>
-              <button data-action="follow-schedule">Follow schedule</button>
-            </div>
           </div>
           <div class="ops-section">
             <div class="section-head">
@@ -413,86 +463,6 @@
           </div>
           <div class="ops-section">
             <div class="section-head">
-              <h3>Lantern Locations</h3>
-              <div class="chip" id="calibration-status">--</div>
-            </div>
-            <div class="ops-grid">
-              <div>
-                <div class="label">Frames</div>
-                <div class="ops-value" id="calibration-frame-count">--</div>
-              </div>
-              <div>
-                <div class="label">Assignments</div>
-                <div class="ops-value" id="calibration-assignment-count">--</div>
-              </div>
-              <div>
-                <div class="label">Code plan</div>
-                <div class="ops-value" id="calibration-code-plan">--</div>
-              </div>
-            </div>
-            <div class="calibration-simple">
-              <button class="primary" data-action="toggle-calibration-mode">Play lantern locator pattern</button>
-              <label class="control-label" for="calibration-video">Video
-                <input id="calibration-video" type="file" accept="video/*">
-              </label>
-              <button class="primary" data-action="analyze-calibration-video" disabled>Analyze video</button>
-            </div>
-            <details class="advanced-panel">
-              <summary>Advanced</summary>
-              <div class="ops-form-grid">
-                <label class="control-label" for="calibration-files">Image sequence
-                  <input id="calibration-files" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple>
-                </label>
-                <label class="control-label" for="calibration-video-start">Video start (s)
-                  <input id="calibration-video-start" type="number" min="0" max="3600" step="0.1" value="0">
-                </label>
-                <label class="control-label" for="calibration-video-interval">Frame interval (s)
-                  <input id="calibration-video-interval" type="number" min="0.1" max="60" step="0.1" value="1">
-                </label>
-                <label class="control-label" for="calibration-threshold">Threshold
-                  <input id="calibration-threshold" type="number" min="0" max="255" step="1" value="180">
-                </label>
-                <label class="control-label" for="calibration-min-area">Min area
-                  <input id="calibration-min-area" type="number" min="1" max="100000" step="1" value="4">
-                </label>
-                <label class="control-label" for="calibration-first-code">First code
-                  <input id="calibration-first-code" type="number" min="1" max="100000" step="1" value="1">
-                </label>
-                <label class="control-label" for="calibration-jitter">Synthetic jitter (px)
-                  <input id="calibration-jitter" type="number" min="0" max="80" step="0.1" value="0">
-                </label>
-                <label class="control-label" for="calibration-led-value">Synthetic LED value
-                  <input id="calibration-led-value" type="number" min="0" max="255" step="1" value="255">
-                </label>
-                <label class="control-label" for="calibration-glare-count">Synthetic glare
-                  <input id="calibration-glare-count" type="number" min="0" max="500" step="1" value="0">
-                </label>
-                <label class="control-label" for="calibration-perspective">Perspective
-                  <input id="calibration-perspective" type="number" min="0" max="0.45" step="0.01" value="0">
-                </label>
-                <label class="control-label" for="calibration-missing-frames">Missing frames
-                  <input id="calibration-missing-frames" type="text" placeholder="0,2">
-                </label>
-              </div>
-              <div class="button-row">
-                <button data-action="plan-calibration">Plan codes</button>
-                <button data-action="upload-calibration-frames" disabled>Upload frames</button>
-                <button data-action="extract-calibration-video" disabled>Extract video</button>
-                <button data-action="refresh-calibration">Refresh frames</button>
-                <button data-action="simulate-calibration">Simulate</button>
-                <button class="primary" data-action="propose-calibration" disabled>Propose layout</button>
-              </div>
-            </details>
-            <div class="location-preview" id="location-preview" hidden></div>
-            <div class="location-summary" id="location-summary" hidden></div>
-            <div class="location-save-row" id="location-save-row" hidden>
-              <button class="primary" data-action="save-calibration-proposal" disabled>Save Lantern Locations</button>
-              <span id="location-save-status"></span>
-            </div>
-            <div class="location-issues" id="calibration-results" hidden></div>
-          </div>
-          <div class="ops-section">
-            <div class="section-head">
               <h3>Update checks</h3>
             </div>
             <div class="ops-form-grid">
@@ -506,10 +476,12 @@
               <h3>Sleep schedule</h3>
               <div class="chip" id="power-state">--</div>
             </div>
-            <label class="check-row">
-              <input id="schedule-enabled" type="checkbox">
-              <span>Use sleep schedule</span>
-            </label>
+            <div class="button-row power-mode-actions">
+              <button class="danger" data-action="sleep-field">Sleep field now</button>
+              <button class="primary" data-action="wake-field">Wake field now</button>
+              <button data-action="enable-sleep-schedule">Enable sleep schedule</button>
+              <button data-action="disable-sleep-schedule">Disable sleep schedule</button>
+            </div>
             <div class="ops-form-grid">
               <label class="control-label" for="led-on-start">Turn LEDs on at
                 <input id="led-on-start" type="time">
@@ -583,6 +555,6 @@
     </section>
   </div>
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js?v=16"></script>
+  <script src="/static/app.js?v=17"></script>
 </body>
 </html>
