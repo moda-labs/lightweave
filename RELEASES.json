@@ -2,6 +2,17 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.3",
+      "date": "2026-08-09",
+      "title": "Focused operator controls",
+      "control_changes": [
+        "Moved lantern location calibration beneath the field map, kept the selected-lantern details beside that workflow, and added clear guidance for automatic positioning from a top-down locator video.",
+        "Collected field firmware status, deployed changes, release history, OTA progress, and USB flashing in the dedicated Firmware tab.",
+        "Unified field power and sleep scheduling into three explicit modes: Sleep on schedule, Always on, or Off, while allowing schedule settings to be edited without changing the active mode."
+      ],
+      "firmware_changes": []
+    },
+    {
       "version": "0.9.2",
       "date": "2026-08-08",
       "title": "Responsive controls and selective updates",
