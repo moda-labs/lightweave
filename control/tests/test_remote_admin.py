@@ -170,6 +170,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     ops_view = index_html[index_html.index('id="view-ops"'):index_html.index("</main>")]
     assert "Lantern Locations" in map_view
     assert map_view.index('id="map"') < map_view.index("Lantern Locations")
+    assert "Upload a top-down video of the lanterns while the locator pattern is playing to automatically position them on the map." in map_view
     assert "Lantern Locations" not in ops_view
     assert 'id="firmware-build"' in flash_view
     assert 'id="firmware-consistency"' in flash_view
