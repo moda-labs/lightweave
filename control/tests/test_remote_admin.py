@@ -159,7 +159,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=17"' in index_html
+    assert 'src="/static/app.js?v=18"' in index_html
     assert 'href="/static/styles.css?v=5"' in index_html
     assert 'data-view="power"' in index_html
     assert 'id="view-power"' in index_html
@@ -340,6 +340,64 @@ if (fieldPowerMode({{schedule_enabled: false, force_awake: false, force_sleep: f
     assert "schedule_enabled" not in settings_payload
     assert "force_awake" not in settings_payload
     assert "force_sleep" not in settings_payload
+
+
+def test_detail_sheet_moves_above_map_locations_and_remains_available_in_table() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function renderDetailVisibility()")
+    end = app_js.index("\n}\n\nfunction renderFirmware", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+let activeView = "map";
+let beforeCalls = 0;
+let afterCalls = 0;
+const mapView = {{name: "map"}};
+const outsideMain = {{name: "outside-main"}};
+const sheet = {{parentElement: outsideMain, hidden: false}};
+const locations = {{
+  before(element) {{
+    if (element !== sheet) process.exit(1);
+    beforeCalls += 1;
+    sheet.parentElement = mapView;
+  }},
+}};
+const main = {{
+  after(element) {{
+    if (element !== sheet) process.exit(2);
+    afterCalls += 1;
+    sheet.parentElement = outsideMain;
+  }},
+}};
+function $(selector) {{
+  return {{
+    ".tabs button.active": {{dataset: {{get view() {{ return activeView; }}}}}},
+    "#detail-sheet": sheet,
+    "#view-map": mapView,
+    ".map-locations-panel": locations,
+    "main": main,
+  }}[selector];
+}}
+{function_source}
+renderDetailVisibility();
+if (beforeCalls !== 1 || sheet.parentElement !== mapView || sheet.hidden) process.exit(3);
+renderDetailVisibility();
+if (beforeCalls !== 1) process.exit(4);
+activeView = "table";
+renderDetailVisibility();
+if (afterCalls !== 1 || sheet.parentElement !== outsideMain || sheet.hidden) process.exit(5);
+activeView = "ops";
+renderDetailVisibility();
+if (afterCalls !== 1 || !sheet.hidden) process.exit(6);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_performer_lists_sort_by_numeric_id() -> None:

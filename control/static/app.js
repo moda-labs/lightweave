@@ -1050,7 +1050,14 @@ function renderDetail() {
 
 function renderDetailVisibility() {
   const activeView = $(".tabs button.active")?.dataset.view;
-  $("#detail-sheet").hidden = !(activeView === "map" || activeView === "table");
+  const sheet = $("#detail-sheet");
+  const mapView = $("#view-map");
+  if (activeView === "map" && sheet.parentElement !== mapView) {
+    $(".map-locations-panel").before(sheet);
+  } else if (activeView !== "map" && sheet.parentElement === mapView) {
+    $("main").after(sheet);
+  }
+  sheet.hidden = !(activeView === "map" || activeView === "table");
 }
 
 function renderFirmware() {
