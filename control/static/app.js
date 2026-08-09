@@ -1050,7 +1050,14 @@ function renderDetail() {
 
 function renderDetailVisibility() {
   const activeView = $(".tabs button.active")?.dataset.view;
-  $("#detail-sheet").hidden = !(activeView === "map" || activeView === "table");
+  const sheet = $("#detail-sheet");
+  const mapView = $("#view-map");
+  if (activeView === "map" && sheet.parentElement !== mapView) {
+    $(".map-locations-panel").before(sheet);
+  } else if (activeView !== "map" && sheet.parentElement === mapView) {
+    $("main").after(sheet);
+  }
+  sheet.hidden = !(activeView === "map" || activeView === "table");
 }
 
 function renderFirmware() {
@@ -1962,7 +1969,6 @@ function powerSnapshotFromState(power = state?.power || {}) {
     deep_sleep_check_s: Number(power.deep_sleep_check_min ?? 15) * 60,
     led_on_start_min: Number(power.led_on_start_min ?? 20 * 60),
     led_on_end_min: Number(power.led_on_end_min ?? 6 * 60),
-    schedule_enabled: Boolean(power.schedule_enabled),
     timezone: localStorage.getItem(TIMEZONE_STORAGE_KEY) || DEFAULT_TIMEZONE,
   };
 }
@@ -1973,7 +1979,6 @@ function powerSnapshotFromForm() {
     deep_sleep_check_s: Number($("#deep-check").value || 900),
     led_on_start_min: timeToMinutes($("#led-on-start").value),
     led_on_end_min: timeToMinutes($("#led-on-end").value),
-    schedule_enabled: $("#schedule-enabled").checked,
     timezone: selectedTimezone(),
   };
 }
@@ -1992,6 +1997,12 @@ function updateSleepScheduleDirtyState() {
   if (saveButton) saveButton.disabled = !isPowerDirty();
 }
 
+function fieldPowerMode(power = state?.power || {}) {
+  if (Boolean(power.force_sleep)) return "off";
+  if (Boolean(power.schedule_enabled) && !Boolean(power.force_awake)) return "scheduled";
+  return "always-on";
+}
+
 function renderPowerPolicy() {
   const power = state.power || {};
   const nextBaseline = powerSnapshotFromState(power);
@@ -2001,19 +2012,18 @@ function renderPowerPolicy() {
     $("#deep-check").value = nextBaseline.deep_sleep_check_s;
     $("#led-on-start").value = minutesToTime(nextBaseline.led_on_start_min);
     $("#led-on-end").value = minutesToTime(nextBaseline.led_on_end_min);
-    $("#schedule-enabled").checked = nextBaseline.schedule_enabled;
     $("#schedule-timezone").value = nextBaseline.timezone;
   }
-  const fieldMode = power.force_awake ? "wake" : (power.force_sleep ? "sleep" : "schedule");
-  $("#field-power-state").textContent = fieldMode === "sleep"
-    ? "sleep override"
-    : (fieldMode === "wake" ? "awake override" : "following schedule");
-  $('[data-action="sleep-field"]').disabled = fieldMode === "sleep";
-  $('[data-action="wake-field"]').disabled = fieldMode === "wake";
-  $('[data-action="follow-schedule"]').disabled = fieldMode === "schedule";
-  $("#power-state").textContent = power.force_sleep
-    ? "forced asleep"
-    : (Boolean(power.schedule_enabled) ? (power.leds_on ? "LEDs on" : "asleep") : "boards on");
+  const fieldMode = fieldPowerMode(power);
+  $("#power-state").textContent = {
+    off: "Off",
+    scheduled: "Sleep on schedule",
+    "always-on": "Always on",
+  }[fieldMode];
+  $('[data-action="sleep-field"]').disabled = fieldMode === "off";
+  $('[data-action="wake-field"]').disabled = fieldMode === "always-on";
+  $('[data-action="enable-sleep-schedule"]').disabled = fieldMode === "scheduled";
+  $('[data-action="disable-sleep-schedule"]').disabled = fieldMode !== "scheduled";
   updateSleepScheduleDirtyState();
 }
 
@@ -2038,9 +2048,6 @@ function powerPolicyFromForm() {
     deep_sleep_check_min: Math.max(1, Math.round(deepSleepSeconds / 60)),
     led_on_start_min: timeToMinutes($("#led-on-start").value),
     led_on_end_min: timeToMinutes($("#led-on-end").value),
-    schedule_enabled: $("#schedule-enabled").checked,
-    force_awake: false,
-    force_sleep: false,
     current_min: currentMinuteInTimezone(),
     current_epoch_s: Math.floor(Date.now() / 1000),
   };
@@ -2599,11 +2606,12 @@ async function runAction(action) {
       toast(ack.message);
       return;
     }
-    if (["sleep-field", "wake-field", "follow-schedule"].includes(action)) {
+    if (["sleep-field", "wake-field", "enable-sleep-schedule", "disable-sleep-schedule"].includes(action)) {
       const mode = {
         "sleep-field": "sleep",
         "wake-field": "wake",
-        "follow-schedule": "schedule",
+        "enable-sleep-schedule": "schedule",
+        "disable-sleep-schedule": "wake",
       }[action];
       if (mode === "sleep" && otaInstall?.running) {
         if (!confirm("A firmware update is keeping the field awake. Pause it at the next safe boundary, then sleep the field?")) return;
@@ -2617,9 +2625,9 @@ async function runAction(action) {
         body: JSON.stringify({ mode }),
       });
       const overrides = {
-        sleep: { force_awake: false, force_sleep: true },
-        wake: { force_awake: true, force_sleep: false },
-        schedule: { force_awake: false, force_sleep: false },
+        sleep: { schedule_enabled: false, force_awake: false, force_sleep: true },
+        wake: { schedule_enabled: false, force_awake: true, force_sleep: false },
+        schedule: { schedule_enabled: true, force_awake: false, force_sleep: false },
       }[mode];
       const nextPower = { ...(state.power || {}), ...overrides };
       nextPower.leds_on = powerLedsOn(nextPower);
@@ -3122,7 +3130,7 @@ $("#pattern-angle").addEventListener("input", (event) => {
   }
 });
 
-["#schedule-enabled", "#led-on-start", "#led-on-end", "#schedule-timezone", "#light-check", "#deep-check"].forEach((selector) => {
+["#led-on-start", "#led-on-end", "#schedule-timezone", "#light-check", "#deep-check"].forEach((selector) => {
   const input = $(selector);
   input.addEventListener("input", updateSleepScheduleDirtyState);
   input.addEventListener("change", updateSleepScheduleDirtyState);

@@ -159,13 +159,33 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=16"' in index_html
-    assert 'href="/static/styles.css?v=4"' in index_html
+    assert 'src="/static/app.js?v=18"' in index_html
+    assert 'href="/static/styles.css?v=5"' in index_html
     assert 'data-view="power"' in index_html
     assert 'id="view-power"' in index_html
     assert index_html.index('data-view="ops"') < index_html.index('data-view="flash"')
     assert '<button data-view="flash">Firmware</button>' in index_html
     flash_view = index_html[index_html.index('id="view-flash"'):index_html.index('id="view-power"')]
+    map_view = index_html[index_html.index('id="view-map"'):index_html.index('id="view-table"')]
+    ops_view = index_html[index_html.index('id="view-ops"'):index_html.index("</main>")]
+    assert "Lantern Locations" in map_view
+    assert map_view.index('id="map"') < map_view.index("Lantern Locations")
+    assert "Upload a top-down video of the lanterns while the locator pattern is playing to automatically position them on the map." in map_view
+    assert "Lantern Locations" not in ops_view
+    assert 'id="firmware-build"' in flash_view
+    assert 'id="firmware-consistency"' in flash_view
+    assert "Deployed changes" in flash_view
+    assert "Full release changelog" in flash_view
+    assert 'id="firmware-build"' not in ops_view
+    assert "Deployed changes" not in ops_view
+    assert "Full release changelog" not in ops_view
+    assert "Field power" not in ops_view
+    assert "Sleep field now" in ops_view
+    assert "Wake field now" in ops_view
+    assert "Enable sleep schedule" in ops_view
+    assert "Disable sleep schedule" in ops_view
+    assert 'id="schedule-enabled"' not in ops_view
+    assert "function fieldPowerMode" in app_js
     assert 'id="ota-mode"' in flash_view
     assert "OTA firmware update" in flash_view
     assert "Upload to control plane" not in flash_view
@@ -266,7 +286,7 @@ if (state.pattern.brightness !== 48 || state.blackout.restore_available !== fals
         app_js.index('if (action === "save-power-policy")')
     ]
     field_power_action = app_js[
-        app_js.index('if (["sleep-field", "wake-field", "follow-schedule"].includes(action))'):
+        app_js.index('if (["sleep-field", "wake-field", "enable-sleep-schedule", "disable-sleep-schedule"].includes(action))'):
         app_js.index('if (action === "save-power-monitor")')
     ]
     pattern_action = app_js[
@@ -277,6 +297,8 @@ if (state.pattern.brightness !== 48 || state.blackout.restore_available !== fals
     assert "rememberGroupBrightness" in group_action
     assert "await refresh()" not in group_action
     assert 'api("/api/operations/ota-install", { method: "DELETE" })' in field_power_action
+    assert 'schedule_enabled: true' in field_power_action
+    assert 'schedule_enabled: false' in field_power_action
     assert "await refresh()" not in field_power_action
     assert "await refresh()" not in pattern_action
     assert "await refresh()" not in app_js[
@@ -287,6 +309,95 @@ if (state.pattern.brightness !== 48 || state.blackout.restore_available !== fals
         app_js.index('if (action === "forget")'):
         app_js.index('if (action === "turn-off-group")')
     ]
+
+
+def test_power_mode_ui_has_three_canonical_states() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    helper_start = app_js.index("function fieldPowerMode")
+    helper_end = app_js.index("\n\nfunction renderPowerPolicy", helper_start)
+    helper_source = app_js[helper_start:helper_end]
+    script = f"""
+{helper_source}
+if (fieldPowerMode({{schedule_enabled: true, force_awake: false, force_sleep: false}}) !== "scheduled") process.exit(1);
+if (fieldPowerMode({{schedule_enabled: false, force_awake: true, force_sleep: false}}) !== "always-on") process.exit(2);
+if (fieldPowerMode({{schedule_enabled: false, force_awake: false, force_sleep: true}}) !== "off") process.exit(3);
+if (fieldPowerMode({{schedule_enabled: false, force_awake: false, force_sleep: false}}) !== "always-on") process.exit(4);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    settings_payload = app_js[
+        app_js.index("function powerPolicyFromForm"):
+        app_js.index("function detailSummary")
+    ]
+    assert "schedule_enabled" not in settings_payload
+    assert "force_awake" not in settings_payload
+    assert "force_sleep" not in settings_payload
+
+
+def test_detail_sheet_moves_above_map_locations_and_remains_available_in_table() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function renderDetailVisibility()")
+    end = app_js.index("\n}\n\nfunction renderFirmware", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+let activeView = "map";
+let beforeCalls = 0;
+let afterCalls = 0;
+const mapView = {{name: "map"}};
+const outsideMain = {{name: "outside-main"}};
+const sheet = {{parentElement: outsideMain, hidden: false}};
+const locations = {{
+  before(element) {{
+    if (element !== sheet) process.exit(1);
+    beforeCalls += 1;
+    sheet.parentElement = mapView;
+  }},
+}};
+const main = {{
+  after(element) {{
+    if (element !== sheet) process.exit(2);
+    afterCalls += 1;
+    sheet.parentElement = outsideMain;
+  }},
+}};
+function $(selector) {{
+  return {{
+    ".tabs button.active": {{dataset: {{get view() {{ return activeView; }}}}}},
+    "#detail-sheet": sheet,
+    "#view-map": mapView,
+    ".map-locations-panel": locations,
+    "main": main,
+  }}[selector];
+}}
+{function_source}
+renderDetailVisibility();
+if (beforeCalls !== 1 || sheet.parentElement !== mapView || sheet.hidden) process.exit(3);
+renderDetailVisibility();
+if (beforeCalls !== 1) process.exit(4);
+activeView = "table";
+renderDetailVisibility();
+if (afterCalls !== 1 || sheet.parentElement !== outsideMain || sheet.hidden) process.exit(5);
+activeView = "ops";
+renderDetailVisibility();
+if (afterCalls !== 1 || !sheet.hidden) process.exit(6);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_performer_lists_sort_by_numeric_id() -> None:

@@ -45,6 +45,8 @@ h1 { margin: 0; font-size: 19px; line-height: 1; font-weight: 650; }
 main { min-height: 0; overflow: hidden; background: #090c0a; }
 .view { display: none; height: 100%; min-height: 460px; }
 .view.active { display: block; }
+#view-map { height: auto; }
+.map-locations-panel { max-width: none; }
 
 .map {
   position: relative;
@@ -626,9 +628,8 @@ input[type="number"], input[type="time"], input[type="text"], input[type="passwo
 }
 .ops-form-grid input[readonly] { color: var(--muted); }
 #schedule-timezone { width: 176px; color: var(--muted); }
-.check-row { display: inline-flex; align-items: center; gap: 9px; margin: 4px 0 8px; color: var(--text); font-weight: 650; }
-.check-row input { width: 18px; height: 18px; accent-color: var(--amber); }
 .button-row { display: flex; gap: 8px; margin-top: 14px; }
+.power-mode-actions { flex-wrap: wrap; }
 .log { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 12px; font-size: 12px; line-height: 1.8; color: var(--muted); overflow: auto; font-family: "JetBrains Mono", "IBM Plex Mono", monospace; }
 
 .sheet { border-top: 1px solid var(--line); background: var(--surface); padding: 12px 16px 14px; display: grid; gap: 12px; }

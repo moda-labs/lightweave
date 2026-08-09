@@ -312,9 +312,9 @@ class PowerPolicyUpdate(BaseModel):
     deep_sleep_check_min: int = Field(ge=1, le=1440)
     led_on_start_min: int = Field(ge=0, le=1439)
     led_on_end_min: int = Field(ge=0, le=1439)
-    schedule_enabled: bool
-    force_awake: bool
-    force_sleep: bool = False
+    schedule_enabled: bool | None = None
+    force_awake: bool | None = None
+    force_sleep: bool | None = None
     current_min: int = Field(ge=0, le=1439)
     current_epoch_s: int = Field(ge=0, le=4_294_967_295)
 
@@ -2419,7 +2419,10 @@ def create_app(
     @app.post("/api/operations/power-policy")
     async def update_power_policy(request: PowerPolicyUpdate) -> dict[str, Any]:
         try:
-            ack = await conductor_call("update_power_policy", request.model_dump())
+            ack = await conductor_call(
+                "update_power_policy",
+                request.model_dump(exclude_none=True),
+            )
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
@@ -2430,9 +2433,21 @@ def create_app(
     @app.post("/api/operations/field-power")
     async def update_field_power(request: FieldPowerUpdate) -> dict[str, Any]:
         overrides = {
-            "sleep": {"force_awake": False, "force_sleep": True},
-            "wake": {"force_awake": True, "force_sleep": False},
-            "schedule": {"force_awake": False, "force_sleep": False},
+            "sleep": {
+                "schedule_enabled": False,
+                "force_awake": False,
+                "force_sleep": True,
+            },
+            "wake": {
+                "schedule_enabled": False,
+                "force_awake": True,
+                "force_sleep": False,
+            },
+            "schedule": {
+                "schedule_enabled": True,
+                "force_awake": False,
+                "force_sleep": False,
+            },
         }
         if request.mode == "sleep" and app.state.ota_install.get("running") is True:
             raise HTTPException(

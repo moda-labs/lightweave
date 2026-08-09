@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**188 pass**) is green; **457 control tests** are green; all three
+(**188 pass**) is green; **459 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest in this feature branch (2026-08-08): control mutations now return as soon
@@ -23,7 +23,10 @@ the browser optimistically instead of forcing another fleet read. Group Off is
 now an Off/On toggle that remembers the previous brightness. Sleep field pauses a
 running OTA at a safe boundary, exits OTA maintenance mode, then applies
 force-sleep; direct API sleep refuses a still-running OTA, and automatic
-reconciliation stays paused while the sleep override is active. This is a
+reconciliation stays paused while the sleep override is active. Field power and
+sleep scheduling now share one canonical three-state mode: Sleep on schedule,
+Always on, or Off. Mode transitions normalize all three firmware flags, while
+editing schedule settings leaves the active mode unchanged. This is a
 control-plane-only working-tree change and has not been released to the Pi yet.
 
 Latest in this feature branch (2026-08-07): **automatic OTA reconciliation now
