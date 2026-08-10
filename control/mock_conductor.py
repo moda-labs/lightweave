@@ -151,6 +151,15 @@ class MockConductor:
         }
     )
     group_patterns: list[dict[str, Any]] = field(default_factory=list)
+    locator: dict[str, Any] = field(
+        default_factory=lambda: {
+            "enabled": False,
+            "brightness": 0,
+            "slot_ms": 0,
+            "bit_count": 0,
+            "min_hamming_distance": 0,
+        }
+    )
     _blackout_brightness: list[int] | None = field(default=None, init=False, repr=False)
     ota_started_at: float | None = None
     ota_installed_crc32: int | None = None
@@ -203,6 +212,7 @@ class MockConductor:
         attention = sum(1 for item in lanterns if item["attention"] != "None")
         firmware = self._firmware_summary(lanterns, table_rows)
         ota = self._ota_summary(lanterns, table_rows, now, firmware)
+        effective_pattern = self._effective_pattern()
         return {
             "conductor": {
                 "connected": self.connected,
@@ -219,11 +229,12 @@ class MockConductor:
                 "table_rows": table_rows,
                 "firmware": firmware,
             },
-            "pattern": deepcopy(self.pattern),
+            "pattern": effective_pattern,
             "patterns": [
                 {"group_id": group_id, "config": deepcopy(config)}
                 for group_id, config in enumerate(self.group_patterns)
             ],
+            "locator": deepcopy(self.locator),
             "blackout": {"restore_available": self._blackout_brightness is not None},
             "power": deepcopy(self.power),
             "ota": ota,
@@ -240,7 +251,8 @@ class MockConductor:
         self.seq += 20
         for lantern in self._lanterns:
             lantern.last_seen_s += 5
-        self._event(f"beacon seq={self.seq} pattern={self.pattern['pattern'].upper()} bri={self.pattern['brightness']}")
+        effective = self._effective_pattern()
+        self._event(f"beacon seq={self.seq} pattern={effective['pattern'].upper()} bri={effective['brightness']}")
 
     def identify(self, mac: str) -> dict[str, Any]:
         lantern = self._find(mac)
@@ -378,6 +390,51 @@ class MockConductor:
         scope = "all groups" if group_id is None else f"Group {group_id + 1}"
         self._event(f"pattern={pattern} bri={brightness} scope={scope}")
         return {"ok": True, "message": f"pattern changed to {pattern} for {scope}", "pattern": deepcopy(updated)}
+
+    def set_locator(
+        self,
+        enabled: bool,
+        *,
+        brightness: int = 96,
+        slot_ms: int = 1000,
+        bit_count: int = 1,
+        min_hamming_distance: int = 3,
+    ) -> dict[str, Any]:
+        if enabled:
+            self.locator = {
+                "enabled": True,
+                "brightness": brightness,
+                "slot_ms": slot_ms,
+                "bit_count": bit_count,
+                "min_hamming_distance": min_hamming_distance,
+            }
+        else:
+            self.locator = {
+                "enabled": False,
+                "brightness": 0,
+                "slot_ms": 0,
+                "bit_count": 0,
+                "min_hamming_distance": 0,
+            }
+        self._event(f"locator={'on' if enabled else 'off'}")
+        return {
+            "ok": True,
+            "message": "locator enabled" if enabled else "locator disabled",
+        }
+
+    def _effective_pattern(self) -> dict[str, Any]:
+        if not self.locator.get("enabled"):
+            return deepcopy(self.pattern)
+        return {
+            "pattern": "Calibration",
+            "brightness": int(self.locator["brightness"]),
+            "params": {
+                "p0": int(self.locator["slot_ms"]),
+                "p1": int(self.locator["bit_count"]),
+                "p2": 1,
+                "p3": int(self.locator["min_hamming_distance"]),
+            },
+        }
 
     def blackout(self) -> dict[str, Any]:
         if self._blackout_brightness is None:

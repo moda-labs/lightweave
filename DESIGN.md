@@ -94,15 +94,17 @@ Suggested scale:
 
 ## Layout
 
-The map is the primary surface. Everything else supports it.
+The Overview health dashboard is the primary surface. The map remains the primary
+spatial operating surface one tap deeper; everything else supports those two views.
 
 Default to **progressive disclosure**. The first screen should answer the simple
 operator questions without exposing every diagnostic:
 
-- Is the field alive?
+- Is the field alive and synchronized?
+- Is firmware consistent?
 - What is playing?
-- Is anything wrong?
-- What can I safely do next?
+- Is power behavior healthy over time?
+- What needs attention next?
 
 Detailed MACs, serial lines, power internals, table cross-checks, and raw logs are
 still available, but they live one interaction deeper: node inspector, expandable
@@ -111,7 +113,10 @@ helper while still letting the builder get every useful byte when needed.
 
 ### Mobile
 
-- Bottom tab bar: `Map`, `Node List`, `Patterns`, `Operations`.
+- Primary tabs begin with `Overview`, followed by `Map`, `Node List`, `Patterns`,
+  `Power`, `Operations`, and `Firmware`.
+- `Overview` opens by default and keeps health metrics, attention items, current
+  group patterns, and measured power history readable without horizontal scrolling.
 - `Map` and `Table` are peer multi-lantern views over the same roster/table data.
 - `Map` opens to the layout map with a compact status strip above it.
 - `Table` shows the same lanterns as sortable/filterable rows for count checks,

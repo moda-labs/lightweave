@@ -128,6 +128,29 @@ def test_pattern_command_can_target_one_group() -> None:
     assert json.loads(transport.writes[0])["group_id"] == 2
 
 
+def test_locator_command_is_separate_from_group_patterns() -> None:
+    transport = FakeTransport([json.dumps({"id": 1, "ok": True})])
+    conductor = JsonLineSerialConductor(transport)
+
+    conductor.set_locator(
+        True,
+        brightness=96,
+        slot_ms=1000,
+        bit_count=7,
+        min_hamming_distance=3,
+    )
+
+    assert json.loads(transport.writes[0]) == {
+        "id": 1,
+        "cmd": "locator",
+        "enabled": True,
+        "brightness": 96,
+        "slot_ms": 1000,
+        "bit_count": 7,
+        "min_hamming_distance": 3,
+    }
+
+
 def test_restore_blackout_maps_to_json_command() -> None:
     transport = FakeTransport([json.dumps({"id": 1, "ok": True, "message": "blackout restored"})])
     conductor = JsonLineSerialConductor(transport)

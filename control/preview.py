@@ -15,6 +15,8 @@ FIREFLY_SCATTER_MASK = 0x007F
 OCEAN_WAVELENGTH_MASK = 0x03FF
 OCEAN_ANGLE_MASK = 0x01FF
 RING_PIXEL_COUNT = 16
+FIELD_PREVIEW_PIXEL_COUNT = 16
+FIELD_GROUP_COUNT = 8
 
 
 @dataclass(frozen=True)
@@ -189,6 +191,201 @@ def render_preview_frames(
     }
 
 
+def render_field_preview_frames(
+    state: dict[str, Any],
+    duration_ms: int,
+    fps: int,
+    start_ms: int | None = None,
+) -> dict[str, Any]:
+    """Render the effective multi-group field state into a compact frame buffer.
+
+    Node metadata is returned once and each frame's color list uses the same
+    order. Fire Flicker keeps a representative 16-pixel ring so the dashboard
+    can show its spatial texture without sending every physical LED in every
+    frame.
+    """
+    offsets = _frame_times(duration_ms, fps)
+    if start_ms is None:
+        uptime_s = (state.get("conductor") or {}).get("uptime_s")
+        start_ms = round(float(uptime_s) * 1000) if isinstance(uptime_s, (int, float)) else 0
+    if start_ms < 0:
+        raise ValueError("start_ms must be non-negative")
+
+    all_lanterns = [
+        item for item in state.get("lanterns", [])
+        if item.get("status") != "retired"
+    ]
+    positioned = [
+        item for item in all_lanterns
+        if isinstance(item.get("x"), (int, float)) and isinstance(item.get("y"), (int, float))
+    ]
+    positioned.sort(key=_field_lantern_sort_key)
+    locator = state.get("locator") or {}
+    locator_enabled = locator.get("enabled") is True
+    leds_on = (state.get("power") or {}).get("leds_on") is not False
+    patterns = {
+        _safe_group_id(entry.get("group_id")): entry.get("config") or {}
+        for entry in state.get("patterns", [])
+        if isinstance(entry, dict)
+    }
+    fallback_pattern = state.get("pattern") or {
+        "pattern": "Glow", "brightness": 48, "params": {}
+    }
+    calibration_ranks = {
+        str(item.get("mac") or "").upper(): rank
+        for rank, item in enumerate(
+            sorted(
+                (
+                    item for item in all_lanterns
+                    if item.get("status") == "alive" and item.get("mac")
+                ),
+                key=lambda item: str(item.get("mac") or ""),
+            ),
+            start=1,
+        )
+    }
+
+    nodes = [
+        {
+            "mac": item.get("mac"),
+            "label": item.get("label") or item.get("mac") or "node",
+            "x": float(item["x"]),
+            "y": float(item["y"]),
+            "status": item.get("status") or "unknown",
+            "attention": item.get("attention") or "None",
+            "group_id": _safe_group_id(item.get("group_id")),
+            "led_count": _safe_led_count(item.get("led_count")),
+        }
+        for item in positioned
+    ]
+    configs = [
+        _effective_field_pattern(item, locator, locator_enabled, patterns, fallback_pattern)
+        for item in positioned
+    ]
+    calibration_code_cache: dict[tuple[int, int, int], list[int]] = {}
+    calibration_codes: list[int | None] = []
+    max_calibration_rank = max(calibration_ranks.values(), default=0)
+    for item, config in zip(positioned, configs):
+        normalized = _normalize_pattern(str(config.get("pattern") or "Glow"))
+        if normalized != "calibration":
+            calibration_codes.append(None)
+            continue
+        params = config.get("params") or {}
+        bit_count = min(16, max(1, int(_number(params, "p1", "bit_count", default=1))))
+        first_code = int(_number(params, "p2", "first_code", default=1)) or 1
+        min_distance = max(
+            1,
+            int(_number(params, "p3", "min_hamming_distance", default=1)),
+        )
+        key = (first_code, bit_count, min_distance)
+        codes = calibration_code_cache.get(key)
+        if codes is None:
+            codes = _calibration_code_values(
+                max_calibration_rank,
+                first_code,
+                bit_count,
+                min_distance,
+            )
+            calibration_code_cache[key] = codes
+        node_id = calibration_ranks.get(str(item.get("mac") or "").upper(), 0)
+        calibration_codes.append(codes[node_id - 1] if 0 < node_id <= len(codes) else 0)
+
+    frames = []
+    for offset in offsets:
+        t_ms = start_ms + offset
+        colors = []
+        for item, config, calibration_code in zip(
+            positioned,
+            configs,
+            calibration_codes,
+        ):
+            pattern_name = str(config.get("pattern") or "Glow")
+            normalized = _normalize_pattern(pattern_name)
+            brightness = min(MAX_BRIGHTNESS, max(0, int(config.get("brightness") or 0)))
+            if not leds_on or item.get("status") != "alive":
+                brightness = 0
+            params = config.get("params") or {}
+            led_count = _safe_led_count(item.get("led_count"))
+            node_id = calibration_ranks.get(str(item.get("mac") or "").upper(), 0)
+            pixels = _pattern_pixels(
+                normalized,
+                brightness,
+                params,
+                t_ms * 1000,
+                float(item["x"]),
+                float(item["y"]),
+                node_id=node_id,
+                pixel_count=led_count,
+                sample_count=FIELD_PREVIEW_PIXEL_COUNT,
+                calibration_code=calibration_code,
+            )
+            average = _average_rgbw(pixels)
+            rendered = {"rgb": list(_rgbw_to_preview_rgb(average))}
+            if normalized == "fire_flicker":
+                rendered["pixels"] = [list(_rgbw_to_preview_rgb(pixel)) for pixel in pixels]
+            colors.append(rendered)
+        frames.append({"t": t_ms, "colors": colors})
+
+    interval_ms = offsets[1] - offsets[0] if len(offsets) > 1 else round(1000 / fps)
+    return {
+        "mode": "locator" if locator_enabled else "show",
+        "leds_on": leds_on,
+        "source_seq": (state.get("conductor") or {}).get("seq"),
+        "start_ms": start_ms,
+        "duration_ms": duration_ms,
+        "fps": fps,
+        "frame_interval_ms": interval_ms,
+        "frame_count": len(frames),
+        "positioned_count": len(nodes),
+        "unpositioned_count": len(all_lanterns) - len(nodes),
+        "nodes": nodes,
+        "frames": frames,
+    }
+
+
+def _field_lantern_sort_key(item: dict[str, Any]) -> tuple[int, str]:
+    node_id = item.get("node_id")
+    numeric_id = int(node_id) if isinstance(node_id, int) and node_id > 0 else 2**31 - 1
+    return numeric_id, str(item.get("label") or item.get("mac") or "")
+
+
+def _safe_led_count(value: Any) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return RING_PIXEL_COUNT
+    return count if count in {16, 32, 64} else RING_PIXEL_COUNT
+
+
+def _safe_group_id(value: Any) -> int:
+    try:
+        group_id = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return group_id if 0 <= group_id < FIELD_GROUP_COUNT else 0
+
+
+def _effective_field_pattern(
+    lantern: dict[str, Any],
+    locator: dict[str, Any],
+    locator_enabled: bool,
+    patterns: dict[int, dict[str, Any]],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    if locator_enabled:
+        return {
+            "pattern": "Calibration",
+            "brightness": int(locator.get("brightness") or 0),
+            "params": {
+                "p0": int(locator.get("slot_ms") or 1000),
+                "p1": int(locator.get("bit_count") or 1),
+                "p2": 1,
+                "p3": int(locator.get("min_hamming_distance") or 1),
+            },
+        }
+    return patterns.get(_safe_group_id(lantern.get("group_id")), fallback)
+
+
 def review_preview(
     state: dict[str, Any],
     pattern: str,
@@ -262,6 +459,7 @@ def _normalize_pattern(pattern: str) -> str:
         "fire": "fire_flicker",
         "flame": "fire_flicker",
         "white": "white",
+        "calibration": "calibration",
     }
     try:
         return aliases[key]
@@ -348,10 +546,31 @@ def _pattern_pixels(
     synced_us: int,
     x: float,
     y: float,
+    *,
+    node_id: int = 0,
+    pixel_count: int = RING_PIXEL_COUNT,
+    sample_count: int | None = None,
+    calibration_code: int | None = None,
 ) -> list[Rgbw]:
+    if pattern == "calibration":
+        slot_ms = int(_number(params, "p0", "slot_ms", default=1000))
+        bit_count = int(_number(params, "p1", "bit_count", default=1))
+        first_code = int(_number(params, "p2", "first_code", default=1))
+        min_distance = int(_number(params, "p3", "min_hamming_distance", default=1))
+        on = _calibration_bit_on(
+            synced_us,
+            node_id,
+            slot_ms,
+            bit_count,
+            first_code,
+            min_distance,
+            calibration_code,
+        )
+        color = Rgbw(0, 0, 0, brightness if on else 0)
+        return [color] * (sample_count or pixel_count)
     if pattern != "fire_flicker":
         color = _pattern_color(pattern, brightness, params, synced_us, x, y)
-        return [color] * RING_PIXEL_COUNT
+        return [color] * (sample_count or pixel_count)
 
     period_s = _number(params, "p0", "period", default=1200) / 1000.0
     hue = _number(params, "p1", "hue", default=24) % 360
@@ -368,16 +587,88 @@ def _pattern_pixels(
     saturation = (min(max(saturation, 0), 100) if full_hsv
                   else (95 if saturation <= 0 else min(saturation, 100))) / 100.0
 
+    physical_count = max(1, int(pixel_count))
+    rendered_count = max(1, int(sample_count or physical_count))
+    sample_indexes = [
+        min(physical_count - 1, math.floor(index * physical_count / rendered_count))
+        for index in range(rendered_count)
+    ]
     pixels = []
-    for pixel_index in range(RING_PIXEL_COUNT):
+    for pixel_index in sample_indexes:
         intensity, heat = _fire_flicker_sample(
-            synced_us, x, y, pixel_index, RING_PIXEL_COUNT, period_s, texture
+            synced_us, x, y, pixel_index, physical_count, period_s, texture
         )
         hue_shift = 18.0 * (intensity - 0.55) + 5.0 * heat
         pixels.append(_hsv_color(
             brightness, intensity, hue + hue_shift, saturation, value
         ))
     return pixels
+
+
+def _calibration_code_value(
+    node_id: int,
+    first_code: int,
+    bit_count: int,
+    min_hamming_distance: int,
+) -> int:
+    codes = _calibration_code_values(
+        node_id,
+        first_code,
+        bit_count,
+        min_hamming_distance,
+    )
+    return codes[node_id - 1] if node_id > 0 and len(codes) >= node_id else 0
+
+
+def _calibration_code_values(
+    count: int,
+    first_code: int,
+    bit_count: int,
+    min_hamming_distance: int,
+) -> list[int]:
+    if count <= 0:
+        return []
+    safe_bits = min(16, max(1, bit_count))
+    safe_distance = max(1, min_hamming_distance)
+    max_value = 65535 if safe_bits >= 16 else (1 << safe_bits) - 1
+    selected: list[int] = []
+    for code in range(first_code or 1, max_value + 1):
+        mask = 0xFFFF if safe_bits >= 16 else (1 << safe_bits) - 1
+        if any(((code ^ previous) & mask).bit_count() < safe_distance for previous in selected):
+            continue
+        selected.append(code)
+        if len(selected) >= min(count, 256):
+            break
+    return selected
+
+
+def _calibration_bit_on(
+    synced_us: int,
+    node_id: int,
+    slot_ms: int,
+    bit_count: int,
+    first_code: int,
+    min_hamming_distance: int,
+    calibration_code: int | None = None,
+) -> bool:
+    if node_id <= 0 or bit_count <= 0:
+        return False
+    safe_slot_ms = slot_ms or 1000
+    safe_bits = min(16, bit_count)
+    slot = synced_us // (safe_slot_ms * 1000)
+    index = slot % safe_bits
+    code = calibration_code
+    if code is None:
+        code = _calibration_code_value(
+            node_id,
+            first_code or 1,
+            safe_bits,
+            min_hamming_distance,
+        )
+    if code == 0:
+        return False
+    shift = safe_bits - 1 - index
+    return bool((code >> shift) & 1)
 
 
 def _average_rgbw(colors: list[Rgbw]) -> Rgbw:

@@ -22,7 +22,7 @@ from control.group_store import GroupStore
 from control.mock_conductor import Lantern, MockConductor
 from control.ota_store import OtaArtifactStore, OtaInstallStore
 from control.pattern_store import PatternStore
-from control.power_monitor import PowerMonitorStore
+from control.power_monitor import PowerHistoryStore, PowerMonitorStore
 from control.preview import _fire_flicker_sample
 
 
@@ -278,12 +278,10 @@ class BlockingCalibrationOtaConductor(BlockingOtaConductor):
                 raise RuntimeError("test calibration snapshot release timed out")
         return super().snapshot()
 
-    def update_pattern(
-        self, pattern: str, brightness: int, params: dict
-    ) -> dict:
-        if pattern == "Calibration":
+    def set_locator(self, enabled: bool, **kwargs) -> dict:
+        if enabled:
             self.calibration_pattern_updated.set()
-        return super().update_pattern(pattern, brightness, params)
+        return super().set_locator(enabled, **kwargs)
 
 
 class ExplodingOtaConductor(MockConductor):
@@ -294,6 +292,11 @@ class ExplodingOtaConductor(MockConductor):
 class RejectingPatternConductor(MockConductor):
     def update_pattern(self, pattern: str, brightness: int, params: dict) -> dict:
         return {"ok": False, "error": "bad pattern"}
+
+
+class RejectingLocatorConductor(MockConductor):
+    def set_locator(self, enabled: bool, **kwargs) -> dict:
+        return {"ok": False, "error": "bad locator"}
 
 
 class RejectingNodeConfigurationConductor(MockConductor):
@@ -1174,7 +1177,19 @@ def test_calibration_mode_toggle_restores_previous_pattern() -> None:
     assert running["pattern"]["pattern"] == "Calibration"
     assert running["pattern"]["params"]["p0"] == 1000
     assert running["pattern"]["params"]["p1"] == started.json()["plan"]["bit_count"]
+    assert running["locator"]["enabled"] is True
+    assert running["patterns"][3]["config"] == {
+        "pattern": "Sweep",
+        "brightness": 72,
+        "params": {"period": 8000},
+    }
+    assert running["patterns"][5]["config"] == {
+        "pattern": "White",
+        "brightness": 0,
+        "params": {},
+    }
     assert stopped.status_code == 200
+    assert restored["locator"]["enabled"] is False
     assert restored["pattern"]["pattern"] == "Glow"
     assert restored["pattern"]["brightness"] == 48
     assert restored["pattern"]["params"] == {"hue": 40, "saturation": 100}
@@ -1233,12 +1248,12 @@ def test_group_name_api_rejects_unknown_group_and_long_name(tmp_path: Path) -> N
 
 
 def test_calibration_mode_rejected_by_conductor_is_400() -> None:
-    client = TestClient(create_app(RejectingPatternConductor()))
+    client = TestClient(create_app(RejectingLocatorConductor()))
 
     response = client.post("/api/operations/calibration-mode", json={"enabled": True})
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "bad pattern"
+    assert response.json()["detail"] == "bad locator"
 
 
 def test_calibration_mode_includes_unprovisioned_nodes_by_mac_rank() -> None:
@@ -1532,6 +1547,24 @@ def test_preview_frames_endpoint_returns_sequence_metrics() -> None:
     assert body["metrics"]["max_lit_count"] <= 9
     assert body["metrics"]["avg_luma_mean"] >= 0
     assert body["metrics"]["max_contrast"] >= body["metrics"]["min_contrast"]
+
+
+def test_field_preview_frames_endpoint_renders_effective_layout() -> None:
+    client = TestClient(create_app(MockConductor()))
+
+    response = client.get(
+        "/api/field-preview/frames.json",
+        params={"duration_ms": 1000, "fps": 2, "start_ms": 0},
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["mode"] == "show"
+    assert body["positioned_count"] == 9
+    assert body["unpositioned_count"] == 1
+    assert body["frame_count"] == 2
+    assert len(body["nodes"]) == 9
+    assert all(len(frame["colors"]) == 9 for frame in body["frames"])
 
 
 def test_review_endpoint_scores_candidate_pattern() -> None:
@@ -1976,6 +2009,79 @@ def test_power_monitor_draw_uses_recent_energy_delta_without_changing_lifetime_w
     assert second["draw_source"] == "recent_average"
     assert second["wh"] == 16.868
     assert second["lifetime_avg_w"] == 13.482
+
+
+def test_power_history_survives_control_restart_and_drives_recent_average(
+    tmp_path: Path, monkeypatch
+) -> None:
+    now = [10_000.0]
+    monkeypatch.setattr(app_module.time, "time", lambda: now[0])
+    conductor = MockConductor()
+    meter = conductor._lanterns[0]
+    meter.power_wh = 20.0
+    meter.power_mah = 1000.0
+    meter.power_elapsed_s = 7200
+    meter.bus_v = 13.0
+    meter.current_ma = 100.0
+    meter.power_last_report_s = 0
+    history_root = tmp_path / "power"
+
+    first = TestClient(
+        create_app(
+            conductor,
+            power_history_store=PowerHistoryStore(history_root),
+        )
+    )
+    assert first.get("/api/state").status_code == 200
+
+    meter.power_wh = 20.02
+    meter.power_mah = 1001.5
+    meter.power_elapsed_s = 30
+    now[0] += 60
+    restarted = TestClient(
+        create_app(
+            conductor,
+            power_history_store=PowerHistoryStore(history_root),
+        )
+    )
+
+    sample = next(
+        item
+        for item in restarted.get("/api/state").json()["power_monitor"]["samples"]
+        if item["mac"] == meter.mac
+    )
+    history = restarted.get(
+        "/api/power/history",
+        params={"mac": meter.mac, "hours": 24, "limit": 100},
+    ).json()
+
+    assert sample["avg_w"] == pytest.approx(1.2)
+    assert sample["draw_source"] == "recent_average"
+    assert history["count"] == 2
+    assert [point["wh"] for point in history["samples"]] == [20.0, 20.02]
+    assert history["samples"][0]["energy_session"] == 0
+    assert history["samples"][1]["energy_session"] == 0
+
+
+def test_power_history_storage_failure_is_visible_without_hiding_live_state(
+    tmp_path: Path,
+) -> None:
+    blocked_root = tmp_path / "not-a-directory"
+    blocked_root.write_text("occupied", encoding="utf-8")
+    client = TestClient(
+        create_app(
+            MockConductor(),
+            power_history_store=PowerHistoryStore(blocked_root),
+        )
+    )
+
+    state_response = client.get("/api/state")
+    history_response = client.get("/api/power/history")
+
+    assert state_response.status_code == 200
+    assert state_response.json()["power_monitor"]["history"]["enabled"] is True
+    assert state_response.json()["power_monitor"]["history"]["error"]
+    assert history_response.status_code == 503
 
 
 def test_power_monitor_settings_and_anchor_survive_control_restart(tmp_path: Path) -> None:
@@ -3764,11 +3870,16 @@ def test_calibration_mode_toggle_finishes_before_ota_can_reserve_conductor(
     assert wait_for_ota_terminal(client)["complete"] is True
 
 
-def test_failed_calibration_restore_keeps_previous_pattern_for_retry() -> None:
-    app = create_app(RejectingPatternConductor())
-    previous = {"pattern": "Sweep", "brightness": 72, "params": {"period": 4000}}
-    app.state.calibration_previous_pattern = dict(previous)
-    client = TestClient(app)
+def test_failed_calibration_stop_keeps_locator_active_for_retry() -> None:
+    conductor = RejectingLocatorConductor()
+    conductor.locator = {
+        "enabled": True,
+        "brightness": 96,
+        "slot_ms": 1000,
+        "bit_count": 7,
+        "min_hamming_distance": 3,
+    }
+    client = TestClient(create_app(conductor))
 
     response = client.post(
         "/api/operations/calibration-mode",
@@ -3776,7 +3887,7 @@ def test_failed_calibration_restore_keeps_previous_pattern_for_retry() -> None:
     )
 
     assert response.status_code == 400
-    assert app.state.calibration_previous_pattern == previous
+    assert conductor.snapshot()["locator"]["enabled"] is True
 
 
 def test_ota_start_returns_before_background_transfer_finishes(

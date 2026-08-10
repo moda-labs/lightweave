@@ -156,6 +156,7 @@ Snapshot shape:
   "power_monitor": {
     "battery_capacity_wh": 384.0,
     "full_voltage": 14.4,
+    "history": {"enabled": true, "error": null},
     "sample_count": 2,
     "usable_sample_count": 2,
     "estimated_node_soc_percent": 99.7,
@@ -284,6 +285,11 @@ The map renders only positioned lanterns.
 - `POST /api/operations/power-monitor` with
   `{"battery_capacity_wh":384.0,"full_voltage":14.4}` -> update the SOC
   estimate capacity and full-charge voltage anchor.
+- `GET /api/power/history?hours=24&mac=8C:94:DF:8F:71:50&limit=5000` ->
+  timestamp-ordered durable INA228 samples from the Pi's SQLite history. `mac`
+  is optional; `hours` defaults to 24. Each row includes cumulative Wh/mAh,
+  voltage, current, meter elapsed time, plausibility, and an energy-session
+  number that increments only when the hardware accumulator resets.
 - `POST /api/lanterns/{mac}/power-sync-full` -> manually anchor that metered
   node's current Wh reading as 100% SOC.
 - `POST /api/operations/ota-mode` with `{"enabled":true}` or
@@ -307,9 +313,11 @@ The map renders only positioned lanterns.
 - `POST /api/operations/calibration-mode` with `{"enabled":true}` or
   `{"enabled":false}` -> start/stop the live LED calibration blink sequence.
   This is only light control: it does not upload media or write layout
-  coordinates. Starting stores the previous pattern, switches the field to the
-  firmware `Calibration` pattern, and returns the generated Hamming-spaced
-  code plan. Stopping restores the previous pattern when available.
+  coordinates. Starting sets one temporary field-wide locator override and
+  returns the generated Hamming-spaced code plan. The override takes precedence
+  over all eight group patterns without modifying or persisting any of them.
+  Stopping clears that override in one conductor command, so every group resumes
+  its existing pattern together.
 - `GET /api/calibration/frames` -> uploaded calibration image frames.
 - `PUT /api/calibration/frames?filename=anchor.png` with raw image bytes
   (`.jpg`, `.jpeg`, `.png`, or `.webp`) -> store one calibration frame.
@@ -527,6 +535,14 @@ number while showing "Not seen".
 
 ### 4. Power & energy
 
+- The default Overview screen summarizes field connectivity, clock sync, firmware
+  consistency, battery SOC, attention items, and effective group patterns. Its
+  power-over-time widget reads the durable history API every minute and offers
+  1-hour, 6-hour, 24-hour, and 7-day views.
+- The power chart derives a rolling 15-minute watt trace from cumulative Wh deltas
+  for each instrumented performer. It never joins different accumulator sessions,
+  excludes implausible rows, breaks the line across stale gaps, and uses direct
+  `V × I` only until a second energy anchor exists.
 - Live power panel: the conductor's `[power]` lines parsed into structured
   V / I / avg-W / Wh-tonight per instrumented node.
 - Operations power schedule: set radio/light-sleep check interval, deep-sleep
@@ -537,8 +553,8 @@ number while showing "Not seen".
 - Sleep pauses an active OTA at its next safe command boundary, exits OTA
   maintenance, and only then applies force-sleep. Automatic firmware
   reconciliation remains suppressed while force-sleep is active.
-- Nightly history persisted server-side (sqlite or CSV) — trend across the
-  event, not just tonight.
+- Nightly history persisted server-side in SQLite — trend across the event, not
+  just tonight. **[done]**
 - `power reset` button for the dusk ritual.
 - Later (protocol v3 bundle): VBAT in REGISTER → fleet-wide battery health
   on the dashboard.
@@ -569,7 +585,9 @@ number while showing "Not seen".
   through `MSG_POWER`; the top line shows estimated battery SOC and the summary
   reports average draw per metered performer (not an extrapolated field total).
   Voltage is used only to detect/full-anchor a charged pack, and each metered
-  node has a manual **Sync to 100%** action.
+  node has a manual **Sync to 100%** action. Every distinct report is appended
+  to `CONTROL_DATA_DIR/power/power-history.sqlite3`; Basketbrain restores the
+  recent Wh-delta window from that database after a process or Pi restart.
 - Raw serial console passthrough to the conductor CLI (the playa will
   produce a situation the UI didn't anticipate).
 - Event log: registrations, table edits, errors — timestamped, server-side.
