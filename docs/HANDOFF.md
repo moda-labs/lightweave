@@ -691,8 +691,9 @@ revised cost roll-up.
   mode enter/exit, firmware artifact staging, and field-wide OTA install.
   Serial calls are serialized and run
   off the FastAPI event loop, so one serial timeout does not block unrelated
-  async work. The UI has Map, Node List, Patterns, and Operations views; map
-  zoom/pan, drag-to-move/place, unpositioned tray, single bottom-sheet actions,
+  async work. The UI has Overview, Lantern Locations, Node List, Patterns,
+  Power, Operations, and Firmware views; location-map zoom/pan,
+  drag-to-move/place, unpositioned tray, single bottom-sheet actions,
   per-pattern controls, field firmware consistency display, Recovery card, and
   the OTA updater card are all wired. Hardware-verified 2026-07-05: after flashing
   all three bench boards, `/api/state.ota` reported maintenance `ready=true`,
@@ -974,7 +975,7 @@ dimming real shows. Watts are fine; the gating issue is *hours* → daytime slee
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-pio test -e native                                  # 89 host tests
+pio test -e native                                  # 190 host tests
 pio run -e devkitc                                  # build
 pio run -e devkitc -t upload --upload-port /dev/cu.usbserial-XXXX
 pio device monitor -p /dev/cu.usbserial-XXXX        # provision + watch

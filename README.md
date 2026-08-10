@@ -35,7 +35,7 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   native unit tests, so sync math, pattern math, roster/table logic, power policy,
   and OTA helpers can be tested without hardware.
 
-Current release: `0.8.0`. The bench system has been verified with one conductor
+Current release: `0.9.3`. The bench system has been verified with one conductor
 and mixed 16/64-LED performers for sync, layout and pre-placement group assignment,
 independent group pattern control, reversible blackout, runtime power policy, and
 the local web control plane. The control plane now includes a same-host flashing
@@ -96,7 +96,7 @@ own Wi-Fi access point and serve the UI locally, while talking to the conductor
 over USB serial. In development, the same app runs on a laptop and defaults to a
 mock conductor.
 
-### Map and placement
+### Lantern locations
 
 ![Control UI map showing positioned lanterns, field health, and an unpositioned spare](docs/screenshots/control-map.png)
 
@@ -184,14 +184,19 @@ batch notes.
 - FastAPI HTTP/WebSocket API with a static browser UI.
 - Mock conductor for UI development without hardware.
 - Real serial adapter for a USB-attached conductor.
-- Map view with placed lanterns, missing nodes, and unpositioned spares.
-- Node actions: identify, move/place, assign group, forget, and replace.
+- Overview dashboard with field health, effective group patterns, an animated
+  expected-field rendering, and durable power-over-time traces.
+- Lantern Locations view with placed lanterns, missing nodes, and unpositioned
+  spares. Its detail actions support `L`ocate, `M`ove, `P`lace, `R`eplace,
+  `D`etails, and `F`orget shortcuts when focus is outside a form control.
+- Node actions: locate, move/place, assign group, forget, and replace.
 - Per-group pattern controls with conductor acknowledgements before writes are
   treated as saved.
 - Operations view for firmware consistency, recovery state, OTA staging/activation,
   runtime power policy, and sparse power monitoring. Battery capacity defaults
   to the 384 Wh KUNLUN pack and can be changed in the UI; metered nodes can
-  be manually synced to 100% after charging.
+  be manually synced to 100% after charging, and distinct readings persist in
+  SQLite across control-plane restarts.
 
 ## Quick start
 

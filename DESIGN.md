@@ -94,8 +94,9 @@ Suggested scale:
 
 ## Layout
 
-The Overview health dashboard is the primary surface. The map remains the primary
-spatial operating surface one tap deeper; everything else supports those two views.
+The Overview health dashboard is the primary surface. Lantern Locations remains
+the primary spatial operating surface one tap deeper; everything else supports
+those two views.
 
 Default to **progressive disclosure**. The first screen should answer the simple
 operator questions without exposing every diagnostic:
@@ -113,17 +114,18 @@ helper while still letting the builder get every useful byte when needed.
 
 ### Mobile
 
-- Primary tabs begin with `Overview`, followed by `Map`, `Node List`, `Patterns`,
-  `Power`, `Operations`, and `Firmware`.
+- Primary tabs begin with `Overview`, followed by `Lantern Locations`, `Node List`,
+  `Patterns`, `Power`, `Operations`, and `Firmware`.
 - `Overview` opens by default and keeps health metrics, attention items, current
   group patterns, and measured power history readable without horizontal scrolling.
-- `Map` and `Table` are peer multi-lantern views over the same roster/table data.
-- `Map` opens to the layout map with a compact status strip above it.
+- `Lantern Locations` and `Table` are peer multi-lantern views over the same
+  roster/table data.
+- `Lantern Locations` opens to the layout map with a compact status strip above it.
 - `Table` shows the same lanterns as sortable/filterable rows for count checks,
   missing-node triage, and precise data review.
 - Selecting a node opens a bottom sheet, not a separate page.
-- The single-lantern detail sheet appears only in `Map` and `Table`; hide it in
-  global screens like `Patterns` and `Operations`.
+- The single-lantern detail sheet appears only in `Lantern Locations` and `Table`;
+  hide it in global screens like `Patterns` and `Operations`.
 - Risky actions require large, deliberate controls and clear result feedback.
 - Avoid multi-column layouts below tablet width.
 
@@ -162,7 +164,7 @@ Show the state the operator needs before touching anything:
 
 Use compact badges with semantic color and timestamps.
 
-### Layout Map
+### Lantern Locations map
 
 The map should look like a working field plot:
 
@@ -276,14 +278,15 @@ No decorative motion. The actual light pattern preview is the expressive element
 ## Safe Choices
 
 - Dark, data-dense operational UI because this is used at night and under pressure.
-- Map-first navigation because position editing is the main reason the web UI exists.
+- A dedicated Lantern Locations surface because position editing needs an
+  unmistakable home separate from the Overview field rendering.
 - Mono typography for hardware identifiers and telemetry because mistakes in those
   values are expensive.
 
 ## Deliberate Risks
 
-- **No generic dashboard cards as the dominant layout.** The map owns the screen.
-  This costs some conventional familiarity, but makes the product feel purpose-built.
+- **No generic dashboard cards as the dominant layout.** Overview uses only the
+  few cards needed to summarize field health; Lantern Locations owns spatial work.
 - **Warm amber as a major accent.** Most technical dashboards lean blue. Amber ties
   the UI to the lantern installation and preserves the nocturnal feel.
 - **Visible hardware roughness.** MACs, serial status, stale ages, and acks stay

@@ -290,6 +290,11 @@ The map renders only positioned lanterns.
   is optional; `hours` defaults to 24. Each row includes cumulative Wh/mAh,
   voltage, current, meter elapsed time, plausibility, and an energy-session
   number that increments only when the hardware accumulator resets.
+- `GET /api/field-preview/frames.json?duration_ms=6000&fps=8` -> a compact
+  expected-field animation reconstructed from the current positioned layout,
+  effective group patterns, LED profiles, field-power state, locator override,
+  and conductor time. The Overview canvas is read-only; placement starts only
+  from its explicit **Manage locations** action.
 - `POST /api/lanterns/{mac}/power-sync-full` -> manually anchor that metered
   node's current Wh reading as 100% SOC.
 - `POST /api/operations/ota-mode` with `{"enabled":true}` or
@@ -493,7 +498,7 @@ number while showing "Not seen".
 - Cross-checks: in roster but not table (unpositioned); in table but not
   roster (dead lantern?).
 
-### 2. Layout map (the reason a web UI exists)
+### 2. Lantern Locations (the spatial operating surface)
 
 - 2-D field map of table `(x,y)` positions with roster liveness overlaid.
 - Drag to reposition; click to add/edit; `forget` to remove.
@@ -504,10 +509,10 @@ number while showing "Not seen".
   List dropdown. This hardware profile is independent of placement and group.
 - Replace-node flow (§5.1): pick dead node + spare → one action does
   `assign` + `forget`.
-- **Identify:** click a dot → that physical lantern blinks so it can be
-  found in a dark field of 60. ⚠ Needs a small new ESP-NOW unicast message
-  (no PROTO_VERSION bump); the one Phase-1 firmware addition beyond the
-  machine serial protocol.
+- **Locate:** select a dot, then use the detail action or press `L` to make that
+  physical lantern visibly identify itself in a dark field of 60. The guarded
+  shortcuts are `L` Locate, `M` Move, `P` Place, `R` Replace, `D` Details, and
+  `F` Forget; typing targets and modified shortcuts are ignored.
 - Table import/export as JSON — backup before edits; the socket the
   calibration CV output (§6) plugs into later.
 
@@ -539,6 +544,8 @@ number while showing "Not seen".
   consistency, battery SOC, attention items, and effective group patterns. Its
   power-over-time widget reads the durable history API every minute and offers
   1-hour, 6-hour, 24-hour, and 7-day views.
+- Its Expected field canvas animates the same current layout and effective
+  pattern state without turning dashboard clicks into placement navigation.
 - The power chart derives a rolling 15-minute watt trace from cumulative Wh deltas
   for each instrumented performer. It never joins different accumulator sessions,
   excludes implausible rows, breaks the line across stale gaps, and uses direct
