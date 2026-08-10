@@ -98,28 +98,54 @@ inline RgbwColor glow(uint8_t brightness, const uint16_t params[4]) {
   return hsvColor(brightness, /*intensity*/ 1.0f, params);
 }
 
-// Firefly ("hotaru"): each node glows up, shimmers, and fades on its own cycle,
-// staggered across the field by position so the lanterns twinkle like fireflies
-// in a meadow. Warm yellow-green by default; all knobs are live-tunable. Because
+// Firefly ("hotaru"): each node flashes on a deterministic irregular schedule,
+// then the whole field periodically crossfades into three synchronized beats.
+// Warm yellow-green by default; all knobs are live-tunable. Because
 // this pattern needs four independent knobs, its params are positional (the
 // control plane sends p0..p3 directly rather than the hue/period aliases, which
 // would collide on params[0]).
 //   params[0] = full cycle period in ms                    (default 7000)
 //   params[1] = hue in degrees, 0-359                       (default 58 = warm gold-green)
 //   params[2] = marker + 8-bit value + 7-bit scatter         (legacy: plain scatter)
-//   params[3] = saturation percent, including zero           (legacy default 85)
+//   params[3] = marker + chorus interval seconds + saturation (legacy: saturation)
 inline RgbwColor firefly(int64_t synced_us, uint8_t brightness, float x, float y,
                          const uint16_t params[4]) {
   float period_s = params[0] ? params[0] / 1000.0f : 7.0f;
   float hue = (params[1] % 360) / 360.0f;
   bool full_hsv = pmath::colorValuePresent(params[2]);
   uint16_t scatter_pct = pmath::fireflyScatterDecode(params[2]);
-  uint16_t sat_pct = full_hsv
-                         ? (params[3] > 100 ? 100 : params[3])
-                         : (params[3] ? (params[3] > 100 ? 100 : params[3]) : 85);
-  float s = pmath::fireflyIntensity(synced_us, x, y, period_s, scatter_pct / 100.0f);
+  uint16_t sat_pct = pmath::fireflySaturationDecode(params[3], full_hsv);
+  float chorus_interval_s = pmath::fireflyChorusIntervalDecode(params[3]);
+  float s = pmath::fireflyIntensity(synced_us, x, y, period_s,
+                                    scatter_pct / 100.0f,
+                                    chorus_interval_s);
   return scaledRgbw(pmath::hsvToRgbw(hue, sat_pct / 100.0f,
                                     pmath::fireflyValueDecode(params[2]), s),
+                    brightness);
+}
+
+// Wavefront: one colored band enters from the selected side, traverses the 2-D
+// field, and exits before the next pass. It reuses Ocean Wave's compact packing:
+//   params[0] = traversal period in ms                       (default 6000)
+//   params[1] = 6-bit saturation + 10-bit band width         (default 28)
+//   params[2] = marker + 6-bit value + 9-bit direction angle (default 0)
+//   params[3] = hue in degrees                               (default 200)
+inline RgbwColor wavefront(int64_t synced_us, uint8_t brightness, float x,
+                           float y, const uint16_t params[4]) {
+  float period_s = params[0] ? params[0] / 1000.0f : 6.0f;
+  bool full_hsv = pmath::oceanColorPresent(params[2]);
+  uint16_t width_raw = pmath::oceanWavelengthDecode(params[1], params[2]);
+  float width = width_raw ? width_raw / 100.0f : 0.28f;
+  uint16_t angle = pmath::oceanAngleDecode(params[2]);
+  float angle_rad = (angle % 360) * (pmath::kPi / 180.0f);
+  float hue = full_hsv ? (float)(params[3] % 360)
+                       : (params[3] ? (float)(params[3] % 360) : 200.0f);
+  float saturation = pmath::oceanSaturationDecode(params[1], params[2]);
+  float value = pmath::oceanValueDecode(params[2]);
+  float intensity = pmath::wavefrontIntensity(synced_us, x, y, period_s,
+                                               width, angle_rad);
+  return scaledRgbw(pmath::hsvToRgbw(hue / 360.0f, saturation, value,
+                                    intensity),
                     brightness);
 }
 
@@ -157,6 +183,14 @@ inline RgbwColor fireFlickerPixel(int64_t synced_us, uint8_t brightness,
                                     pmath::fireflyValueDecode(params[2]),
                                     sample.intensity),
                     brightness);
+}
+
+inline RgbwColor fire2012Color(uint8_t heat, uint8_t brightness) {
+  pmath::Fire2012Color color = pmath::fire2012HeatColor(heat);
+  return RgbwColor((uint8_t)(((uint16_t)color.r * brightness + 127u) / 255u),
+                   (uint8_t)(((uint16_t)color.g * brightness + 127u) / 255u),
+                   (uint8_t)(((uint16_t)color.b * brightness + 127u) / 255u),
+                   0);
 }
 
 // Ocean wave: a soft 2-D swell of light rolls across the field. Deep saturated
@@ -231,6 +265,30 @@ inline void render(StripT& strip, const PatternConfig& b, int64_t synced_us, flo
       strip.SetPixelColor(i, RgbwColor(0, 0, 0, 0));
     return;
   }
+  if (b.pattern_id == FIRE2012) {
+    // Canonical Fire2012 treats the active emitter sequence as a vertical
+    // one-dimensional strip: cell zero is the spark base and heat rises toward
+    // the highest active index. Position + permanent ID seed independent but
+    // reproducible flames on every lantern.
+    static pmath::Fire2012State fire_state = {};
+    uint8_t fps = b.params[0]
+                      ? (uint8_t)(b.params[0] > 255 ? 255 : b.params[0])
+                      : 30;
+    uint8_t cooling = b.params[1]
+                          ? (uint8_t)(b.params[1] > 255 ? 255 : b.params[1])
+                          : 55;
+    uint8_t sparking = b.params[2]
+                           ? (uint8_t)(b.params[2] > 255 ? 255 : b.params[2])
+                           : 120;
+    uint32_t seed = pmath::fire2012NodeSeed(x, y, node_id);
+    pmath::fire2012Prepare(fire_state, synced_us, seed, count, fps, cooling,
+                           sparking);
+    for (uint16_t i = 0; i < count; i++)
+      strip.SetPixelColor(i, fire2012Color(fire_state.heat[i], b.brightness));
+    for (uint16_t i = count; i < physical_count; i++)
+      strip.SetPixelColor(i, RgbwColor(0, 0, 0, 0));
+    return;
+  }
   RgbwColor c;
   switch (b.pattern_id) {
     case SWEEP:
@@ -253,6 +311,9 @@ inline void render(StripT& strip, const PatternConfig& b, int64_t synced_us, flo
       break;
     case OCEAN_WAVE:
       c = oceanWave(synced_us, b.brightness, x, y, b.params);
+      break;
+    case WAVEFRONT:
+      c = wavefront(synced_us, b.brightness, x, y, b.params);
       break;
     case CALIBRATION:
       c = calibrationId(synced_us, b.brightness, node_id, b.params);

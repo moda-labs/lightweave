@@ -85,14 +85,25 @@ cached table `group_id`.
     `params[1]` = spatial hue offset (×100 cycles per x unit) so the rainbow can
     travel across the field or run in unison (0). **[done]**
   - `SWEEP` — traveling wave across `x`. **[done]** (1-D today.)
+  - `WAVEFRONT` — one soft band enters, crosses, and exits the 2-D field along
+    a tunable angle. Period, band width, color, and direction are tunable; angle
+    0 provides the requested left-to-right line test. **[done; hardware tuning pending]**
   - `SOLID` — every pixel full RGBW at `brightness`: the worst-case power draw, a
     bench rig for measuring the per-node LED ceiling (not a show pattern). **[done]**
-  - `FIREFLY` — position-staggered meadow twinkle. **[done]**
+  - `FIREFLY` — deterministic irregular solo flashes normally, with varied
+    start, duration, amplitude, shimmer, and occasional skipped flashes. Near
+    the end of each recurrence window every node crossfades into exactly three
+    shared beats, then returns to independent timing. **[done; hardware tuning pending]**
   - `OCEAN_WAVE` — true 2-D summed wavefronts with tunable travel angle. **[done]**
   - `FIRE_FLICKER` — first ring-local pattern: deterministic billow plus coherent
     angular waves give every active LED distinct brightness and flame temperature.
     It remains clock/position-derived, so missed beacons do not freeze or desync
     the texture. **[done; hardware tuning pending]**
+  - `FIRE2012` — deterministic adaptation of FastLED's classic 1-D heat-cell
+    fire. Every active emitter cools, receives upward-diffused heat, and may be
+    fed by seeded sparks near pixel zero before a black-body color mapping. The
+    active LED sequence is its vertical axis; speed, cooling, and sparking are
+    tunable. **[done in firmware/control plane; hardware tuning pending]**
   - **[planned]** additional 2-D primitives such as a radial ripple from a center.
 
 Every node hard-clamps rendered brightness to `MAX_BRIGHTNESS` (config.h, **192**),

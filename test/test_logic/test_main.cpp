@@ -277,6 +277,46 @@ void test_sweep_nodes_differ_in_phase() {
   TEST_ASSERT_TRUE(fabsf(a - b) > 0.9f);
 }
 
+void test_wavefront_crosses_line_as_one_soft_band() {
+  const int64_t midpoint = 3'000'000;
+  TEST_ASSERT_FLOAT_WITHIN(
+      1e-5f, 1.0f,
+      pmath::wavefrontIntensity(midpoint, 0.5f, 0.0f, 6.0f, 0.2f, 0.0f));
+  TEST_ASSERT_FLOAT_WITHIN(
+      1e-5f, 0.0f,
+      pmath::wavefrontIntensity(midpoint, 0.0f, 0.0f, 6.0f, 0.2f, 0.0f));
+  TEST_ASSERT_FLOAT_WITHIN(
+      1e-5f, 0.0f,
+      pmath::wavefrontIntensity(midpoint, 1.0f, 0.0f, 6.0f, 0.2f, 0.0f));
+}
+
+void test_wavefront_direction_reverses_across_field() {
+  int64_t t = 2'000'000;
+  float left_to_right =
+      pmath::wavefrontIntensity(t, 0.267f, 0.4f, 6.0f, 0.2f, 0.0f);
+  float right_to_left = pmath::wavefrontIntensity(
+      t, 0.733f, 0.4f, 6.0f, 0.2f, pmath::kPi);
+  TEST_ASSERT_FLOAT_WITHIN(2e-3f, left_to_right, right_to_left);
+  TEST_ASSERT_TRUE(left_to_right > 0.99f);
+}
+
+void test_wavefront_intensity_stays_in_gamut_in_2d() {
+  for (int64_t us = 0; us < 12'000'000; us += 113'000)
+    for (float x = 0.0f; x <= 1.0f; x += 0.17f)
+      for (float y = 0.0f; y <= 1.0f; y += 0.23f) {
+        float value = pmath::wavefrontIntensity(
+            us, x, y, 6.0f, 0.28f, 0.73f);
+        TEST_ASSERT_TRUE(value >= 0.0f && value <= 1.0f);
+      }
+
+  // Golden sample shared with control/tests/test_api.py keeps the host preview
+  // numerically aligned with performer rendering.
+  TEST_ASSERT_FLOAT_WITHIN(
+      2e-5f, 0.5694914f,
+      pmath::wavefrontIntensity(2'345'000, 0.23f, 0.71f, 6.0f, 0.28f,
+                                0.73f));
+}
+
 // ---- Palette drift: rainbow hue cycle + HSV ---------------------------------
 
 void test_hsv_primary_hues() {
@@ -480,6 +520,59 @@ void test_firefly_stagger_in_unit_range() {
   }
 }
 
+void test_firefly_chorus_metadata_round_trips() {
+  uint16_t packed = pmath::fireflyChorusPack(73, 48);
+  TEST_ASSERT_TRUE(pmath::fireflyChorusPresent(packed));
+  TEST_ASSERT_EQUAL_UINT8(73, pmath::fireflySaturationDecode(packed, true));
+  TEST_ASSERT_EQUAL_UINT8(48, pmath::fireflyChorusIntervalDecode(packed));
+  TEST_ASSERT_FALSE(pmath::fireflyChorusPresent(85));
+  TEST_ASSERT_EQUAL_UINT8(85, pmath::fireflySaturationDecode(85, true));
+  TEST_ASSERT_EQUAL_UINT8(36, pmath::fireflyChorusIntervalDecode(85));
+}
+
+void test_firefly_solos_are_deterministic_and_irregular() {
+  for (int64_t us = 0; us < 28'000'000; us += 83'000) {
+    float first = pmath::fireflyRandomSoloIntensity(us, 0.2f, 0.7f, 7.0f);
+    float again = pmath::fireflyRandomSoloIntensity(us, 0.2f, 0.7f, 7.0f);
+    TEST_ASSERT_FLOAT_WITHIN(1e-7f, first, again);
+  }
+  uint32_t seed = pmath::fireflyNodeSeed(0.2f, 0.7f);
+  float start0 = pmath::fireflyRandom01(seed, 0, 1);
+  float start1 = pmath::fireflyRandom01(seed, 1, 1);
+  float duration0 = pmath::fireflyRandom01(seed, 0, 2);
+  float duration1 = pmath::fireflyRandom01(seed, 1, 2);
+  TEST_ASSERT_TRUE(fabsf(start0 - start1) > 0.01f);
+  TEST_ASSERT_TRUE(fabsf(duration0 - duration1) > 0.01f);
+  TEST_ASSERT_EQUAL_UINT32(1'425'090'934u,
+                           pmath::fireflyNodeSeed(0.2f, 0.7f));
+  TEST_ASSERT_FLOAT_WITHIN(
+      2e-5f, 0.3422546f,
+      pmath::fireflyRandomSoloIntensity(4'321'000, 0.2f, 0.7f, 7.0f));
+}
+
+void test_firefly_chorus_locks_positions_for_three_beats() {
+  // Default 36 s recurrence: the 4.05 s chorus begins at 31.95 s. Sample near
+  // the peak of beat two, after the crossfade has reached one.
+  int64_t shared_peak = 33'475'000;
+  float a = pmath::fireflyIntensity(
+      shared_peak, 0.1f, 0.2f, 7.0f, 1.0f, 36.0f);
+  float b = pmath::fireflyIntensity(
+      shared_peak, 0.8f, 0.9f, 7.0f, 1.0f, 36.0f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, a, b);
+  TEST_ASSERT_TRUE(a > 0.95f);
+
+  int peaks = 0;
+  bool above = false;
+  for (int64_t us = 31'950'000; us < 36'000'000; us += 10'000) {
+    float value = pmath::fireflyIntensity(
+        us, 0.4f, 0.6f, 7.0f, 1.0f, 36.0f);
+    bool now_above = value > 0.75f;
+    if (now_above && !above) peaks++;
+    above = now_above;
+  }
+  TEST_ASSERT_EQUAL_INT(3, peaks);
+}
+
 // ---- Ring-aware fire flicker ----------------------------------------------
 
 void test_fire_flicker_samples_stay_in_gamut() {
@@ -543,6 +636,103 @@ void test_fire_flicker_matches_control_preview_golden_sample() {
       pmath::fireFlickerSample(730'000, 0.2f, 0.8f, 6, 16, 1.2f, 0.85f);
   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.4318507f, sample.intensity);
   TEST_ASSERT_FLOAT_WITHIN(1e-4f, -0.7561197f, sample.heat);
+}
+
+// ---- Fire2012 heat-cell simulation ---------------------------------------
+
+void test_fire2012_heat_palette_runs_black_red_yellow_white() {
+  pmath::Fire2012Color cold = pmath::fire2012HeatColor(0);
+  pmath::Fire2012Color low = pmath::fire2012HeatColor(64);
+  pmath::Fire2012Color middle = pmath::fire2012HeatColor(160);
+  pmath::Fire2012Color hot = pmath::fire2012HeatColor(255);
+
+  TEST_ASSERT_EQUAL_UINT8(0, cold.r);
+  TEST_ASSERT_EQUAL_UINT8(0, cold.g);
+  TEST_ASSERT_EQUAL_UINT8(0, cold.b);
+  TEST_ASSERT_TRUE(low.r > 0 && low.g == 0 && low.b == 0);
+  TEST_ASSERT_TRUE(middle.r == 255 && middle.g > 0 && middle.b == 0);
+  TEST_ASSERT_TRUE(hot.r == 255 && hot.g == 255 && hot.b > 0);
+}
+
+void test_fire2012_is_deterministic_but_seeded_per_lantern() {
+  pmath::Fire2012State a = {};
+  pmath::Fire2012State b = {};
+  pmath::Fire2012State other = {};
+  uint32_t seed = pmath::fire2012NodeSeed(0.2f, 0.8f, 6);
+  uint32_t other_seed = pmath::fire2012NodeSeed(0.7f, 0.1f, 19);
+  pmath::fire2012Prepare(a, 3'000'000, seed, 16, 30, 55, 120);
+  pmath::fire2012Prepare(b, 3'000'000, seed, 16, 30, 55, 120);
+  pmath::fire2012Prepare(other, 3'000'000, other_seed, 16, 30, 55, 120);
+
+  bool differs = false;
+  for (uint16_t i = 0; i < 16; i++) {
+    TEST_ASSERT_EQUAL_UINT8(a.heat[i], b.heat[i]);
+    if (a.heat[i] != other.heat[i]) differs = true;
+  }
+  TEST_ASSERT_TRUE(differs);
+}
+
+void test_fire2012_matches_control_preview_golden_frame() {
+  pmath::Fire2012State state = {};
+  uint32_t seed = pmath::fire2012NodeSeed(0.2f, 0.8f, 6);
+  pmath::fire2012Prepare(state, 3'000'000, seed, 16, 30, 55, 120);
+  const uint8_t expected[16] = {
+      44, 115, 67, 105, 94, 110, 156, 210,
+      122, 94, 110, 91, 29, 0, 0, 0,
+  };
+  TEST_ASSERT_EQUAL_UINT32(2547460822u, seed);
+  for (uint16_t i = 0; i < 16; i++)
+    TEST_ASSERT_EQUAL_UINT8(expected[i], state.heat[i]);
+}
+
+void test_fire2012_advances_on_fixed_synced_time_steps() {
+  pmath::Fire2012State state = {};
+  uint32_t seed = pmath::fire2012NodeSeed(0.3f, 0.4f, 12);
+  pmath::fire2012Prepare(state, 2'000'000, seed, 16, 30, 55, 120);
+  uint8_t before[16];
+  for (uint16_t i = 0; i < 16; i++) before[i] = state.heat[i];
+
+  // Less than one 30 fps simulation step: frame remains stable.
+  pmath::fire2012Prepare(state, 2'010'000, seed, 16, 30, 55, 120);
+  for (uint16_t i = 0; i < 16; i++)
+    TEST_ASSERT_EQUAL_UINT8(before[i], state.heat[i]);
+
+  pmath::fire2012Prepare(state, 2'200'000, seed, 16, 30, 55, 120);
+  bool changed = false;
+  for (uint16_t i = 0; i < 16; i++)
+    if (before[i] != state.heat[i]) changed = true;
+  TEST_ASSERT_TRUE(changed);
+}
+
+void test_fire2012_checkpoint_replay_is_independent_of_prior_state() {
+  pmath::Fire2012State continuous = {};
+  pmath::Fire2012State fresh = {};
+  uint32_t seed = pmath::fire2012NodeSeed(0.6f, 0.2f, 7);
+
+  // Cross the 20-second replay boundary with one existing state, then render
+  // the same absolute time from a blank state (as after a reboot or preview).
+  pmath::fire2012Prepare(continuous, 19'900'000, seed, 16, 30, 55, 120);
+  pmath::fire2012Prepare(continuous, 20'100'000, seed, 16, 30, 55, 120);
+  pmath::fire2012Prepare(fresh, 20'100'000, seed, 16, 30, 55, 120);
+
+  TEST_ASSERT_EQUAL_INT64(fresh.last_step, continuous.last_step);
+  TEST_ASSERT_EQUAL_INT64(fresh.origin_step, continuous.origin_step);
+  for (uint16_t i = 0; i < 16; i++)
+    TEST_ASSERT_EQUAL_UINT8(fresh.heat[i], continuous.heat[i]);
+}
+
+void test_fire2012_sparking_and_cooling_controls_change_the_fire() {
+  uint32_t seed = pmath::fire2012NodeSeed(0.5f, 0.5f, 1);
+  pmath::Fire2012State calm = {};
+  pmath::Fire2012State roaring = {};
+  pmath::fire2012Prepare(calm, 5'000'000, seed, 16, 30, 100, 50);
+  pmath::fire2012Prepare(roaring, 5'000'000, seed, 16, 30, 20, 200);
+  uint32_t calm_heat = 0, roaring_heat = 0;
+  for (uint16_t i = 0; i < 16; i++) {
+    calm_heat += calm.heat[i];
+    roaring_heat += roaring.heat[i];
+  }
+  TEST_ASSERT_TRUE(roaring_heat > calm_heat);
 }
 
 // ---- Ocean wave -----------------------------------------------------------
@@ -1702,6 +1892,7 @@ void test_pattern_static_ids() {
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::SWEEP));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::CALIBRATION));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::FIRE_FLICKER));
+  TEST_ASSERT_FALSE(patterns::patternIsStatic(patterns::FIRE2012));
   TEST_ASSERT_FALSE(patterns::patternIsStatic(999));  // unknown => animated
 }
 
@@ -2258,6 +2449,39 @@ void test_serial_json_fire_flicker_maps_pattern_name_and_positional_params() {
   TEST_ASSERT_EQUAL_UINT16(24, cmd.params[1]);
   TEST_ASSERT_EQUAL_UINT16(65493, cmd.params[2]);
   TEST_ASSERT_EQUAL_UINT16(95, cmd.params[3]);
+}
+
+void test_serial_json_fire2012_maps_pattern_name_and_controls() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":12,\"cmd\":\"pattern\",\"pattern\":\"Fire2012\","
+      "\"brightness\":56,\"params\":{\"p0\":30,\"p1\":55,"
+      "\"p2\":120,\"p3\":0}}",
+      cmd, error));
+
+  TEST_ASSERT_EQUAL_UINT16(patterns::FIRE2012, cmd.pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(30, cmd.params[0]);
+  TEST_ASSERT_EQUAL_UINT16(55, cmd.params[1]);
+  TEST_ASSERT_EQUAL_UINT16(120, cmd.params[2]);
+}
+
+void test_serial_json_wavefront_maps_pattern_name_and_controls() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":12,\"cmd\":\"pattern\",\"pattern\":\"Wavefront\","
+      "\"brightness\":64,\"params\":{\"p0\":6000,\"p1\":64540,"
+      "\"p2\":65024,\"p3\":200}}",
+      cmd, error));
+
+  TEST_ASSERT_EQUAL_UINT16(patterns::WAVEFRONT, cmd.pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(6000, cmd.params[0]);
+  TEST_ASSERT_EQUAL_UINT16(64540, cmd.params[1]);
+  TEST_ASSERT_EQUAL_UINT16(65024, cmd.params[2]);
+  TEST_ASSERT_EQUAL_UINT16(200, cmd.params[3]);
 }
 
 void test_serial_json_calibration_maps_params() {
@@ -3091,6 +3315,9 @@ int main(int, char**) {
   RUN_TEST(test_sweep_bounds);
   RUN_TEST(test_sweep_travels_with_position);
   RUN_TEST(test_sweep_nodes_differ_in_phase);
+  RUN_TEST(test_wavefront_crosses_line_as_one_soft_band);
+  RUN_TEST(test_wavefront_direction_reverses_across_field);
+  RUN_TEST(test_wavefront_intensity_stays_in_gamut_in_2d);
   RUN_TEST(test_hsv_primary_hues);
   RUN_TEST(test_hsv_red_to_yellow_passes_through_orange);
   RUN_TEST(test_hsv_wraps_and_stays_in_gamut);
@@ -3105,11 +3332,20 @@ int main(int, char**) {
   RUN_TEST(test_firefly_attack_is_faster_than_decay);
   RUN_TEST(test_firefly_scatter_staggers_nodes_but_unison_locks_them);
   RUN_TEST(test_firefly_stagger_in_unit_range);
+  RUN_TEST(test_firefly_chorus_metadata_round_trips);
+  RUN_TEST(test_firefly_solos_are_deterministic_and_irregular);
+  RUN_TEST(test_firefly_chorus_locks_positions_for_three_beats);
   RUN_TEST(test_fire_flicker_samples_stay_in_gamut);
   RUN_TEST(test_fire_flicker_texture_varies_pixels_but_keeps_neighbors_coherent);
   RUN_TEST(test_fire_flicker_zero_texture_keeps_ring_together);
   RUN_TEST(test_fire_flicker_is_deterministic_and_changes_over_time);
   RUN_TEST(test_fire_flicker_matches_control_preview_golden_sample);
+  RUN_TEST(test_fire2012_heat_palette_runs_black_red_yellow_white);
+  RUN_TEST(test_fire2012_is_deterministic_but_seeded_per_lantern);
+  RUN_TEST(test_fire2012_matches_control_preview_golden_frame);
+  RUN_TEST(test_fire2012_advances_on_fixed_synced_time_steps);
+  RUN_TEST(test_fire2012_checkpoint_replay_is_independent_of_prior_state);
+  RUN_TEST(test_fire2012_sparking_and_cooling_controls_change_the_fire);
   RUN_TEST(test_ocean_component_bounds);
   RUN_TEST(test_ocean_component_travels_along_direction);
   RUN_TEST(test_ocean_intensity_in_unit_range);
@@ -3222,6 +3458,8 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_glow_maps_hue_and_saturation_params);
   RUN_TEST(test_serial_json_white_maps_pattern_name);
   RUN_TEST(test_serial_json_fire_flicker_maps_pattern_name_and_positional_params);
+  RUN_TEST(test_serial_json_fire2012_maps_pattern_name_and_controls);
+  RUN_TEST(test_serial_json_wavefront_maps_pattern_name_and_controls);
   RUN_TEST(test_serial_json_calibration_maps_params);
   RUN_TEST(test_serial_json_power_policy_parses_runtime_sleep_controls);
   RUN_TEST(test_serial_json_ota_mode_parses_enabled_flag);

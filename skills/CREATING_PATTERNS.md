@@ -4,8 +4,8 @@ Use this guide when an agent is asked to author, compare, review, save, or
 broadcast show patterns for Do Baskets Dream.
 
 This is a control-plane workflow for the current compiled pattern vocabulary:
-`Pulse`, `Glow`, `Sweep`, `Palette Drift`, `Firefly`, `Ocean Wave`, and
-`Fire Flicker`. It does
+`Pulse`, `Glow`, `Sweep`, `Wavefront`, `Palette Drift`, `Firefly`, `Ocean Wave`,
+`Fire Flicker`, and `Fire2012`. It does
 not create arbitrary new firmware pattern functions. New C++ pattern functions
 still belong in `include/pattern_math.h` with host tests.
 
@@ -64,6 +64,28 @@ control-plane host.
 For `Sweep`, `spatial` is the wavelength in hundredths of a coordinate unit
 because it maps to firmware `params[1]`.
 
+`Wavefront`
+
+```json
+{"pattern":"Wavefront","brightness":64,"params":{"p0":6000,"p1":58396,"p2":65024,"p3":200}}
+```
+
+`Wavefront` is a single soft band with darkness ahead of and behind it. It
+enters one side of the normalized 2-D field, crosses once, exits the opposite
+side, then repeats. Its params are positional:
+
+- `p0` = complete crossing period in ms, default 6000.
+- `p1` = packed saturation + band width: top 6 bits hold saturation (0-63),
+  low 10 bits hold width ×100. Default UI saturation 90 + width 28 packs to
+  `58396`.
+- `p2` = packed value + angle: bit 15 marks the packed format, bits 9-14 hold
+  value (0-63), and low 9 bits hold angle in degrees. Default value 255 + angle
+  0 packs to `65024`. Angle 0 moves left-to-right; 90 moves bottom-to-top.
+- `p3` = hue in degrees, default 200.
+
+Preview/review also accept friendly `period`, `front_width`, `angle`, and `hue`
+query params. Live broadcasts should use the packed positional form above.
+
 `Palette Drift`
 
 ```json
@@ -75,23 +97,28 @@ For `Palette Drift`, `spatial` is hue offset in hundredths of a cycle per x unit
 `Firefly`
 
 ```json
-{"pattern":"Firefly","brightness":56,"params":{"p0":7000,"p1":58,"p2":100,"p3":85}}
+{"pattern":"Firefly","brightness":56,"params":{"p0":7000,"p1":58,"p2":65508,"p3":37461}}
 ```
 
-`Firefly` ("hotaru") uses **positional** params — each node swells up, shimmers,
-and fades on its own cycle, staggered across the field by position so the
-lanterns twinkle. Its four knobs would collide on the shared `hue`/`period`
-aliases, so send them as `p0..p3`:
+`Firefly` ("hotaru") uses **positional** params. Most of the time each node has
+its own deterministic but irregular flash: start, duration, amplitude, shimmer,
+and occasional skipped flashes vary by node and time window. It periodically
+crossfades into exactly three shared beats, then disperses again. Its knobs
+would collide on the shared `hue`/`period` aliases, so send them as `p0..p3`:
 
 - `p0` = full cycle period in ms (flash + dark gap), default 7000.
 - `p1` = hue in degrees (0-359), default 58 (warm gold-green, like a real firefly).
-- `p2` = scatter, 20-100: how spread out the per-node flash timing is. High =
-  scattered twinkle (Heike-like); low = the field flashes closer to unison
-  (Genji-like). Default 100.
-- `p3` = saturation percent (1-100), default 85.
+- `p2` = packed value + scatter: bit 15 marker, bits 7-14 sRGB value, and bits
+  0-6 scatter (0-100). High scatter means fully irregular solos; zero retains
+  the legacy regular/unison flash. Default value 255 + scatter 100 packs to
+  `65508`.
+- `p3` = packed chorus recurrence + saturation: bit 15 marker, bits 7-14 hold
+  recurrence seconds, and bits 0-6 hold saturation (0-100). Default 36 seconds
+  + saturation 85 packs to `37461`. The chorus itself is always three 1.35 s
+  beats.
 
 Preview/review also accept the friendly names (`period`, `hue`, `scatter`,
-`saturation`) as a convenience, but a **live broadcast must send `p0..p3`** so the
+`saturation`, `chorus`) as a convenience, but a **live broadcast must send `p0..p3`** so the
 firmware places them in the right slots.
 
 `Ocean Wave`
@@ -133,6 +160,28 @@ Preview/review accept friendly `period`, `hue`, `texture`, and `saturation`
 query params. Live broadcasts and saved candidates should use `p0..p3`; the
 friendly `period` and `hue` aliases both map to wire slot 0 and therefore cannot
 represent this pattern safely on a live conductor.
+
+`Fire2012`
+
+```json
+{"pattern":"Fire2012","brightness":56,"params":{"p0":30,"p1":55,"p2":120,"p3":0}}
+```
+
+`Fire2012` is the classic one-dimensional FastLED heat-cell effect adapted to
+Lightweave's synchronized runtime. Every active emitter is a heat cell: cells
+cool, heat diffuses upward through increasing pixel indexes, sparks ignite near
+pixel zero, and temperature maps black→red→yellow→white. Random draws are
+deterministic from absolute time plus lantern identity, so performers remain
+reproducible across preview, restart, and dropped-beacon free-running.
+
+- `p0` = fixed simulation frames per second, 10-60; default 30.
+- `p1` = cooling, 20-100; lower gives taller flames, default 55.
+- `p2` = sparking chance out of 255, 50-200; higher gives a more active fire,
+  default 120.
+- `p3` = reserved; send 0.
+
+Preview/review also accept the friendly names `speed`, `cooling`, and
+`sparking`. A live broadcast or saved candidate should use `p0..p3`.
 
 ## Draft Review Loop
 

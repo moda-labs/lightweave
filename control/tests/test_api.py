@@ -23,7 +23,16 @@ from control.mock_conductor import Lantern, MockConductor
 from control.ota_store import OtaArtifactStore, OtaInstallStore
 from control.pattern_store import PatternStore
 from control.power_monitor import PowerMonitorStore
-from control.preview import _fire_flicker_sample
+from control.preview import (
+    Fire2012State,
+    _fire2012_node_seed,
+    _fire2012_prepare,
+    _firefly_intensity,
+    _firefly_node_seed,
+    _firefly_random_solo_intensity,
+    _fire_flicker_sample,
+    _wavefront_intensity,
+)
 
 
 @pytest.fixture
@@ -542,6 +551,29 @@ class RecordingActivationConductor(MockConductor):
     def ota_activate(self, mac: str | None = None) -> dict:
         self.activation_order.append(mac)
         return super().ota_activate(mac)
+
+
+class ActivationStatusExpiresAfterEachNode(RecordingActivationConductor):
+    """Models a real primary whose remaining staged status ages out."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.activation_status_fresh = False
+        self.probe_count = 0
+
+    def ota_probe(self) -> dict:
+        self.probe_count += 1
+        self.activation_status_fresh = True
+        return super().ota_probe()
+
+    def ota_activate(self, mac: str | None = None) -> dict:
+        if mac is not None and not self.activation_status_fresh:
+            self.activation_order.append(mac)
+            return {"ok": False, "error": "performer firmware is not staged"}
+        ack = super().ota_activate(mac)
+        if mac is not None and ack.get("ok"):
+            self.activation_status_fresh = False
+        return ack
 
 
 class OldConductorUntilActivated(RecordingActivationConductor):
@@ -1356,6 +1388,123 @@ def test_fire_flicker_preview_matches_firmware_golden_sample() -> None:
     assert heat == pytest.approx(-0.7561197, abs=1e-4)
 
 
+def test_fire2012_preview_exposes_heat_diffusion_pixels_and_controls() -> None:
+    client = TestClient(create_app(MockConductor()))
+
+    response = client.get(
+        "/preview.json",
+        params={
+            "pattern": "Fire2012",
+            "brightness": 56,
+            "speed": 30,
+            "cooling": 55,
+            "sparking": 120,
+            "t": 3000,
+        },
+    )
+
+    assert response.status_code == 200
+    first = response.json()["lanterns"][0]
+    assert len(first["pixels"]) == 16
+    assert len({tuple(pixel["rgbw"]) for pixel in first["pixels"]}) >= 5
+    assert first["ring_contrast"] > 0.03
+
+    later = client.get(
+        "/preview.json",
+        params={
+            "pattern": "Fire 2012",
+            "brightness": 56,
+            "speed": 30,
+            "cooling": 55,
+            "sparking": 120,
+            "t": 3300,
+        },
+    )
+    assert later.status_code == 200
+    assert first["pixels"] != later.json()["lanterns"][0]["pixels"]
+
+
+def test_fire2012_preview_matches_firmware_golden_frame() -> None:
+    state = Fire2012State()
+    seed = _fire2012_node_seed(0.2, 0.8, 6)
+    _fire2012_prepare(state, 3_000_000, seed, 16, 30, 55, 120)
+
+    assert seed == 2_547_460_822
+    assert state.heat == [
+        44, 115, 67, 105, 94, 110, 156, 210,
+        122, 94, 110, 91, 29, 0, 0, 0,
+    ]
+
+
+def test_wavefront_preview_crosses_the_field_as_one_spatial_band() -> None:
+    client = TestClient(create_app(MockConductor()))
+
+    left = client.get(
+        "/preview.json",
+        params={
+            "pattern": "Wavefront",
+            "brightness": 64,
+            "period": 6000,
+            "front_width": 28,
+            "angle": 0,
+            "t": 2200,
+        },
+    )
+    right = client.get(
+        "/preview.json",
+        params={
+            "pattern": "Wave front",
+            "brightness": 64,
+            "period": 6000,
+            "front_width": 28,
+            "angle": 0,
+            "t": 4200,
+        },
+    )
+
+    assert left.status_code == right.status_code == 200
+    left_lit = [item for item in left.json()["lanterns"] if item["luma"] > 1]
+    right_lit = [item for item in right.json()["lanterns"] if item["luma"] > 1]
+    assert left_lit and right_lit
+    assert sum(item["x"] for item in left_lit) / len(left_lit) < sum(
+        item["x"] for item in right_lit
+    ) / len(right_lit)
+    assert left.json()["metrics"]["contrast"] > 0.02
+
+
+def test_wavefront_and_firefly_preview_match_firmware_golden_samples() -> None:
+    assert _wavefront_intensity(2_345_000, 0.23, 0.71, 6.0, 0.28, 0.73) == pytest.approx(
+        0.5694914, abs=2e-5
+    )
+    assert _firefly_node_seed(0.2, 0.7) == 1_425_090_934
+    assert _firefly_random_solo_intensity(4_321_000, 0.2, 0.7, 7.0) == pytest.approx(
+        0.3422546, abs=2e-5
+    )
+
+
+def test_firefly_preview_is_irregular_then_synchronizes_for_chorus() -> None:
+    client = TestClient(create_app(MockConductor()))
+    common = {
+        "pattern": "Firefly",
+        "brightness": 64,
+        "period": 7000,
+        "chorus": 36,
+    }
+
+    solo = client.get("/preview.json", params={**common, "t": 3000})
+    chorus = client.get("/preview.json", params={**common, "t": 33475})
+
+    assert solo.status_code == chorus.status_code == 200
+    solo_lumas = [item["luma"] for item in solo.json()["lanterns"]]
+    chorus_lumas = [item["luma"] for item in chorus.json()["lanterns"]]
+    assert max(solo_lumas) - min(solo_lumas) > 10
+    assert max(chorus_lumas) - min(chorus_lumas) < 0.01
+    assert min(chorus_lumas) > 20
+    assert _firefly_intensity(33_475_000, 0.2, 0.7, 7.0, 1.0, 36.0) == pytest.approx(
+        1.0, abs=2e-5
+    )
+
+
 def test_hex_picker_preserves_value_and_packs_distinct_pattern_colors() -> None:
     script = r'''
 const fs = require("fs");
@@ -1416,6 +1565,64 @@ console.log(JSON.stringify(patternParams({
     assert params["p2"] & 0x7F == 85
     assert (params["p2"] >> 7) & 0xFF == 255
     assert params["p3"] == 95
+
+
+def test_fire2012_ui_packs_simulation_controls_into_wire_params() -> None:
+    script = r'''
+const fs = require("fs");
+const src = fs.readFileSync("control/static/app.js", "utf8");
+eval(src.slice(0, src.indexOf("function isPatternDirty")));
+console.log(JSON.stringify(patternParams({
+  pattern: "Fire2012", brightness: 56,
+  speed: 30, cooling: 55, sparking: 120,
+})));
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == {"p0": 30, "p1": 55, "p2": 120, "p3": 0}
+
+
+def test_wavefront_and_firefly_ui_pack_new_controls_into_wire_params() -> None:
+    script = r'''
+const fs = require("fs");
+const src = fs.readFileSync("control/static/app.js", "utf8");
+eval(src.slice(0, src.indexOf("function isPatternDirty")));
+console.log(JSON.stringify({
+  wavefront: patternParams({
+    pattern: "Wavefront", brightness: 64, period: 6000,
+    frontWidth: 28, angle: 135, hue: 200, saturation: 90, value: 210,
+  }),
+  firefly: patternParams({
+    pattern: "Firefly", brightness: 64, period: 7000,
+    hue: 58, saturation: 85, value: 255, scatter: 100, chorus: 48,
+  }),
+}));
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    params = json.loads(result.stdout)
+
+    assert params["wavefront"] == {
+        "p0": 6000,
+        "p1": 58_396,
+        "p2": 59_527,
+        "p3": 200,
+    }
+    assert params["firefly"] == {
+        "p0": 7000,
+        "p1": 58,
+        "p2": 65_508,
+        "p3": 38_997,
+    }
 
 
 def test_preview_distinguishes_hex_value_uses_white_for_gray_and_keeps_ocean_saturation() -> None:
@@ -3134,6 +3341,27 @@ def test_ota_activation_orders_relays_after_their_performers(
 
     performer_macs = sorted(set(install["target_macs"]) - {relay.mac})
     assert conductor.activation_order == performer_macs + [relay.mac, None]
+
+
+def test_ota_refreshes_staged_status_before_each_performer_activation(
+    tmp_path, managed_client
+) -> None:
+    conductor = ActivationStatusExpiresAfterEachNode()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin&protocol=11",
+        content=b"\xe9" + bytes(range(255)) * 2,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.activation_order[-1] is None
+    assert conductor.probe_count >= install["target_count"]
 
 
 def test_ota_activation_order_defaults_unknown_roles_to_performer() -> None:

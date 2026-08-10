@@ -12,6 +12,7 @@ namespace pmath {
 static constexpr float kPi = 3.14159265358979323846f;
 static constexpr uint16_t kColorValueMarker = 0x8000u;
 static constexpr uint16_t kFireflyScatterMask = 0x007Fu;
+static constexpr uint16_t kFireflyChorusMarker = 0x8000u;
 static constexpr uint16_t kOceanWavelengthMask = 0x03FFu;
 static constexpr uint16_t kOceanAngleMask = 0x01FFu;
 
@@ -51,6 +52,35 @@ inline float fireflyValueDecode(uint16_t packed) {
   return colorValuePresent(packed)
              ? ((packed >> 7) & 0xFFu) / 255.0f
              : 1.0f;
+}
+
+// Firefly p3 historically held only saturation (0..100). Bit 15 now marks a
+// backward-compatible packing that keeps saturation in the low seven bits and
+// stores the chorus recurrence in seconds in bits 7..14.
+inline uint16_t fireflyChorusPack(uint8_t saturation_pct,
+                                  uint8_t interval_s) {
+  if (saturation_pct > 100) saturation_pct = 100;
+  return (uint16_t)(kFireflyChorusMarker |
+                    ((uint16_t)interval_s << 7) | saturation_pct);
+}
+
+inline bool fireflyChorusPresent(uint16_t packed) {
+  return (packed & kFireflyChorusMarker) != 0;
+}
+
+inline uint8_t fireflySaturationDecode(uint16_t packed, bool full_hsv) {
+  if (fireflyChorusPresent(packed)) {
+    uint8_t saturation = (uint8_t)(packed & 0x7fu);
+    return saturation > 100 ? 100 : saturation;
+  }
+  if (full_hsv) return (uint8_t)(packed > 100 ? 100 : packed);
+  if (!packed) return 85;
+  return (uint8_t)(packed > 100 ? 100 : packed);
+}
+
+inline uint8_t fireflyChorusIntervalDecode(uint16_t packed) {
+  return fireflyChorusPresent(packed) ? (uint8_t)((packed >> 7) & 0xffu)
+                                      : 36;
 }
 
 // Ocean keeps wavelength and angle in their low bits. Six-bit saturation and
@@ -134,6 +164,33 @@ inline float sweepIntensity(int64_t synced_us, float x, float period_s,
   return 0.5f * (1.0f - cosf(2.0f * kPi * (float)p));
 }
 
+// A single soft band enters from one side, crosses the normalized field, and
+// exits the opposite side before repeating. Unlike SWEEP's endless sine train,
+// WAVEFRONT has one legible crest with darkness ahead of and behind it. Angle
+// zero travels left -> right; 90 degrees travels bottom -> top.
+inline float wavefrontIntensity(int64_t synced_us, float x, float y,
+                                float period_s, float width,
+                                float angle_rad) {
+  if (period_s <= 0.0f) period_s = 6.0f;
+  if (width < 0.04f) width = 0.04f;
+  if (width > 1.0f) width = 1.0f;
+  float cx = cosf(angle_rad);
+  float cy = sinf(angle_rad);
+  float min_projection = fminf(0.0f, cx) + fminf(0.0f, cy);
+  float max_projection = fmaxf(0.0f, cx) + fmaxf(0.0f, cy);
+  float span = max_projection - min_projection;
+  float projection = span > 1e-5f
+                         ? (x * cx + y * cy - min_projection) / span
+                         : 0.5f;
+  if (projection < 0.0f) projection = 0.0f;
+  if (projection > 1.0f) projection = 1.0f;
+  float center = -width + phase(synced_us, period_s) * (1.0f + 2.0f * width);
+  float distance = fabsf(projection - center);
+  if (distance >= width) return 0.0f;
+  float edge = 1.0f - distance / width;
+  return edge * edge * (3.0f - 2.0f * edge);
+}
+
 // Rainbow hue for a color drift: cycles 0->1 over period_s (one full trip around
 // the color wheel), offset by position so the field can show a *moving* rainbow.
 //   period_s  time for one full hue cycle
@@ -184,15 +241,8 @@ inline float fireflyFlashFrac(float period_s) {
   return frac;
 }
 
-// Firefly ("hotaru") flash intensity in [0,1]. Each node is lit for most of the
-// cycle, then settles into a brief dark gap: a fast-ish swell up to a peak that
-// gently shimmers, followed by a slower fade back to dark — the asymmetric
-// attack/decay envelope real fireflies show. Nodes are staggered by position
-// (see fireflyStagger) so the field flickers like a meadow of fireflies.
-//   period_s  full cycle length (one flash + the dark gap after it)
-//   scatter   0..1 position stagger (0 => whole field flashes in unison)
-inline float fireflyIntensity(int64_t synced_us, float x, float y,
-                              float period_s, float scatter) {
+inline float fireflyRegularIntensity(int64_t synced_us, float x, float y,
+                                     float period_s, float scatter) {
   float p = phase(synced_us, period_s) + fireflyStagger(x, y, scatter);
   p -= floorf(p);                             // wrap to [0,1)
   float flash_frac = fireflyFlashFrac(period_s);  // most of the cycle is lit
@@ -212,6 +262,107 @@ inline float fireflyIntensity(int64_t synced_us, float x, float y,
   if (v < 0.0f) v = 0.0f;
   if (v > 1.0f) v = 1.0f;
   return v;
+}
+
+inline uint32_t fireflyMix(uint32_t value) {
+  value ^= value >> 16;
+  value *= 0x7feb352du;
+  value ^= value >> 15;
+  value *= 0x846ca68bu;
+  value ^= value >> 16;
+  return value;
+}
+
+inline uint32_t fireflyNodeSeed(float x, float y) {
+  int32_t xq = (int32_t)lroundf(x * 10000.0f);
+  int32_t yq = (int32_t)lroundf(y * 10000.0f);
+  return fireflyMix((uint32_t)xq * 0x9e3779b1u ^
+                    (uint32_t)yq * 0x85ebca6bu ^ 0xf1ef17u);
+}
+
+inline float fireflyRandom01(uint32_t seed, int64_t epoch, uint32_t stream) {
+  uint64_t raw_epoch = (uint64_t)epoch;
+  uint32_t value = seed ^ (uint32_t)raw_epoch * 0x9e3779b1u;
+  value ^= (uint32_t)(raw_epoch >> 32) * 0x85ebca6bu;
+  value ^= stream * 0xc2b2ae35u;
+  return (fireflyMix(value) >> 8) / 16777216.0f;
+}
+
+// One irregular, deterministic solo flash per time window. About one window in
+// six is skipped, and start time, duration, amplitude, and shimmer vary by node
+// and epoch. It reads as random but remains a pure f(x,y,t), so preview and
+// performers agree through reboots and dropped beacons.
+inline float fireflyRandomSoloIntensity(int64_t synced_us, float x, float y,
+                                        float period_s) {
+  if (period_s <= 0.0f) period_s = 7.0f;
+  int64_t window_us = (int64_t)lroundf(period_s * 1000000.0f);
+  if (window_us < 1) window_us = 1;
+  int64_t epoch = floorDiv(synced_us, window_us);
+  uint32_t seed = fireflyNodeSeed(x, y);
+  if (fireflyRandom01(seed, epoch, 0) < 0.17f) return 0.0f;
+  double window_start = (double)epoch * (double)window_us;
+  double start = window_start + period_s * 1e6 *
+                                    (0.06 + 0.60 * fireflyRandom01(seed, epoch, 1));
+  double duration = period_s * 1e6 *
+                    (0.18 + 0.12 * fireflyRandom01(seed, epoch, 2));
+  float u = (float)(((double)synced_us - start) / duration);
+  if (u < 0.0f || u >= 1.0f) return 0.0f;
+  const float attack = 0.19f;
+  float env = u < attack
+                  ? smoothstep01(u / attack)
+                  : 1.0f - smoothstep01((u - attack) / (1.0f - attack));
+  float amplitude = 0.72f + 0.28f * fireflyRandom01(seed, epoch, 3);
+  float shimmer_phase = fireflyRandom01(seed, epoch, 4);
+  float shimmer = 0.94f + 0.06f *
+                              cosf(2.0f * kPi * (5.0f * u + shimmer_phase));
+  float value = amplitude * env * shimmer;
+  if (value < 0.0f) value = 0.0f;
+  if (value > 1.0f) value = 1.0f;
+  return value;
+}
+
+inline float fireflyChorusBeat(float beat_phase) {
+  beat_phase -= floorf(beat_phase);
+  if (beat_phase >= 0.72f) return 0.0f;
+  float u = beat_phase / 0.72f;
+  const float attack = 0.18f;
+  return u < attack
+             ? smoothstep01(u / attack)
+             : 1.0f - smoothstep01((u - attack) / (1.0f - attack));
+}
+
+// Firefly chorus: irregular independent flashes dominate most of the time.
+// Near the end of each recurrence window, every node crossfades into exactly
+// three shared 1.35-second beats, then returns smoothly to its own schedule.
+// `scatter` blends from the legacy regular/unison cycle (0) to fully irregular
+// solos (1), while the chorus remains field-synchronous at any setting.
+inline float fireflyIntensity(int64_t synced_us, float x, float y,
+                              float period_s, float scatter,
+                              float chorus_interval_s = 36.0f) {
+  if (period_s <= 0.0f) period_s = 7.0f;
+  if (scatter < 0.0f) scatter = 0.0f;
+  if (scatter > 1.0f) scatter = 1.0f;
+  float regular = fireflyRegularIntensity(synced_us, x, y, period_s, 0.0f);
+  float random = fireflyRandomSoloIntensity(synced_us, x, y, period_s);
+  float solo = regular * (1.0f - scatter) + random * scatter;
+  if (chorus_interval_s < 8.0f) return solo;
+
+  const float beat_period_s = 1.35f;
+  const float chorus_beats = 3.0f;
+  const float chorus_duration_s = beat_period_s * chorus_beats;
+  if (chorus_interval_s < chorus_duration_s + 2.0f)
+    chorus_interval_s = chorus_duration_s + 2.0f;
+  float cycle_s = phase(synced_us, chorus_interval_s) * chorus_interval_s;
+  float chorus_start_s = chorus_interval_s - chorus_duration_s;
+  if (cycle_s < chorus_start_s) return solo;
+  float local_s = cycle_s - chorus_start_s;
+  float synced = fireflyChorusBeat(local_s / beat_period_s);
+  const float crossfade_s = 0.38f;
+  float blend_in = smoothstep01(local_s / crossfade_s);
+  float blend_out = 1.0f - smoothstep01(
+      (local_s - (chorus_duration_s - crossfade_s)) / crossfade_s);
+  float blend = blend_in * blend_out;
+  return solo * (1.0f - blend) + synced * blend;
 }
 
 struct FireFlickerSample {
@@ -262,6 +413,148 @@ inline FireFlickerSample fireFlickerSample(int64_t synced_us, float x, float y,
   if (heat < -1.0f) heat = -1.0f;
   if (heat > 1.0f) heat = 1.0f;
   return {intensity, heat};
+}
+
+// Deterministic adaptation of Mark Kriegsman's FastLED Fire2012 heat-cell
+// simulation. The canonical effect cools every cell, diffuses heat upward,
+// injects random sparks near the base, then maps temperature through a
+// black-body ramp. Ambient RNG would make previews, reboots, and clock recovery
+// diverge, so each random draw here is hashed from the lantern seed and absolute
+// simulation step. The evolving heat array remains local and compact (64 B).
+//
+// Reference algorithm:
+// https://github.com/FastLED/FastLED/blob/master/examples/Fire2012/Fire2012.ino
+static constexpr uint16_t kFire2012MaxCells = 64;
+
+struct Fire2012State {
+  uint8_t heat[kFire2012MaxCells];
+  int64_t last_step;
+  int64_t origin_step;
+  uint32_t signature;
+  bool ready;
+};
+
+struct Fire2012Color {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
+
+inline uint32_t fire2012Mix(uint32_t value) {
+  value ^= value >> 16;
+  value *= 0x7feb352du;
+  value ^= value >> 15;
+  value *= 0x846ca68bu;
+  value ^= value >> 16;
+  return value;
+}
+
+inline uint32_t fire2012NodeSeed(float x, float y, uint16_t node_id) {
+  int32_t xq = (int32_t)lroundf(x * 10000.0f);
+  int32_t yq = (int32_t)lroundf(y * 10000.0f);
+  uint32_t seed = (uint32_t)xq * 0x9e3779b1u;
+  seed ^= (uint32_t)yq * 0x85ebca6bu;
+  seed ^= (uint32_t)node_id * 0xc2b2ae35u;
+  return fire2012Mix(seed ^ 0x20120718u);
+}
+
+inline uint8_t fire2012Random8(uint32_t seed, int64_t step,
+                               uint32_t stream) {
+  uint64_t raw_step = (uint64_t)step;
+  uint32_t value = seed ^ (uint32_t)raw_step * 0x9e3779b1u;
+  value ^= (uint32_t)(raw_step >> 32) * 0x85ebca6bu;
+  value ^= stream * 0xc2b2ae35u;
+  return (uint8_t)(fire2012Mix(value) >> 24);
+}
+
+inline void fire2012Clear(Fire2012State& state) {
+  for (uint16_t i = 0; i < kFire2012MaxCells; i++) state.heat[i] = 0;
+  state.last_step = 0;
+  state.origin_step = 0;
+  state.signature = 0;
+  state.ready = false;
+}
+
+inline void fire2012Step(Fire2012State& state, int64_t step,
+                         uint32_t seed, uint16_t cell_count,
+                         uint8_t cooling, uint8_t sparking) {
+  if (cell_count < 1) cell_count = 1;
+  if (cell_count > kFire2012MaxCells) cell_count = kFire2012MaxCells;
+
+  // Fire2012 step 1: every cell loses a small, independently varying amount
+  // of heat. random8(min,max) is upper-exclusive in the reference algorithm.
+  uint16_t cooling_limit = ((uint16_t)cooling * 10u) / cell_count + 2u;
+  if (cooling_limit > 256u) cooling_limit = 256u;
+  for (uint16_t i = 0; i < cell_count; i++) {
+    uint8_t loss = (uint8_t)(fire2012Random8(seed, step, i) % cooling_limit);
+    state.heat[i] = loss >= state.heat[i] ? 0 : state.heat[i] - loss;
+  }
+
+  // Step 2: heat rises and diffuses, weighting the cell two places below twice.
+  for (int k = (int)cell_count - 1; k >= 2; k--) {
+    state.heat[k] = (uint8_t)(((uint16_t)state.heat[k - 1] +
+                               (uint16_t)state.heat[k - 2] * 2u) /
+                              3u);
+  }
+
+  // Step 3: sometimes ignite a strong spark in one of the bottom seven cells.
+  if (fire2012Random8(seed, step, 0x100u) < sparking) {
+    uint16_t base_cells = cell_count < 7 ? cell_count : 7;
+    uint16_t y = fire2012Random8(seed, step, 0x101u) % base_cells;
+    uint16_t added = 160u + fire2012Random8(seed, step, 0x102u) % 95u;
+    uint16_t hot = (uint16_t)state.heat[y] + added;
+    state.heat[y] = (uint8_t)(hot > 255u ? 255u : hot);
+  }
+}
+
+inline uint32_t fire2012Signature(uint32_t seed, uint16_t cell_count,
+                                  uint8_t fps, uint8_t cooling,
+                                  uint8_t sparking) {
+  uint32_t config = (uint32_t)cell_count | ((uint32_t)fps << 8) |
+                    ((uint32_t)cooling << 16) | ((uint32_t)sparking << 24);
+  return fire2012Mix(seed ^ config);
+}
+
+// Advance the heat simulation to the fixed absolute-time step containing
+// synced_us. A deterministic 20-second checkpoint window bounds replay work
+// while making the result a reproducible function of absolute time: preview,
+// restart, and a continuously running performer all use the same checkpoint.
+// One preceding window is replayed as warm-up, so each checkpoint starts with
+// an already-burning fire rather than an empty heat array.
+inline void fire2012Prepare(Fire2012State& state, int64_t synced_us,
+                            uint32_t seed, uint16_t cell_count, uint8_t fps,
+                            uint8_t cooling, uint8_t sparking) {
+  if (cell_count < 1) cell_count = 1;
+  if (cell_count > kFire2012MaxCells) cell_count = kFire2012MaxCells;
+  if (fps < 10 || fps > 60) fps = 30;
+  uint32_t signature = fire2012Signature(seed, cell_count, fps, cooling, sparking);
+  int64_t target_step = floorDiv(synced_us * (int64_t)fps, 1000000LL);
+  int64_t block_steps = (int64_t)fps * 20;
+  int64_t origin_step = floorDiv(target_step, block_steps) * block_steps -
+                        block_steps;
+  bool rebuild = !state.ready || state.signature != signature ||
+                 state.origin_step != origin_step ||
+                 target_step < state.last_step;
+  if (rebuild) {
+    fire2012Clear(state);
+    state.signature = signature;
+    state.origin_step = origin_step;
+    state.last_step = origin_step;
+    state.ready = true;
+  }
+  while (state.last_step < target_step) {
+    state.last_step++;
+    fire2012Step(state, state.last_step, seed, cell_count, cooling, sparking);
+  }
+}
+
+// FastLED's HeatColor black-body approximation: black -> red -> yellow -> white.
+inline Fire2012Color fire2012HeatColor(uint8_t temperature) {
+  uint8_t t192 = (uint8_t)(((uint16_t)temperature * 191u + 255u) >> 8);
+  uint8_t heat_ramp = (uint8_t)((t192 & 0x3fu) << 2);
+  if (t192 & 0x80u) return {255, 255, heat_ramp};
+  if (t192 & 0x40u) return {255, heat_ramp, 0};
+  return {heat_ramp, 0, 0};
 }
 
 // One traveling sine wavefront sampled at (x,y): sin(2π (t/T - proj/λ)), where
