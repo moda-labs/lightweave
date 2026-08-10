@@ -1567,6 +1567,43 @@ def test_field_preview_frames_endpoint_renders_effective_layout() -> None:
     assert all(len(frame["colors"]) == 9 for frame in body["frames"])
 
 
+def test_field_preview_frames_endpoint_handles_boundaries_cache_and_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conductor = MockConductor()
+    client = TestClient(create_app(conductor))
+
+    assert client.get(
+        "/api/field-preview/frames.json",
+        params={"duration_ms": 499},
+    ).status_code == 422
+    assert client.get(
+        "/api/field-preview/frames.json",
+        params={"fps": 13},
+    ).status_code == 422
+
+    state = client.get("/api/state").json()
+    cached = client.get(
+        "/api/field-preview/frames.json",
+        params={"duration_ms": 500, "fps": 1},
+    )
+    assert cached.status_code == 200
+    assert cached.json()["start_ms"] >= round(state["conductor"]["uptime_s"] * 1000)
+
+    failing = TestClient(create_app(DownConductor()))
+    assert failing.get("/api/field-preview/frames.json").status_code == 503
+
+    def reject_render(*_args, **_kwargs):
+        raise ValueError("invalid renderer state")
+
+    monkeypatch.setattr(app_module, "render_field_preview_frames", reject_render)
+    rejected = TestClient(create_app(MockConductor())).get(
+        "/api/field-preview/frames.json"
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == "invalid renderer state"
+
+
 def test_review_endpoint_scores_candidate_pattern() -> None:
     client = TestClient(create_app(MockConductor()))
 

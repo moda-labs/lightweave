@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**190 pass**) is green; **480 control tests** are green; all three
+(**190 pass**) is green; **481 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest in this feature branch (2026-08-10): the lantern locator is now one
