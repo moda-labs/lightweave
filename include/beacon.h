@@ -19,6 +19,7 @@
 #include "firmware_version.h"
 #include "groups.h"
 #include "ota_update.h"
+#include "pattern_ids.h"
 #include "power_policy.h"
 #include "powermon.h"  // PowerSample — MSG_POWER's payload IS the logic struct
 
@@ -32,7 +33,8 @@
 // v5: BeaconMsg carries runtime power policy (sleep intervals + LED schedule).
 // v6: PowerPolicy carries UTC epoch seconds for aligned sleep/update rendezvous.
 // v7: BeaconMsg added six bytes that once carried an experimental USB battery
-//     keepalive. They remain reserved so v10's wire layout stays compatible.
+//     keepalive. They now carry an optional locator override without changing
+//     the stable v11 wire layout; older receivers safely ignore those bytes.
 // v8: TableRow carries a permanent numeric ID and optional-position flags.
 // v9: TableRow and REGISTER carry group membership; BeaconMsg carries one
 //     independent pattern config for each of eight lantern groups.
@@ -111,6 +113,20 @@ typedef struct __attribute__((packed)) {
   uint16_t  params[4];   // pattern-specific knobs for live tweaking
 } PatternConfig;
 
+// Temporary field-wide locator state. This deliberately occupies the six v7
+// compatibility bytes: locator mode is an overlay, not a ninth persisted group
+// pattern. One clear operation therefore restores every group atomically.
+typedef struct __attribute__((packed)) {
+  uint16_t slot_ms;
+  uint8_t  active;
+  uint8_t  brightness;
+  uint8_t  bit_count;
+  uint8_t  min_hamming_distance;
+} LocatorOverride;
+
+static_assert(sizeof(LocatorOverride) == 6,
+              "LocatorOverride must fit the v7 compatibility bytes");
+
 // type = MSG_BEACON. The conductor's clock plus every group's pattern config.
 // The sync hot path still consumes only epoch_us + seq and is untouched.
 typedef struct __attribute__((packed)) {
@@ -119,13 +135,44 @@ typedef struct __attribute__((packed)) {
   PatternConfig patterns[GROUP_COUNT];
   uint8_t   flags;       // BEACON_FLAG_* bits (field-awake override, …)
   PowerPolicy power;      // runtime sleep/schedule config, broadcast not reflashed
-  uint8_t   reserved_v7[6];  // retained to preserve the v10 wire layout
+  LocatorOverride locator;   // temporary field-wide locator overlay
   uint32_t  seq;         // monotonic; for drop detection / logging
 } BeaconMsg;
 
 inline const PatternConfig& beaconPattern(const BeaconMsg& b,
                                           uint8_t group_id) {
   return b.patterns[groupIdSafe(group_id)];
+}
+
+inline bool beaconLocatorActive(const BeaconMsg& b) {
+  return b.locator.active != 0;
+}
+
+inline void beaconLocatorSet(BeaconMsg& b, uint8_t brightness,
+                             uint16_t slot_ms, uint8_t bit_count,
+                             uint8_t min_hamming_distance) {
+  b.locator.slot_ms = slot_ms;
+  b.locator.active = 1;
+  b.locator.brightness = brightness;
+  b.locator.bit_count = bit_count;
+  b.locator.min_hamming_distance = min_hamming_distance;
+}
+
+inline void beaconLocatorClear(BeaconMsg& b) {
+  b.locator = LocatorOverride{};
+}
+
+inline PatternConfig beaconRenderPattern(const BeaconMsg& b,
+                                         uint8_t group_id) {
+  if (!beaconLocatorActive(b)) return beaconPattern(b, group_id);
+  PatternConfig locator = {};
+  locator.pattern_id = patterns::CALIBRATION;
+  locator.brightness = b.locator.brightness;
+  locator.params[0] = b.locator.slot_ms;
+  locator.params[1] = b.locator.bit_count;
+  locator.params[2] = 1;  // the dense roster's first locator code
+  locator.params[3] = b.locator.min_hamming_distance;
+  return locator;
 }
 
 static_assert(sizeof(BeaconMsg) == 149, "BeaconMsg v11 wire layout changed");

@@ -1950,20 +1950,17 @@ void test_power_plausible_rejects_nonsense() {
   TEST_ASSERT_FALSE(powerPlausible(s));
 }
 
-void test_power_plausible_flags_reboot_inflated_avg() {
-  // The skipReset design means a mid-night ESP32 reboot preserves the chip's
-  // accumulator while the node's elapsed anchor restarts: a whole night's
-  // Joules over a few seconds of elapsed. Every raw field is in range — only
-  // the derived average exposes it (26640 J / 5 s = 5328 W "average").
+void test_power_plausible_accepts_retained_energy_after_reboot() {
+  // The INA228 deliberately retains lifetime energy while an ESP32 wake/reboot
+  // restarts elapsed_s. Validity must follow the instantaneous electrical
+  // reading, not divide unmatched lifetime Joules by post-boot uptime.
   PowerSample s = {26640.0f, 1980.0f, 13.4f, 55.0f, 5};
-  TEST_ASSERT_FALSE(powerPlausible(s));
-  // The same totals over the real 10 h window are a normal night (~0.74 W).
-  s.elapsed_s = 36000;
   TEST_ASSERT_TRUE(powerPlausible(s));
-  // And elapsed 0 (report landing the same second as a reset) stays valid —
-  // powerAvgW guards the division and reads as 0 W.
-  PowerSample fresh = {3600.0f, 300.0f, 13.4f, 55.0f, 0};
-  TEST_ASSERT_TRUE(powerPlausible(fresh));
+
+  // A real >50 W instantaneous reading is still rejected even when the stale
+  // lifetime average happens to look harmless.
+  PowerSample overload = {100.0f, 80.0f, 13.0f, 5000.0f, 1000};
+  TEST_ASSERT_FALSE(powerPlausible(overload));
 }
 
 void test_power_sched_first_report_immediate_then_interval() {
@@ -2091,6 +2088,33 @@ void test_group_beacon_selects_independent_configs_and_fits_espnow() {
   TEST_ASSERT_EQUAL_UINT16(patterns::SWEEP, beaconPattern(b, 5).pattern_id);
   TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, beaconPattern(b, 99).pattern_id);
   TEST_ASSERT_TRUE(sizeof(BeaconMsg) <= 250);
+}
+
+void test_locator_override_ignores_groups_without_mutating_them() {
+  BeaconMsg b = {};
+  b.patterns[0] = {patterns::GLOW, 48, 0, {40, 100, 0, 0}};
+  b.patterns[1] = {patterns::SWEEP, 72, 0, {8000, 300, 0, 0}};
+
+  beaconLocatorSet(b, 96, 1000, 7, 3);
+  PatternConfig group_1 = beaconRenderPattern(b, 0);
+  PatternConfig group_2 = beaconRenderPattern(b, 1);
+
+  TEST_ASSERT_TRUE(beaconLocatorActive(b));
+  TEST_ASSERT_EQUAL_UINT16(patterns::CALIBRATION, group_1.pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::CALIBRATION, group_2.pattern_id);
+  TEST_ASSERT_EQUAL_UINT8(96, group_1.brightness);
+  TEST_ASSERT_EQUAL_UINT16(1000, group_1.params[0]);
+  TEST_ASSERT_EQUAL_UINT16(7, group_1.params[1]);
+  TEST_ASSERT_EQUAL_UINT16(1, group_1.params[2]);
+  TEST_ASSERT_EQUAL_UINT16(3, group_1.params[3]);
+  TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, beaconPattern(b, 0).pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::SWEEP, beaconPattern(b, 1).pattern_id);
+
+  beaconLocatorClear(b);
+  TEST_ASSERT_FALSE(beaconLocatorActive(b));
+  TEST_ASSERT_EQUAL_UINT16(patterns::GLOW, beaconRenderPattern(b, 0).pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(patterns::SWEEP, beaconRenderPattern(b, 1).pattern_id);
+  TEST_ASSERT_EQUAL_UINT32(149, sizeof(BeaconMsg));
 }
 
 void test_blackout_restores_distinct_brightness_and_preserves_patterns() {
@@ -2274,6 +2298,29 @@ void test_serial_json_calibration_maps_params() {
   TEST_ASSERT_EQUAL_UINT16(3, cmd.params[1]);
   TEST_ASSERT_EQUAL_UINT16(1, cmd.params[2]);
   TEST_ASSERT_EQUAL_UINT16(3, cmd.params[3]);
+}
+
+void test_serial_json_locator_is_one_atomic_override_command() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":12,\"cmd\":\"locator\",\"enabled\":true,"
+      "\"brightness\":96,\"slot_ms\":1000,\"bit_count\":7,"
+      "\"min_hamming_distance\":3}",
+      cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_LOCATOR, cmd.kind);
+  TEST_ASSERT_TRUE(cmd.locator_enabled);
+  TEST_ASSERT_EQUAL_UINT8(96, cmd.brightness);
+  TEST_ASSERT_EQUAL_UINT16(1000, cmd.locator_slot_ms);
+  TEST_ASSERT_EQUAL_UINT8(7, cmd.locator_bit_count);
+  TEST_ASSERT_EQUAL_UINT8(3, cmd.locator_min_hamming_distance);
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":13,\"cmd\":\"locator\",\"enabled\":false}",
+      cmd, error));
+  TEST_ASSERT_EQUAL_INT(SJ_LOCATOR, cmd.kind);
+  TEST_ASSERT_FALSE(cmd.locator_enabled);
 }
 
 void test_serial_json_power_policy_parses_runtime_sleep_controls() {
@@ -3201,7 +3248,7 @@ int main(int, char**) {
   RUN_TEST(test_power_avg_watts);
   RUN_TEST(test_power_plausible_accepts_real_readings);
   RUN_TEST(test_power_plausible_rejects_nonsense);
-  RUN_TEST(test_power_plausible_flags_reboot_inflated_avg);
+  RUN_TEST(test_power_plausible_accepts_retained_energy_after_reboot);
   RUN_TEST(test_power_sched_first_report_immediate_then_interval);
   RUN_TEST(test_power_sched_defers_while_cannot_send_no_burst);
   RUN_TEST(test_power_table_upserts_by_mac);
@@ -3212,6 +3259,7 @@ int main(int, char**) {
   RUN_TEST(test_mac_format_roundtrip);
   RUN_TEST(test_pattern_boot_safe);
   RUN_TEST(test_group_beacon_selects_independent_configs_and_fits_espnow);
+  RUN_TEST(test_locator_override_ignores_groups_without_mutating_them);
   RUN_TEST(test_blackout_restores_distinct_brightness_and_preserves_patterns);
   RUN_TEST(test_blackout_rejects_missing_or_corrupt_restore_state);
   RUN_TEST(test_serial_json_assign_parses_mac_and_position);
@@ -3223,6 +3271,7 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_white_maps_pattern_name);
   RUN_TEST(test_serial_json_fire_flicker_maps_pattern_name_and_positional_params);
   RUN_TEST(test_serial_json_calibration_maps_params);
+  RUN_TEST(test_serial_json_locator_is_one_atomic_override_command);
   RUN_TEST(test_serial_json_power_policy_parses_runtime_sleep_controls);
   RUN_TEST(test_serial_json_ota_mode_parses_enabled_flag);
   RUN_TEST(test_serial_json_ota_begin_chunk_and_end_parse);

@@ -529,7 +529,7 @@ static void patternConfigLoad() {
   g_beacon.epoch_us = 0;
   g_beacon.flags = 0;
   g_beacon.power = g_power_policy;
-  memset(g_beacon.reserved_v7, 0, sizeof(g_beacon.reserved_v7));
+  beaconLocatorClear(g_beacon);  // locator mode is intentionally not persisted
   g_beacon.seq = 0;
   g_prefs.end();
 }
@@ -1020,7 +1020,6 @@ static void broadcastBeacon() {
   b.epoch_us = now_us();
   b.seq = g_tx_seq++;
   b.power = powerPolicySnapshot(b.epoch_us);
-  memset(b.reserved_v7, 0, sizeof(b.reserved_v7));
   b.flags = powerPolicyForceAwake(b.power) ? BEACON_FLAG_FIELD_AWAKE : 0;
   esp_now_send(BROADCAST_ADDR, (const uint8_t*)&b, sizeof(b));
 }
@@ -1411,7 +1410,7 @@ static void duskEnterDeepSleep(uint64_t sleep_us, const PowerPolicy& sleep_polic
 // drops.
 static void printDiag() {
   if (isConductor()) {
-    const PatternConfig& p = beaconPattern(g_beacon, 0);
+    PatternConfig p = beaconRenderPattern(g_beacon, 0);
     Serial.printf("[conductor] t=%lld us  seq=%lu  pat=%u  bri=%u\n",
                   (long long)now_us(), (unsigned long)g_tx_seq, p.pattern_id,
                   p.brightness);
@@ -1499,7 +1498,7 @@ static void printInfo() {
   portENTER_CRITICAL(&g_sync_mux);  // recv cb overwrites g_beacon on a performer
   b = g_beacon;
   portEXIT_CRITICAL(&g_sync_mux);
-  const PatternConfig& pattern_config = beaconPattern(b, g_id.group_id);
+  PatternConfig pattern_config = beaconRenderPattern(b, g_id.group_id);
   const char* role_name = isConductor() ? "CONDUCTOR" :
                           (isRelay() ? "RELAY" : "PERFORMER");
   Serial.printf("role=%s  id=%u  mac=%s  x=%.2f  y=%.2f  group=%u  leds=%u\n",
@@ -1665,7 +1664,7 @@ static void printPatternValueJson(const PatternConfig& p) {
 
 static void printPatternsJson(const BeaconMsg& b) {
   Serial.print("\"pattern\":");
-  printPatternValueJson(beaconPattern(b, 0));  // backward-compatible Group 1
+  printPatternValueJson(beaconRenderPattern(b, 0));  // effective field state
   Serial.print(",\"patterns\":[");
   for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
     if (group_id) Serial.print(",");
@@ -1673,7 +1672,12 @@ static void printPatternsJson(const BeaconMsg& b) {
     printPatternValueJson(beaconPattern(b, group_id));
     Serial.print("}");
   }
-  Serial.print("]");
+  Serial.printf("],\"locator\":{\"enabled\":%s,\"brightness\":%u,"
+                "\"slot_ms\":%u,\"bit_count\":%u,"
+                "\"min_hamming_distance\":%u}",
+                beaconLocatorActive(b) ? "true" : "false",
+                b.locator.brightness, b.locator.slot_ms,
+                b.locator.bit_count, b.locator.min_hamming_distance);
 }
 
 static void printPowerPolicyJson(const PowerPolicy& p) {
@@ -2829,6 +2833,25 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
     portEXIT_CRITICAL(&g_sync_mux);
     saveBeaconSnapshot();
     jsonOk(cmd.id, "pattern changed");
+  } else if (cmd.kind == SJ_LOCATOR) {
+    if (!isConductor()) {
+      jsonError(cmd.id, "locator is conductor-only");
+    } else {
+      portENTER_CRITICAL(&g_sync_mux);
+      if (cmd.locator_enabled) {
+        uint8_t brightness = cmd.brightness > MAX_BRIGHTNESS
+                                 ? MAX_BRIGHTNESS
+                                 : cmd.brightness;
+        beaconLocatorSet(g_beacon, brightness, cmd.locator_slot_ms,
+                         cmd.locator_bit_count,
+                         cmd.locator_min_hamming_distance);
+      } else {
+        beaconLocatorClear(g_beacon);
+      }
+      portEXIT_CRITICAL(&g_sync_mux);
+      jsonOk(cmd.id, cmd.locator_enabled ? "locator enabled"
+                                         : "locator disabled");
+    }
   } else if (cmd.kind == SJ_BLACKOUT) {
     bool captured;
     portENTER_CRITICAL(&g_sync_mux);
@@ -3311,7 +3334,7 @@ void loop() {
   s = g_sync;
   b = g_beacon;
   portEXIT_CRITICAL(&g_sync_mux);
-  PatternConfig p = beaconPattern(b, g_id.group_id);
+  PatternConfig p = beaconRenderPattern(b, g_id.group_id);
   static uint32_t last_rx = 0;
   if (s.beacons_rx != last_rx) { dutyNoteBeacon(g_duty); last_rx = s.beacons_rx; }
 
@@ -3327,11 +3350,7 @@ void loop() {
       broadcastTable();
       g_next_table_us = t + TABLE_INTERVAL_US;
     }
-    bool calibration_active = false;
-    for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
-      if (b.patterns[group_id].pattern_id == patterns::CALIBRATION)
-        calibration_active = true;
-    if (calibration_active && t >= g_next_cal_roster_us) {
+    if (beaconLocatorActive(b) && t >= g_next_cal_roster_us) {
       broadcastCalibrationRoster();
       g_next_cal_roster_us = t + CAL_ROSTER_INTERVAL_US;
     }

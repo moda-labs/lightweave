@@ -46,6 +46,7 @@ class ConductorAdapter(Protocol):
     def replace(self, old_mac: str, new_mac: str) -> dict[str, Any]: ...
     def reserve_id(self, mac: str, reported_id: int = 0) -> dict[str, Any]: ...
     def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str], group_id: int | None = None) -> dict[str, Any]: ...
+    def set_locator(self, enabled: bool, *, brightness: int = 96, slot_ms: int = 1000, bit_count: int = 1, min_hamming_distance: int = 3) -> dict[str, Any]: ...
     def blackout(self) -> dict[str, Any]: ...
     def restore_blackout(self) -> dict[str, Any]: ...
     def update_power_policy(self, policy: dict[str, Any]) -> dict[str, Any]: ...
@@ -132,6 +133,25 @@ class JsonLineSerialConductor:
         if group_id is not None:
             payload["group_id"] = group_id
         return self._request("pattern", **payload)
+
+    def set_locator(
+        self,
+        enabled: bool,
+        *,
+        brightness: int = 96,
+        slot_ms: int = 1000,
+        bit_count: int = 1,
+        min_hamming_distance: int = 3,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"enabled": enabled}
+        if enabled:
+            payload.update(
+                brightness=brightness,
+                slot_ms=slot_ms,
+                bit_count=bit_count,
+                min_hamming_distance=min_hamming_distance,
+            )
+        return self._request("locator", **payload)
 
     def blackout(self) -> dict[str, Any]:
         return self._request("blackout")

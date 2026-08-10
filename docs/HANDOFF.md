@@ -8,8 +8,41 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**188 pass**) is green; **459 control tests** are green; all three
+(**190 pass**) is green; **481 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+
+Latest in this feature branch (2026-08-10): the lantern locator is now one
+temporary field-wide beacon override instead of a calibration pattern copied
+into all eight group slots. It takes precedence over group rendering while
+active, leaves every saved group pattern untouched, and starts/stops with one
+atomic serial command. This fixes partial shutdowns where Group 1 resumed before
+Group 2. INA228 plausibility now validates instantaneous `V × I` rather than
+dividing the sensor's retained lifetime energy by fresh ESP32 uptime after a
+reboot; the Pi continues to calculate recent draw from consecutive Wh deltas.
+Basketbrain now also appends every distinct INA228 report to a durable SQLite
+time series under `CONTROL_DATA_DIR/power/`, exposes it through
+`GET /api/power/history`, and restores recent Wh-delta anchors after a Pi or
+process restart. Replayed latest samples are deduplicated; accumulator resets
+start a new energy session, while ESP32 reboots with increasing lifetime Wh stay
+in the same session. The web app now opens on an Overview dashboard with field,
+sync, firmware, battery, attention, and active-group health. Its power-over-time
+widget consumes the durable history in 1-hour through 7-day ranges and charts a
+separate 15-minute Wh-delta trace for each meter without bridging bad readings,
+stale gaps, or accumulator sessions. Native logic, the full control suite,
+JavaScript/Python syntax checks, and all three firmware builds are green. The
+Overview also has an animated Expected field canvas reconstructed from the same
+pattern math, effective per-group configs, conductor uptime, positions, LED
+profiles, field power, and locator override used by the installation. Missing
+or mismatched positioned lanterns keep live health outlines, and Fire Flicker
+keeps a representative pixel ring. The canvas remains a read-only dashboard;
+its explicit Manage locations action opens the placement view. Before any
+positions exist it truthfully reports the number awaiting placement. The
+placement tab is now named Lantern Locations to
+distinguish it from this live field rendering. That tab supports guarded
+single-key shortcuts for Locate (L), Move (M), Place (P), Replace (R), Details
+(D), and Forget (F), while ignoring typing targets and modified shortcuts. A
+small palette-matched SVG lantern favicon now identifies the control plane in
+browser tabs. These changes have not been flashed or deployed.
 
 Latest in this feature branch (2026-08-08): control mutations now return as soon
 as the conductor accepts and persists desired state; field health is reported
@@ -658,8 +691,9 @@ revised cost roll-up.
   mode enter/exit, firmware artifact staging, and field-wide OTA install.
   Serial calls are serialized and run
   off the FastAPI event loop, so one serial timeout does not block unrelated
-  async work. The UI has Map, Node List, Patterns, and Operations views; map
-  zoom/pan, drag-to-move/place, unpositioned tray, single bottom-sheet actions,
+  async work. The UI has Overview, Lantern Locations, Node List, Patterns,
+  Power, Operations, and Firmware views; location-map zoom/pan,
+  drag-to-move/place, unpositioned tray, single bottom-sheet actions,
   per-pattern controls, field firmware consistency display, Recovery card, and
   the OTA updater card are all wired. Hardware-verified 2026-07-05: after flashing
   all three bench boards, `/api/state.ota` reported maintenance `ready=true`,
@@ -941,7 +975,7 @@ dimming real shows. Watts are fine; the gating issue is *hours* → daytime slee
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-pio test -e native                                  # 89 host tests
+pio test -e native                                  # 190 host tests
 pio run -e devkitc                                  # build
 pio run -e devkitc -t upload --upload-port /dev/cu.usbserial-XXXX
 pio device monitor -p /dev/cu.usbserial-XXXX        # provision + watch
