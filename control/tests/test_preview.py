@@ -96,6 +96,23 @@ def test_field_preview_renders_group_patterns_and_health_metadata() -> None:
     assert first_colors[2]["rgb"] == [0, 0, 0]
 
 
+def test_field_preview_preserves_fire2012_heat_cells_across_frames() -> None:
+    state = field_state()
+    state["patterns"][1]["config"] = {
+        "pattern": "Fire2012",
+        "brightness": 96,
+        "params": {"p0": 30, "p1": 55, "p2": 120, "p3": 0},
+    }
+
+    preview = render_field_preview_frames(state, 1000, 2, start_ms=0)
+
+    first = preview["frames"][0]["colors"][1]
+    second = preview["frames"][1]["colors"][1]
+    assert len(first["pixels"]) == 16
+    assert len(set(map(tuple, first["pixels"]))) >= 4
+    assert first["pixels"] != second["pixels"]
+
+
 def test_field_preview_applies_locator_as_a_global_override() -> None:
     state = field_state()
     state["locator"] = {

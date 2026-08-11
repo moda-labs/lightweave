@@ -312,6 +312,7 @@ def render_field_preview_frames(
         node_id = calibration_ranks.get(str(item.get("mac") or "").upper(), 0)
         calibration_codes.append(codes[node_id - 1] if 0 < node_id <= len(codes) else 0)
 
+    fire_states: dict[str, Fire2012State] = {}
     frames = []
     for offset in offsets:
         t_ms = start_ms + offset
@@ -329,6 +330,10 @@ def render_field_preview_frames(
             params = config.get("params") or {}
             led_count = _safe_led_count(item.get("led_count"))
             node_id = calibration_ranks.get(str(item.get("mac") or "").upper(), 0)
+            fire_state = None
+            if normalized == "fire2012":
+                state_key = str(item.get("mac") or item.get("label") or node_id)
+                fire_state = fire_states.setdefault(state_key, Fire2012State())
             pixels = _pattern_pixels(
                 normalized,
                 brightness,
@@ -337,13 +342,14 @@ def render_field_preview_frames(
                 float(item["x"]),
                 float(item["y"]),
                 node_id=node_id,
+                fire_state=fire_state,
                 pixel_count=led_count,
                 sample_count=FIELD_PREVIEW_PIXEL_COUNT,
                 calibration_code=calibration_code,
             )
             average = _average_rgbw(pixels)
             rendered = {"rgb": list(_rgbw_to_preview_rgb(average))}
-            if normalized == "fire_flicker":
+            if normalized in {"fire_flicker", "fire2012"}:
                 rendered["pixels"] = [list(_rgbw_to_preview_rgb(pixel)) for pixel in pixels]
             colors.append(rendered)
         frames.append({"t": t_ms, "colors": colors})
