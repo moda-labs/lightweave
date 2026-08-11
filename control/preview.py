@@ -329,7 +329,14 @@ def render_field_preview_frames(
                 brightness = 0
             params = config.get("params") or {}
             led_count = _safe_led_count(item.get("led_count"))
-            node_id = calibration_ranks.get(str(item.get("mac") or "").upper(), 0)
+            calibration_node_id = calibration_ranks.get(
+                str(item.get("mac") or "").upper(), 0
+            )
+            node_id = (
+                calibration_node_id
+                if normalized == "calibration"
+                else _lantern_node_id(item)
+            )
             fire_state = None
             if normalized == "fire2012":
                 state_key = str(item.get("mac") or item.get("label") or node_id)
