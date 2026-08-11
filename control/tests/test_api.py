@@ -27,6 +27,7 @@ from control.preview import (
     Fire2012State,
     _fire2012_node_seed,
     _fire2012_prepare,
+    _fire2012_step,
     _firefly_intensity,
     _firefly_node_seed,
     _firefly_random_solo_intensity,
@@ -1449,6 +1450,20 @@ def test_fire2012_preview_matches_firmware_golden_frame() -> None:
         44, 115, 67, 105, 94, 110, 156, 210,
         122, 94, 110, 91, 29, 0, 0, 0,
     ]
+
+
+def test_fire2012_preview_checkpoint_rotates_without_resetting_heat() -> None:
+    state = Fire2012State()
+    seed = _fire2012_node_seed(0.6, 0.2, 7)
+    _fire2012_prepare(state, 3_966_667, seed, 16, 30, 55, 120)
+    expected = list(state.next_heat)
+    _fire2012_step(expected, 120, seed, 16, 55, 120)
+
+    _fire2012_prepare(state, 4_000_000, seed, 16, 30, 55, 120)
+
+    assert state.heat == expected
+    assert state.origin_step == 0
+    assert state.last_step == 120
 
 
 def test_wavefront_preview_crosses_the_field_as_one_spatial_band() -> None:

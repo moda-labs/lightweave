@@ -80,7 +80,8 @@ side, then repeats. Its params are positional:
   `58396`.
 - `p2` = packed value + angle: bit 15 marks the packed format, bits 9-14 hold
   value (0-63), and low 9 bits hold angle in degrees. Default value 255 + angle
-  0 packs to `65024`. Angle 0 moves left-to-right; 90 moves bottom-to-top.
+  0 packs to `65024`. Angle 0 moves left-to-right; image-space coordinates put
+  90 top-to-bottom and 270 bottom-to-top.
 - `p3` = hue in degrees, default 200.
 
 Preview/review also accept friendly `period`, `front_width`, `angle`, and `hue`

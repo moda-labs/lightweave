@@ -167,7 +167,8 @@ inline float sweepIntensity(int64_t synced_us, float x, float period_s,
 // A single soft band enters from one side, crosses the normalized field, and
 // exits the opposite side before repeating. Unlike SWEEP's endless sine train,
 // WAVEFRONT has one legible crest with darkness ahead of and behind it. Angle
-// zero travels left -> right; 90 degrees travels bottom -> top.
+// zero travels left -> right; image-space y grows downward, so 90 degrees
+// travels top -> bottom and 270 degrees travels bottom -> top.
 inline float wavefrontIntensity(int64_t synced_us, float x, float y,
                                 float period_s, float width,
                                 float angle_rad) {
@@ -420,7 +421,8 @@ inline FireFlickerSample fireFlickerSample(int64_t synced_us, float x, float y,
 // injects random sparks near the base, then maps temperature through a
 // black-body ramp. Ambient RNG would make previews, reboots, and clock recovery
 // diverge, so each random draw here is hashed from the lantern seed and absolute
-// simulation step. The evolving heat array remains local and compact (64 B).
+// simulation step. Three compact 64-byte heat arrays hold the blended output
+// plus the overlapping simulations used at checkpoint boundaries.
 //
 // Reference algorithm:
 // https://github.com/FastLED/FastLED/blob/master/examples/Fire2012/Fire2012.ino
@@ -428,7 +430,10 @@ static constexpr uint16_t kFire2012MaxCells = 64;
 
 struct Fire2012State {
   uint8_t heat[kFire2012MaxCells];
+  uint8_t primary_heat[kFire2012MaxCells];
+  uint8_t next_heat[kFire2012MaxCells];
   int64_t last_step;
+  int64_t next_last_step;
   int64_t origin_step;
   uint32_t signature;
   bool ready;
@@ -468,16 +473,21 @@ inline uint8_t fire2012Random8(uint32_t seed, int64_t step,
 }
 
 inline void fire2012Clear(Fire2012State& state) {
-  for (uint16_t i = 0; i < kFire2012MaxCells; i++) state.heat[i] = 0;
+  for (uint16_t i = 0; i < kFire2012MaxCells; i++) {
+    state.heat[i] = 0;
+    state.primary_heat[i] = 0;
+    state.next_heat[i] = 0;
+  }
   state.last_step = 0;
+  state.next_last_step = 0;
   state.origin_step = 0;
   state.signature = 0;
   state.ready = false;
 }
 
-inline void fire2012Step(Fire2012State& state, int64_t step,
-                         uint32_t seed, uint16_t cell_count,
-                         uint8_t cooling, uint8_t sparking) {
+inline void fire2012Step(uint8_t heat[kFire2012MaxCells], int64_t step,
+                         uint32_t seed, uint16_t cell_count, uint8_t cooling,
+                         uint8_t sparking) {
   if (cell_count < 1) cell_count = 1;
   if (cell_count > kFire2012MaxCells) cell_count = kFire2012MaxCells;
 
@@ -487,14 +497,14 @@ inline void fire2012Step(Fire2012State& state, int64_t step,
   if (cooling_limit > 256u) cooling_limit = 256u;
   for (uint16_t i = 0; i < cell_count; i++) {
     uint8_t loss = (uint8_t)(fire2012Random8(seed, step, i) % cooling_limit);
-    state.heat[i] = loss >= state.heat[i] ? 0 : state.heat[i] - loss;
+    heat[i] = loss >= heat[i] ? 0 : heat[i] - loss;
   }
 
   // Step 2: heat rises and diffuses, weighting the cell two places below twice.
   for (int k = (int)cell_count - 1; k >= 2; k--) {
-    state.heat[k] = (uint8_t)(((uint16_t)state.heat[k - 1] +
-                               (uint16_t)state.heat[k - 2] * 2u) /
-                              3u);
+    heat[k] = (uint8_t)(((uint16_t)heat[k - 1] +
+                          (uint16_t)heat[k - 2] * 2u) /
+                         3u);
   }
 
   // Step 3: sometimes ignite a strong spark in one of the bottom seven cells.
@@ -502,8 +512,8 @@ inline void fire2012Step(Fire2012State& state, int64_t step,
     uint16_t base_cells = cell_count < 7 ? cell_count : 7;
     uint16_t y = fire2012Random8(seed, step, 0x101u) % base_cells;
     uint16_t added = 160u + fire2012Random8(seed, step, 0x102u) % 95u;
-    uint16_t hot = (uint16_t)state.heat[y] + added;
-    state.heat[y] = (uint8_t)(hot > 255u ? 255u : hot);
+    uint16_t hot = (uint16_t)heat[y] + added;
+    heat[y] = (uint8_t)(hot > 255u ? 255u : hot);
   }
 }
 
@@ -516,11 +526,11 @@ inline uint32_t fire2012Signature(uint32_t seed, uint16_t cell_count,
 }
 
 // Advance the heat simulation to the fixed absolute-time step containing
-// synced_us. A deterministic 20-second checkpoint window bounds replay work
-// while making the result a reproducible function of absolute time: preview,
-// restart, and a continuously running performer all use the same checkpoint.
-// One preceding window is replayed as warm-up, so each checkpoint starts with
-// an already-burning fire rather than an empty heat array.
+// synced_us. Four-second deterministic blocks bound cold-preview replay work.
+// The primary simulation starts one block early as warm-up; a second simulation
+// starts at the current block and crossfades in over its final half-second.
+// At the boundary that second simulation becomes primary, keeping the flame
+// continuous instead of resetting it at each checkpoint.
 inline void fire2012Prepare(Fire2012State& state, int64_t synced_us,
                             uint32_t seed, uint16_t cell_count, uint8_t fps,
                             uint8_t cooling, uint8_t sparking) {
@@ -529,22 +539,56 @@ inline void fire2012Prepare(Fire2012State& state, int64_t synced_us,
   if (fps < 10 || fps > 60) fps = 30;
   uint32_t signature = fire2012Signature(seed, cell_count, fps, cooling, sparking);
   int64_t target_step = floorDiv(synced_us * (int64_t)fps, 1000000LL);
-  int64_t block_steps = (int64_t)fps * 20;
+  int64_t block_steps = (int64_t)fps * 4;
   int64_t origin_step = floorDiv(target_step, block_steps) * block_steps -
                         block_steps;
-  bool rebuild = !state.ready || state.signature != signature ||
-                 state.origin_step != origin_step ||
+  bool same_config = state.ready && state.signature == signature;
+  bool advance_one_block = same_config &&
+                           origin_step == state.origin_step + block_steps &&
+                           target_step >= state.next_last_step;
+  bool rebuild = !same_config ||
+                 (state.origin_step != origin_step && !advance_one_block) ||
                  target_step < state.last_step;
   if (rebuild) {
     fire2012Clear(state);
     state.signature = signature;
     state.origin_step = origin_step;
     state.last_step = origin_step;
+    state.next_last_step = origin_step + block_steps;
     state.ready = true;
+  } else if (advance_one_block) {
+    for (uint16_t i = 0; i < cell_count; i++) {
+      state.primary_heat[i] = state.next_heat[i];
+      state.next_heat[i] = 0;
+    }
+    state.origin_step = origin_step;
+    state.last_step = state.next_last_step;
+    state.next_last_step = origin_step + block_steps;
   }
   while (state.last_step < target_step) {
     state.last_step++;
-    fire2012Step(state, state.last_step, seed, cell_count, cooling, sparking);
+    fire2012Step(state.primary_heat, state.last_step, seed, cell_count,
+                 cooling, sparking);
+  }
+  while (state.next_last_step < target_step) {
+    state.next_last_step++;
+    fire2012Step(state.next_heat, state.next_last_step, seed, cell_count,
+                 cooling, sparking);
+  }
+
+  int64_t block_start = origin_step + block_steps;
+  int64_t crossfade_steps = (int64_t)fps / 2;
+  if (crossfade_steps < 1) crossfade_steps = 1;
+  int64_t crossfade_start = block_start + block_steps - crossfade_steps;
+  float blend = 0.0f;
+  if (target_step > crossfade_start) {
+    blend = (float)(target_step - crossfade_start) / (float)crossfade_steps;
+    if (blend > 1.0f) blend = 1.0f;
+    blend = smoothstep01(blend);
+  }
+  for (uint16_t i = 0; i < cell_count; i++) {
+    state.heat[i] = (uint8_t)lroundf(
+        state.primary_heat[i] * (1.0f - blend) + state.next_heat[i] * blend);
   }
 }
 

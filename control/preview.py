@@ -31,7 +31,10 @@ class Rgbw:
 @dataclass
 class Fire2012State:
     heat: list[int] = field(default_factory=lambda: [0] * RING_PIXEL_COUNT)
+    primary_heat: list[int] = field(default_factory=lambda: [0] * RING_PIXEL_COUNT)
+    next_heat: list[int] = field(default_factory=lambda: [0] * RING_PIXEL_COUNT)
     last_step: int = 0
+    next_last_step: int = 0
     origin_step: int = 0
     signature: int = 0
     ready: bool = False
@@ -1093,7 +1096,7 @@ def _fire2012_signature(seed: int, cell_count: int, fps: int, cooling: int, spar
 
 
 def _fire2012_step(
-    state: Fire2012State,
+    heat: list[int],
     step: int,
     seed: int,
     cell_count: int,
@@ -1103,16 +1106,14 @@ def _fire2012_step(
     cooling_limit = min(256, (cooling * 10) // cell_count + 2)
     for index in range(cell_count):
         loss = _fire2012_random8(seed, step, index) % cooling_limit
-        state.heat[index] = max(0, state.heat[index] - loss)
+        heat[index] = max(0, heat[index] - loss)
     for index in range(cell_count - 1, 1, -1):
-        state.heat[index] = (
-            state.heat[index - 1] + state.heat[index - 2] * 2
-        ) // 3
+        heat[index] = (heat[index - 1] + heat[index - 2] * 2) // 3
     if _fire2012_random8(seed, step, 0x100) < sparking:
         base_cells = min(7, cell_count)
         index = _fire2012_random8(seed, step, 0x101) % base_cells
         added = 160 + _fire2012_random8(seed, step, 0x102) % 95
-        state.heat[index] = min(255, state.heat[index] + added)
+        heat[index] = min(255, heat[index] + added)
 
 
 def _fire2012_prepare(
@@ -1126,25 +1127,66 @@ def _fire2012_prepare(
 ) -> None:
     signature = _fire2012_signature(seed, cell_count, fps, cooling, sparking)
     target_step = (synced_us * fps) // 1_000_000
-    block_steps = fps * 20
+    block_steps = fps * 4
     origin_step = (target_step // block_steps) * block_steps - block_steps
+    same_config = state.ready and state.signature == signature
+    advance_one_block = (
+        same_config
+        and origin_step == state.origin_step + block_steps
+        and target_step >= state.next_last_step
+    )
     rebuild = (
-        not state.ready
-        or state.signature != signature
-        or state.origin_step != origin_step
+        not same_config
+        or (state.origin_step != origin_step and not advance_one_block)
         or target_step < state.last_step
     )
     if rebuild:
         state.heat = [0] * cell_count
+        state.primary_heat = [0] * cell_count
+        state.next_heat = [0] * cell_count
         state.signature = signature
         state.origin_step = origin_step
         state.last_step = origin_step
+        state.next_last_step = origin_step + block_steps
         state.ready = True
+    elif advance_one_block:
+        state.primary_heat = list(state.next_heat)
+        state.next_heat = [0] * cell_count
+        state.origin_step = origin_step
+        state.last_step = state.next_last_step
+        state.next_last_step = origin_step + block_steps
     while state.last_step < target_step:
         state.last_step += 1
         _fire2012_step(
-            state, state.last_step, seed, cell_count, cooling, sparking
+            state.primary_heat,
+            state.last_step,
+            seed,
+            cell_count,
+            cooling,
+            sparking,
         )
+    while state.next_last_step < target_step:
+        state.next_last_step += 1
+        _fire2012_step(
+            state.next_heat,
+            state.next_last_step,
+            seed,
+            cell_count,
+            cooling,
+            sparking,
+        )
+
+    block_start = origin_step + block_steps
+    crossfade_steps = max(1, fps // 2)
+    crossfade_start = block_start + block_steps - crossfade_steps
+    blend = 0.0
+    if target_step > crossfade_start:
+        blend = min(1.0, (target_step - crossfade_start) / crossfade_steps)
+        blend = _smoothstep01(blend)
+    state.heat = [
+        _lround(primary * (1.0 - blend) + following * blend)
+        for primary, following in zip(state.primary_heat, state.next_heat)
+    ]
 
 
 def _fire2012_heat_color(temperature: int) -> tuple[int, int, int]:

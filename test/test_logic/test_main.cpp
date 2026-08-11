@@ -709,7 +709,7 @@ void test_fire2012_checkpoint_replay_is_independent_of_prior_state() {
   pmath::Fire2012State fresh = {};
   uint32_t seed = pmath::fire2012NodeSeed(0.6f, 0.2f, 7);
 
-  // Cross the 20-second replay boundary with one existing state, then render
+  // Cross a replay boundary with one existing state, then render
   // the same absolute time from a blank state (as after a reboot or preview).
   pmath::fire2012Prepare(continuous, 19'900'000, seed, 16, 30, 55, 120);
   pmath::fire2012Prepare(continuous, 20'100'000, seed, 16, 30, 55, 120);
@@ -719,6 +719,37 @@ void test_fire2012_checkpoint_replay_is_independent_of_prior_state() {
   TEST_ASSERT_EQUAL_INT64(fresh.origin_step, continuous.origin_step);
   for (uint16_t i = 0; i < 16; i++)
     TEST_ASSERT_EQUAL_UINT8(fresh.heat[i], continuous.heat[i]);
+}
+
+void test_fire2012_checkpoint_crossfade_rotates_without_a_reset() {
+  pmath::Fire2012State state = {};
+  uint32_t seed = pmath::fire2012NodeSeed(0.6f, 0.2f, 7);
+  pmath::fire2012Prepare(state, 3'966'667, seed, 16, 30, 55, 120);
+
+  uint8_t expected[pmath::kFire2012MaxCells] = {};
+  memcpy(expected, state.next_heat, sizeof(expected));
+  pmath::fire2012Step(expected, 120, seed, 16, 55, 120);
+
+  pmath::fire2012Prepare(state, 4'000'000, seed, 16, 30, 55, 120);
+
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, state.heat, 16);
+  TEST_ASSERT_EQUAL_INT64(0, state.origin_step);
+  TEST_ASSERT_EQUAL_INT64(120, state.last_step);
+}
+
+void test_fire2012_cold_replay_is_bounded_to_short_overlapping_blocks() {
+  pmath::Fire2012State state = {};
+  uint32_t seed = pmath::fire2012NodeSeed(0.4f, 0.8f, 3);
+
+  pmath::fire2012Prepare(state, 1'234'567'890, seed, 64, 60, 55, 120);
+
+  int64_t primary_steps = state.last_step - state.origin_step;
+  int64_t next_origin = state.origin_step + 60 * 4;
+  int64_t following_steps = state.next_last_step - next_origin;
+  TEST_ASSERT_TRUE(primary_steps >= 60 * 4);
+  TEST_ASSERT_TRUE(primary_steps < 60 * 8);
+  TEST_ASSERT_TRUE(following_steps >= 0);
+  TEST_ASSERT_TRUE(following_steps < 60 * 4);
 }
 
 void test_fire2012_sparking_and_cooling_controls_change_the_fire() {
@@ -3392,6 +3423,8 @@ int main(int, char**) {
   RUN_TEST(test_fire2012_matches_control_preview_golden_frame);
   RUN_TEST(test_fire2012_advances_on_fixed_synced_time_steps);
   RUN_TEST(test_fire2012_checkpoint_replay_is_independent_of_prior_state);
+  RUN_TEST(test_fire2012_checkpoint_crossfade_rotates_without_a_reset);
+  RUN_TEST(test_fire2012_cold_replay_is_bounded_to_short_overlapping_blocks);
   RUN_TEST(test_fire2012_sparking_and_cooling_controls_change_the_fire);
   RUN_TEST(test_ocean_component_bounds);
   RUN_TEST(test_ocean_component_travels_along_direction);
