@@ -235,6 +235,33 @@ def test_groups_keep_independent_patterns_and_membership() -> None:
     assert snapshot["patterns"][0]["config"]["pattern"] == "Glow"
 
 
+def test_locator_override_preserves_every_group_pattern() -> None:
+    conductor = MockConductor()
+    conductor.update_pattern("White", 24, {}, group_id=0)
+    conductor.update_pattern("Fire Flicker", 56, {"p0": 1200}, group_id=1)
+    before = conductor.snapshot()["patterns"]
+
+    started = conductor.set_locator(
+        True,
+        brightness=96,
+        slot_ms=1000,
+        bit_count=7,
+        min_hamming_distance=3,
+    )
+    running = conductor.snapshot()
+    stopped = conductor.set_locator(False)
+    restored = conductor.snapshot()
+
+    assert started["ok"] is True
+    assert running["locator"]["enabled"] is True
+    assert running["pattern"]["pattern"] == "Calibration"
+    assert running["patterns"] == before
+    assert stopped["ok"] is True
+    assert restored["locator"]["enabled"] is False
+    assert restored["patterns"] == before
+    assert restored["pattern"] == before[0]["config"]
+
+
 def test_pattern_update_without_group_targets_every_group() -> None:
     conductor = MockConductor()
 

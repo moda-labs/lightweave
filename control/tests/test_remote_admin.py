@@ -159,8 +159,22 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=18"' in index_html
-    assert 'href="/static/styles.css?v=5"' in index_html
+    assert 'src="/static/app.js?v=22"' in index_html
+    assert 'href="/static/styles.css?v=8"' in index_html
+    assert '<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">' in index_html
+    assert '<button class="active" data-view="overview">Overview</button>' in index_html
+    assert '<button data-view="map">Lantern Locations</button>' in index_html
+    assert 'data-overview-view="map">Manage locations</button>' in index_html
+    assert 'id="view-overview"' in index_html
+    assert index_html.index('data-view="overview"') < index_html.index('data-view="map"')
+    assert index_html.index('id="view-overview"') < index_html.index('id="view-map"')
+    assert 'id="power-history-chart"' in index_html
+    assert 'id="field-preview-canvas"' in index_html
+    assert '$("#field-preview-canvas")?.addEventListener("click"' not in app_js
+    assert "fieldPreviewHitTargets" not in app_js
+    assert 'id="field-preview-status"' in index_html
+    assert "Expected field" in index_html
+    assert 'data-power-range="168"' in index_html
     assert 'data-view="power"' in index_html
     assert 'id="view-power"' in index_html
     assert index_html.index('data-view="ops"') < index_html.index('data-view="flash"')
@@ -214,6 +228,14 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Average draw per performer" in index_html
     assert "Estimated field draw" not in index_html
     assert "monitor.average_performer_draw_w" in app_js
+    assert 'api(`/api/power/history?hours=${encodeURIComponent(requestedHours)}&limit=100000`)' in app_js
+    assert "function powerDrawSeries(samples" in app_js
+    assert "function renderOverview()" in app_js
+    assert "function fieldPreviewFrameIndex(preview, elapsedMs)" in app_js
+    assert "function lanternLocationHotkeyAction(key, lantern)" in app_js
+    assert 'data-action="identify">Locate <kbd>L</kbd>' in index_html
+    assert 'data-action="forget">Forget <kbd>F</kbd>' in index_html
+    assert 'api(`/api/field-preview/frames.json?duration_ms=${FIELD_PREVIEW_DURATION_MS}&fps=${FIELD_PREVIEW_FPS}`)' in app_js
     assert "node_offsets" in app_js
     assert 'verified ? "✓" : ""' in app_js
     assert "fullImage" in app_js
@@ -443,6 +465,167 @@ const lanterns = [
 ];
 if (onlinePerformerCount(lanterns) !== 2) process.exit(1);
 if (onlinePerformerCount(null) !== 0) process.exit(2);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_power_history_chart_uses_wh_deltas_and_breaks_bad_energy_sessions() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function powerDrawSeries(samples")
+    end = app_js.index("\n}\n\nfunction overviewIssues", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+const POWER_DRAW_WINDOW_S = 15 * 60;
+{function_source}
+const series = powerDrawSeries([
+  {{mac: "aa", received_at: 1000, energy_session: 0, wh: 10.0, bus_v: 12, current_ma: 100, plausible: true}},
+  {{mac: "AA", received_at: 1060, energy_session: 0, wh: 10.02, bus_v: 12, current_ma: 100, plausible: true}},
+  {{mac: "AA", received_at: 1120, energy_session: 0, wh: 99, bus_v: 12, current_ma: 100, plausible: false}},
+  {{mac: "AA", received_at: 1180, energy_session: 1, wh: 0.0, bus_v: 12, current_ma: 50, plausible: true}},
+  {{mac: "AA", received_at: 1240, energy_session: 1, wh: 0.01, bus_v: 12, current_ma: 50, plausible: true}},
+  {{mac: "BB", received_at: 1000, energy_session: 0, wh: 2.0, bus_v: 12, current_ma: 25, plausible: true}},
+]);
+if (series.length !== 2 || series[0].mac !== "AA" || series[1].mac !== "BB") process.exit(1);
+if (Math.abs(series[0].points[1].watts - 1.2) > 0.001) process.exit(2);
+if (!series[0].points[2].break_before || series[0].points[2].energy_session !== 1) process.exit(3);
+if (Math.abs(series[0].points[3].watts - 0.6) > 0.001) process.exit(4);
+if (series[0].points.some((point) => point.watts > 50)) process.exit(5);
+if (Math.abs(series[1].points[0].watts - 0.3) > 0.001) process.exit(6);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_field_preview_frame_index_loops_and_handles_empty_buffers() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function fieldPreviewFrameIndex(")
+    end = app_js.index("\n}\n\nfunction fieldPreviewVisible", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+const FIELD_PREVIEW_FPS = 8;
+{function_source}
+const preview = {{frame_interval_ms: 125, frames: [{{}}, {{}}, {{}}, {{}}]}};
+if (fieldPreviewFrameIndex(preview, 0) !== 0) process.exit(1);
+if (fieldPreviewFrameIndex(preview, 124) !== 0) process.exit(2);
+if (fieldPreviewFrameIndex(preview, 125) !== 1) process.exit(3);
+if (fieldPreviewFrameIndex(preview, 500) !== 0) process.exit(4);
+if (fieldPreviewFrameIndex({{frames: []}}, 100) !== -1) process.exit(5);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_lantern_location_hotkeys_respect_move_and_place_eligibility() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    positioned_start = app_js.index("function isPositioned(")
+    positioned_end = app_js.index("\n}\n\nfunction replacementCandidates", positioned_start) + 2
+    positioned_source = app_js[positioned_start:positioned_end]
+    hotkey_start = app_js.index("function lanternLocationHotkeyAction(")
+    hotkey_end = app_js.index("\n}\n\nfunction triggerLanternLocationHotkey", hotkey_start) + 2
+    hotkey_source = app_js[hotkey_start:hotkey_end]
+    script = f"""
+{positioned_source}
+{hotkey_source}
+const placed = {{x: 0.2, y: 0.4}};
+const unplaced = {{x: null, y: null}};
+if (lanternLocationHotkeyAction("M", placed) !== "move") process.exit(1);
+if (lanternLocationHotkeyAction("p", placed) !== null) process.exit(2);
+if (lanternLocationHotkeyAction("P", unplaced) !== "move") process.exit(3);
+if (lanternLocationHotkeyAction("m", unplaced) !== null) process.exit(4);
+if (lanternLocationHotkeyAction("l", placed) !== "identify") process.exit(5);
+if (lanternLocationHotkeyAction("r", placed) !== "replace") process.exit(6);
+if (lanternLocationHotkeyAction("d", placed) !== "details") process.exit(7);
+if (lanternLocationHotkeyAction("f", placed) !== "forget") process.exit(8);
+if (lanternLocationHotkeyAction("x", placed) !== null) process.exit(9);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    assert 'if (!$("#view-map")?.classList.contains("active")) return;' in app_js
+    assert '["INPUT", "SELECT", "TEXTAREA"].includes(target?.tagName)' in app_js
+
+
+def test_power_history_incremental_merge_deduplicates_and_keeps_selected_window() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function mergePowerHistorySamples(")
+    end = app_js.index("\n}\n\nfunction overviewIssues", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+{function_source}
+const old = [
+  {{mac: "AA", received_at: 1000, energy_session: 0, wh: 1}},
+  {{mac: "AA", received_at: 9000, energy_session: 0, wh: 2}},
+];
+const fresh = [
+  {{mac: "AA", received_at: 9000, energy_session: 0, wh: 2}},
+  {{mac: "AA", received_at: 10000, energy_session: 0, wh: 3}},
+];
+const merged = mergePowerHistorySamples(old, fresh, 1, 11000);
+if (merged.length !== 2) process.exit(1);
+if (merged[0].received_at !== 9000 || merged[1].received_at !== 10000) process.exit(2);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_overview_health_issues_surface_field_and_meter_failures() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function overviewIssues(")
+    end = app_js.index("\n}\n\nfunction setActiveView", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+{function_source}
+const issues = overviewIssues({{
+  conductor: {{connected: true, sync: "locked"}},
+  lanterns: [
+    {{status: "missing", position: "Set"}},
+    {{status: "alive", position: "Unpositioned"}},
+  ],
+  summary: {{firmware: {{consistent: false}}}},
+  recovery: {{failed_ota: []}},
+  power_monitor: {{stale_count: 1, implausible_count: 1, history: {{error: "disk full"}}}},
+}});
+const titles = issues.map((issue) => issue.title).join("|");
+if (!titles.includes("placed lantern") || !titles.includes("needs a position")) process.exit(1);
+if (!titles.includes("Mixed field firmware") || !titles.includes("stale power meter")) process.exit(2);
+if (!titles.includes("implausible power reading") || !titles.includes("Power history is not recording")) process.exit(3);
+if (!issues.some((issue) => issue.severity === "bad")) process.exit(4);
 """
     completed = subprocess.run(
         ["node", "--input-type=module", "-e", script],

@@ -92,9 +92,13 @@ pio test -e native
 
 - FastAPI app with HTTP + WebSocket state updates
 - Mock conductor adapter and pyserial-backed JSON-line conductor adapter
-- API-backed Map/Node List/Patterns/Operations UI shell
+- API-backed Overview/Lantern Locations/Node List/Patterns/Power/Operations/
+  Firmware UI shell
+- Animated expected-field preview and durable SQLite power history with
+  1-hour through 7-day dashboard ranges
 - Shared lantern detail sheet
-- Actions for identify, assign, forget, replace, pattern changes, and blackout
+- Actions for locate, assign, forget, replace, pattern changes, and blackout,
+  plus guarded Lantern Locations single-key shortcuts
 - Desired-state acknowledgements that return after conductor persistence while
   performer convergence is observed by later fleet snapshots
 - Reversible per-group Off/On controls and safe field sleep that pauses active

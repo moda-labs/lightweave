@@ -43,8 +43,22 @@ from .ota_store import (
     PersistentOtaInstall,
 )
 from .pattern_store import PatternStore, PatternStoreError
-from .power_monitor import PowerDraw, PowerDrawTracker, PowerMonitorStore
-from .preview import parse_params, render_preview_data, render_preview_frames, render_preview_png, review_preview
+from .power_monitor import (
+    DEFAULT_DRAW_WINDOW_S,
+    PowerDraw,
+    PowerDrawTracker,
+    PowerHistoryError,
+    PowerHistoryStore,
+    PowerMonitorStore,
+)
+from .preview import (
+    parse_params,
+    render_field_preview_frames,
+    render_preview_data,
+    render_preview_frames,
+    render_preview_png,
+    review_preview,
+)
 from .provisioning_client import (
     ProvisioningClient,
     ProvisioningClientError,
@@ -473,6 +487,7 @@ def create_app(
     provisioning_client: ProvisioningClient | None = None,
     group_store: GroupStore | None = None,
     power_monitor_store: PowerMonitorStore | None = None,
+    power_history_store: PowerHistoryStore | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_remote_settings(os.environ)
     resolved_auth = auth_manager
@@ -735,10 +750,16 @@ def create_app(
         else None
     )
     app.state.ota_operation_lock = None
-    app.state.calibration_previous_pattern = None
     app.state.power_monitor_store = power_monitor_store or PowerMonitorStore(
         data_dir / "power" if data_dir else None
     )
+    power_root = (
+        data_dir / "power"
+        if data_dir
+        else app.state.power_monitor_store.root
+    )
+    app.state.power_history_store = power_history_store or PowerHistoryStore(power_root)
+    app.state.power_history_error = None
     stored_power_monitor = app.state.power_monitor_store.load()
     app.state.power_monitor_config = {
         "battery_capacity_wh": float(os.getenv("CONTROL_BATTERY_CAPACITY_WH", DEFAULT_BATTERY_CAPACITY_WH)),
@@ -747,6 +768,14 @@ def create_app(
     }
     app.state.power_full_anchors = dict(stored_power_monitor.get("full_anchors", {}))
     app.state.power_draw_tracker = PowerDrawTracker()
+    try:
+        app.state.power_draw_tracker.restore(
+            app.state.power_history_store.draw_points(
+                since=time.time() - DEFAULT_DRAW_WINDOW_S
+            )
+        )
+    except PowerHistoryError as error:
+        app.state.power_history_error = str(error)
     app.state.conductor_lock = asyncio.Lock()
     app.state.ws_clients: dict[WebSocket, str] = {}
 
@@ -1050,12 +1079,27 @@ def create_app(
             used_since_full_wh = max(0.0, float(wh) - anchor_wh)
             soc_percent = max(0.0, min(100.0, 100.0 * (1.0 - used_since_full_wh / capacity_wh)))
             report_age = max(0.0, float(last_report_s)) if isinstance(last_report_s, (int, float)) else 0.0
+            reported_at = now - report_age
+            try:
+                app.state.power_history_store.record_sample(
+                    mac=mac,
+                    received_at=reported_at,
+                    wh=float(wh),
+                    mah=power.get("mah"),
+                    elapsed_s=power.get("elapsed_s"),
+                    bus_v=bus_v,
+                    current_ma=power.get("current_ma"),
+                    plausible=plausible,
+                )
+                app.state.power_history_error = None
+            except PowerHistoryError as error:
+                app.state.power_history_error = str(error)
             draw = (
                 app.state.power_draw_tracker.observe(
                     mac,
                     wh=float(wh),
                     elapsed_s=power.get("elapsed_s"),
-                    reported_at=now - report_age,
+                    reported_at=reported_at,
                     bus_v=bus_v,
                     current_ma=power.get("current_ma"),
                 )
@@ -1095,6 +1139,10 @@ def create_app(
             "battery_capacity_wh": capacity_wh,
             "full_voltage": full_voltage,
             "full_anchor_policy": "Lifetime Wh stays on the meter; the durable full-charge anchor resets SOC to 100% without clearing accumulated energy.",
+            "history": {
+                "enabled": app.state.power_history_store.enabled,
+                "error": app.state.power_history_error,
+            },
             "placed_count": placed_count,
             "sample_count": len(samples),
             "usable_sample_count": len(usable_w),
@@ -1163,7 +1211,7 @@ def create_app(
         async with app.state.conductor_lock:
             result = await asyncio.to_thread(getattr(app.state.conductor, method), *args)
         if method == "snapshot" and isinstance(result, dict):
-            enriched = enrich_state(result)
+            enriched = await asyncio.to_thread(enrich_state, result)
             app.state.latest_snapshot = enriched
             app.state.latest_snapshot_at = time.monotonic()
             return enriched
@@ -1226,81 +1274,19 @@ def create_app(
         async with app.state.conductor_lock:
             state = await asyncio.to_thread(app.state.conductor.snapshot)
             if enabled:
-                current = state.get("pattern") or {}
-                previous = None
-                if current.get("pattern") != "Calibration":
-                    group_patterns = []
-                    for fallback_group_id, item in enumerate(state.get("patterns") or []):
-                        if not isinstance(item, dict):
-                            continue
-                        config = item.get("config") or {}
-                        group_id = int(item.get("group_id", fallback_group_id))
-                        if not isinstance(config, dict) or not 0 <= group_id < GROUP_COUNT:
-                            continue
-                        group_patterns.append(
-                            {
-                                "group_id": group_id,
-                                "pattern": str(config.get("pattern") or "Glow"),
-                                "brightness": int(
-                                    48 if config.get("brightness") is None else config["brightness"]
-                                ),
-                                "params": dict(config.get("params") or {}),
-                            }
-                        )
-                    if len(group_patterns) == GROUP_COUNT:
-                        previous = {"groups": group_patterns}
-                    else:
-                        previous = {
-                            "pattern": str(current.get("pattern") or "Glow"),
-                            "brightness": int(
-                                48 if current.get("brightness") is None else current["brightness"]
-                            ),
-                            "params": dict(current.get("params") or {}),
-                        }
                 plan = calibration_mode_plan(state)
                 ack = await asyncio.to_thread(
-                    app.state.conductor.update_pattern,
-                    "Calibration",
-                    96,
-                    {
-                        "p0": 1000,
-                        "p1": int(plan["bit_count"]),
-                        "p2": int(plan["first_code"]),
-                        "p3": int(plan["min_hamming_distance"]),
-                    },
+                    app.state.conductor.set_locator,
+                    True,
+                    brightness=96,
+                    slot_ms=1000,
+                    bit_count=int(plan["bit_count"]),
+                    min_hamming_distance=int(plan["min_hamming_distance"]),
                 )
                 if ack.get("ok"):
-                    if previous is not None:
-                        app.state.calibration_previous_pattern = previous
                     ack["plan"] = plan
                 return ack
-            previous = app.state.calibration_previous_pattern or {
-                "pattern": "Glow",
-                "brightness": 48,
-                "params": {"hue": 40, "saturation": 100},
-            }
-            if "groups" in previous:
-                for config in previous["groups"]:
-                    ack = await asyncio.to_thread(
-                        app.state.conductor.update_pattern,
-                        config["pattern"],
-                        config["brightness"],
-                        config["params"],
-                        config["group_id"],
-                    )
-                    if not ack.get("ok"):
-                        return ack
-                app.state.calibration_previous_pattern = None
-                return {"ok": True, "message": "restored group patterns"}
-            ack = await asyncio.to_thread(
-                app.state.conductor.update_pattern,
-                previous["pattern"],
-                previous["brightness"],
-                previous["params"],
-            )
-            if ack.get("ok"):
-                app.state.calibration_previous_pattern = None
-            return ack
+            return await asyncio.to_thread(app.state.conductor.set_locator, False)
 
     async def infer_ota_complete_nodes(
         size: int,
@@ -2038,6 +2024,34 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {"ok": True, "simulation": simulation}
 
+    @app.get("/api/field-preview/frames.json")
+    async def field_preview_frames_json(
+        duration_ms: int = Query(default=6000, ge=500, le=12000),
+        fps: int = Query(default=8, ge=1, le=12),
+        start_ms: int | None = Query(default=None, ge=0),
+    ) -> dict[str, Any]:
+        try:
+            state = cached_snapshot(max_age_s=10.0)
+            if state is None:
+                state = await conductor_call("snapshot")
+            render_start_ms = start_ms
+            if render_start_ms is None:
+                uptime_s = (state.get("conductor") or {}).get("uptime_s")
+                if isinstance(uptime_s, (int, float)):
+                    snapshot_age_s = max(0.0, time.monotonic() - app.state.latest_snapshot_at)
+                    render_start_ms = round((float(uptime_s) + snapshot_age_s) * 1000)
+            return await asyncio.to_thread(
+                render_field_preview_frames,
+                state,
+                duration_ms,
+                fps,
+                render_start_ms,
+            )
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.get("/preview")
     async def preview(
         pattern: str,
@@ -2515,6 +2529,30 @@ def create_app(
             save_power_monitor_state()
         await publish_command_accepted("power-monitor")
         return {"ok": True, "message": "power monitor settings changed", "power_monitor": app.state.power_monitor_config}
+
+    @app.get("/api/power/history")
+    async def get_power_history(
+        mac: str | None = Query(default=None),
+        hours: float = Query(default=24.0, gt=0, le=24 * 366 * 10),
+        limit: int = Query(default=5000, ge=1, le=100_000),
+    ) -> dict[str, Any]:
+        since = time.time() - hours * 60 * 60
+        try:
+            samples = await asyncio.to_thread(
+                app.state.power_history_store.samples,
+                since=since,
+                mac=mac,
+                limit=limit,
+            )
+        except PowerHistoryError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {
+            "enabled": app.state.power_history_store.enabled,
+            "hours": hours,
+            "mac": mac.upper() if mac else None,
+            "count": len(samples),
+            "samples": [sample.as_dict() for sample in samples],
+        }
 
     @app.post("/api/lanterns/{mac}/power-sync-full")
     async def sync_lantern_power_full(mac: str) -> dict[str, Any]:
@@ -3794,7 +3832,7 @@ def create_app(
                     if app.state.ota_reserved:
                         raise HTTPException(status_code=409, detail="OTA install already running")
                     state = await asyncio.to_thread(app.state.conductor.snapshot)
-                    state = enrich_state(state)
+                    state = await asyncio.to_thread(enrich_state, state)
                     reject_routed_protocol_downgrade(
                         state,
                         require_artifact_protocol(artifact),
@@ -3991,7 +4029,7 @@ def create_app(
             try:
                 async with app.state.conductor_lock:
                     state = await asyncio.to_thread(app.state.conductor.snapshot)
-                    state = enrich_state(state)
+                    state = await asyncio.to_thread(enrich_state, state)
                     reject_routed_protocol_downgrade(
                         state,
                         require_artifact_protocol(artifact),

@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Do Baskets Dream Control Plane</title>
-  <link rel="stylesheet" href="/static/styles.css?v=5">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css?v=8">
 </head>
 <body>
   <div class="app">
@@ -26,7 +27,8 @@
     </header>
 
     <nav class="tabs" aria-label="Primary">
-      <button class="active" data-view="map">Map</button>
+      <button class="active" data-view="overview">Overview</button>
+      <button data-view="map">Lantern Locations</button>
       <button data-view="table">Node List</button>
       <button data-view="show">Patterns</button>
       <button data-view="power">Power</button>
@@ -35,7 +37,114 @@
     </nav>
 
     <main>
-      <section class="view active" id="view-map">
+      <section class="view active" id="view-overview">
+        <div class="overview-page">
+          <div class="overview-heading">
+            <div>
+              <h2>Overview</h2>
+              <p>Field health and measured power at a glance.</p>
+            </div>
+            <div class="chip" id="overview-health-status">checking field</div>
+          </div>
+
+          <section class="overview-metrics" aria-label="Field health metrics">
+            <div class="overview-metric">
+              <div class="label">Field online</div>
+              <div class="overview-value" id="overview-field-online">--</div>
+              <div class="overview-note" id="overview-field-note">Waiting for roster</div>
+            </div>
+            <div class="overview-metric">
+              <div class="label">Clock sync</div>
+              <div class="overview-value" id="overview-sync">--</div>
+              <div class="overview-note" id="overview-conductor-note">Waiting for conductor</div>
+            </div>
+            <div class="overview-metric">
+              <div class="label">Firmware</div>
+              <div class="overview-value" id="overview-firmware">--</div>
+              <div class="overview-note" id="overview-firmware-note">Waiting for field</div>
+            </div>
+            <div class="overview-metric">
+              <div class="label">Battery estimate</div>
+              <div class="overview-value" id="overview-battery">--</div>
+              <div class="overview-note" id="overview-power-note">Waiting for meters</div>
+            </div>
+          </section>
+
+          <div class="overview-grid">
+            <section class="overview-widget field-preview-widget" aria-labelledby="field-preview-title">
+              <div class="section-head overview-widget-head">
+                <div>
+                  <h3 id="field-preview-title">Expected field</h3>
+                  <p>Live reconstruction from positions, effective patterns, and the conductor clock.</p>
+                </div>
+                <div class="field-preview-actions">
+                  <div class="chip" id="field-preview-status">rendering</div>
+                  <button type="button" data-overview-view="map">Manage locations</button>
+                </div>
+              </div>
+              <div class="field-preview-stage" id="field-preview-stage">
+                <canvas id="field-preview-canvas" role="img" aria-label="Expected field animation"></canvas>
+                <div class="field-preview-empty" id="field-preview-empty" aria-live="polite">
+                  <strong>Building the field view</strong>
+                  <span>Waiting for the first rendered frames.</span>
+                </div>
+              </div>
+              <div class="field-preview-footer">
+                <span id="field-preview-meta">Waiting for positions</span>
+                <span><i class="field-preview-key expected"></i>expected color <i class="field-preview-key attention"></i>needs attention</span>
+              </div>
+            </section>
+
+            <section class="overview-widget power-history-widget" aria-labelledby="power-history-title">
+              <div class="section-head overview-widget-head">
+                <div>
+                  <h3 id="power-history-title">Power over time</h3>
+                  <p>15-minute average draw from each instrumented performer.</p>
+                </div>
+                <div class="chart-ranges" aria-label="Power chart time range">
+                  <button type="button" data-power-range="1">1h</button>
+                  <button type="button" data-power-range="6">6h</button>
+                  <button type="button" class="active" data-power-range="24">24h</button>
+                  <button type="button" data-power-range="168">7d</button>
+                </div>
+              </div>
+              <div class="power-chart-summary">
+                <div><span class="label">Current average</span><strong id="overview-power-draw">--</strong></div>
+                <div><span class="label">Reporting meters</span><strong id="overview-meter-count">--</strong></div>
+                <div><span class="label">History</span><strong id="overview-history-status">loading</strong></div>
+              </div>
+              <div class="power-chart" id="power-history-chart" aria-live="polite">
+                <div class="empty-state">Loading measured power history.</div>
+              </div>
+              <div class="power-chart-legend" id="power-history-legend"></div>
+            </section>
+
+            <section class="overview-widget" aria-labelledby="attention-title">
+              <div class="section-head overview-widget-head">
+                <div>
+                  <h3 id="attention-title">Needs attention</h3>
+                  <p>Current field conditions worth checking.</p>
+                </div>
+                <button type="button" data-overview-view="table">Open node list</button>
+              </div>
+              <div class="overview-issues" id="overview-issues"></div>
+            </section>
+
+            <section class="overview-widget" aria-labelledby="show-overview-title">
+              <div class="section-head overview-widget-head">
+                <div>
+                  <h3 id="show-overview-title">Now playing</h3>
+                  <p>Effective pattern and power state by group.</p>
+                </div>
+                <button type="button" data-overview-view="show">Open patterns</button>
+              </div>
+              <div class="overview-groups" id="overview-groups"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-map">
         <div class="map" id="map">
           <div class="map-status">
             <div class="chip sync" id="sync-status">sync --</div>
@@ -542,11 +651,11 @@
         </div>
       </div>
       <div class="actions">
-        <button class="primary" data-action="identify">Locate</button>
-        <button data-action="move">Move</button>
-        <button data-action="replace">Replace</button>
-        <button data-action="details">Details</button>
-        <button class="danger" data-action="forget">Forget</button>
+        <button class="primary" data-action="identify">Locate <kbd>L</kbd></button>
+        <button data-action="move">Move <kbd>M</kbd></button>
+        <button data-action="replace">Replace <kbd>R</kbd></button>
+        <button data-action="details">Details <kbd>D</kbd></button>
+        <button class="danger" data-action="forget">Forget <kbd>F</kbd></button>
       </div>
       <label class="control-label" for="lantern-group">Pattern group</label>
       <select id="lantern-group" class="group-select">
@@ -578,6 +687,6 @@
     </section>
   </div>
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js?v=18"></script>
+  <script src="/static/app.js?v=22"></script>
 </body>
 </html>

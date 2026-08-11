@@ -37,6 +37,7 @@ enum SerialJsonKind {
   SJ_REPLACE,
   SJ_RESERVE_ID,
   SJ_PATTERN,
+  SJ_LOCATOR,
   SJ_BLACKOUT,
   SJ_RESTORE_BLACKOUT,
   SJ_POWER_POLICY,
@@ -71,6 +72,10 @@ struct SerialJsonCommand {
   bool has_brightness = false;
   bool has_params[4] = {false, false, false, false};
   uint16_t params[4] = {0, 0, 0, 0};
+  bool locator_enabled = false;
+  uint16_t locator_slot_ms = 1000;
+  uint8_t locator_bit_count = 1;
+  uint8_t locator_min_hamming_distance = 3;
   bool has_light_sleep_check_s = false;
   bool has_deep_sleep_check_min = false;
   bool has_led_on_start_min = false;
@@ -380,6 +385,35 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     if (sjUint(json, "p3", v)) {
       cmd.has_params[3] = true;
       cmd.params[3] = (uint16_t)(v > 65535 ? 65535 : v);
+    }
+  } else if (!strcmp(norm, "locator")) {
+    cmd.kind = SJ_LOCATOR;
+    if (!sjBool(json, "enabled", cmd.locator_enabled)) {
+      error = "bad locator enabled";
+      return false;
+    }
+    if (cmd.locator_enabled) {
+      uint32_t v = 0;
+      if (!sjUint(json, "brightness", v) || v > 255) {
+        error = "bad locator brightness";
+        return false;
+      }
+      cmd.brightness = (uint8_t)v;
+      if (!sjUint(json, "slot_ms", v) || v == 0 || v > 65535) {
+        error = "bad locator slot";
+        return false;
+      }
+      cmd.locator_slot_ms = (uint16_t)v;
+      if (!sjUint(json, "bit_count", v) || v == 0 || v > 255) {
+        error = "bad locator bit count";
+        return false;
+      }
+      cmd.locator_bit_count = (uint8_t)v;
+      if (!sjUint(json, "min_hamming_distance", v) || v == 0 || v > 255) {
+        error = "bad locator distance";
+        return false;
+      }
+      cmd.locator_min_hamming_distance = (uint8_t)v;
     }
   } else if (!strcmp(norm, "blackout")) {
     cmd.kind = SJ_BLACKOUT;

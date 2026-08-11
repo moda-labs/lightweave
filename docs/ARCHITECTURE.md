@@ -187,6 +187,21 @@ unicast on the existing REGISTER path (no PROTO_VERSION bump — new type only),
 ungated conductor-side logging, conductor retention of the latest per-MAC sample
 for machine JSON, and `power` / `power reset` serial commands.
 
+The Pi control plane appends each distinct machine-JSON meter report to
+`power/power-history.sqlite3` under `CONTROL_DATA_DIR`. Rows retain receive time,
+cumulative Wh/mAh, voltage/current, meter elapsed time, plausibility, and an
+energy-session counter that advances only when cumulative Wh drops. The recent
+draw calculator hydrates from this series at startup, so a Basketbrain restart
+does not throw away its Wh-delta anchor. Replayed latest-state snapshots are
+deduplicated, while implausible rows remain available for diagnosis but are not
+used as draw anchors. **[done]**
+
+The browser opens on an Overview health dashboard that consumes this history as
+separate per-meter 15-minute average watt traces. Operators can switch among
+1-hour, 6-hour, 24-hour, and 7-day windows. Session changes, implausible rows,
+and stale gaps are explicit discontinuities rather than misleading connecting
+lines. **[done]**
+
 A precision power monitor (**INA228** breakout, 15 mΩ on-board shunt) wired in series
 between battery+ and the buck input, on **1–2 instrumented reference nodes only** —
 not all 60 field units. Unlike the INA219, it has real hardware **energy/charge
@@ -618,6 +633,10 @@ artifact resumes or repairs the field; no maintenance-window reset is required.
   ~1–2 s, resume. **[done — role/pos/MAC; table-assigned position is cached to the
   same NVS pos keys, so it survives a reboot without re-hearing the table]**
 - Calibration capture is open-loop (no live RF dependency during the fly-over).
+- Lantern locator mode is a temporary beacon-level overlay, independent of the
+  eight persisted group patterns. Every performer renders it while active;
+  clearing one override atomically reveals the untouched group configuration.
+  **[done]**
 - NVS caches (role, position, group, and all group pattern configs) survive power cycles / battery swaps.
 
 ### 8.1 Performer radio duty-cycle **[done — Stage A, hardware-verified]**

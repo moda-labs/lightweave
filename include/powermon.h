@@ -52,7 +52,7 @@ static constexpr float POWER_MAX_ENERGY_J  = 5.0e6f;   // ~1.4 kWh — way past 
 static constexpr float POWER_MAX_CHARGE_C  = 5.0e5f;   // ~139 Ah
 static constexpr float POWER_MAX_BUS_V     = 30.0f;    // divider/wiring fault above
 static constexpr float POWER_MAX_CURRENT_MA = 20000.0f;  // 20 A — far past the buck
-static constexpr float POWER_MAX_AVG_W     = 50.0f;    // node worst case is ~5 W
+static constexpr float POWER_MAX_INSTANT_W = 50.0f;    // node worst case is ~5 W
 
 inline bool powerPlausible(const PowerSample& s) {
   if (!isfinite(s.energy_j) || !isfinite(s.charge_c) || !isfinite(s.bus_v) ||
@@ -64,13 +64,12 @@ inline bool powerPlausible(const PowerSample& s) {
   if (fabsf(s.charge_c) > POWER_MAX_CHARGE_C) return false;
   if (s.bus_v < 0.0f || s.bus_v > POWER_MAX_BUS_V) return false;
   if (fabsf(s.current_ma) > POWER_MAX_CURRENT_MA) return false;
-  // The derived average has its own failure mode the raw bounds can't catch:
-  // the chip's accumulator deliberately survives an ESP32 reboot while the
-  // node's elapsed anchor restarts, so a mid-night reboot yields a whole
-  // night's Joules over a few seconds — a multi-kW "average" from in-range
-  // fields. (elapsed_s == 0 reads as avg 0 and stays valid: a report can land
-  // the same second the accumulators reset.)
-  if (powerAvgW(s.energy_j, s.elapsed_s) > POWER_MAX_AVG_W) return false;
+  // Energy is a lifetime accumulator in the INA228 and can survive an ESP32
+  // reboot while elapsed_s restarts. It therefore cannot be plausibility-tested
+  // against this boot's uptime. Bound the independently measured instantaneous
+  // draw instead; the Pi derives recent average draw from consecutive Wh deltas.
+  float instant_w = fabsf(s.bus_v * s.current_ma / 1000.0f);
+  if (!isfinite(instant_w) || instant_w > POWER_MAX_INSTANT_W) return false;
   return true;
 }
 

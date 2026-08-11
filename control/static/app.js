@@ -28,6 +28,14 @@ let calibrationSaveStatus = "";
 let wifiStatus = null;
 let releaseInfo = null;
 let provisioning = null;
+let powerHistory = { hours: 24, samples: [], count: 0, loading: true, error: null, loadedAt: 0 };
+let powerHistoryRefreshPromise = null;
+let powerHistoryPollTimer = null;
+let fieldPreview = { nodes: [], frames: [], loading: true, error: null, loadedAt: 0 };
+let fieldPreviewRefreshPromise = null;
+let fieldPreviewPollTimer = null;
+let fieldPreviewAnimationFrame = null;
+let fieldPreviewAnimationStartedAt = 0;
 
 const MAP_PADDING = 0.08;
 const GROUP_COUNT = 8;
@@ -37,6 +45,12 @@ const MAX_ZOOM = 3;
 const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const TIMEZONE_STORAGE_KEY = "baskets.sleepTimezone";
 const GROUP_BRIGHTNESS_STORAGE_KEY = "baskets.groupBrightnessRestore";
+const POWER_DRAW_WINDOW_S = 15 * 60;
+const POWER_HISTORY_POLL_MS = 60 * 1000;
+const FIELD_PREVIEW_DURATION_MS = 6000;
+const FIELD_PREVIEW_FPS = 8;
+const FIELD_PREVIEW_POLL_MS = 5000;
+const POWER_SERIES_COLORS = ["#5eb7ff", "#f0b35a", "#54d67a", "#9f8cff", "#ff8a66", "#e4e9e3"];
 const PATTERN_DEFAULTS = {
   Pulse: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
   Glow: { hue: 40, saturation: 100, value: 255, period: 4000, wavelength: 300, spatial: 0, scatter: 100, angle: 45 },
@@ -413,6 +427,478 @@ function onlinePerformerCount(items) {
   return (Array.isArray(items) ? items : []).filter((item) => item.status === "alive").length;
 }
 
+function powerDrawSeries(samples, windowSeconds = POWER_DRAW_WINDOW_S) {
+  const byMeter = new Map();
+  for (const sample of Array.isArray(samples) ? samples : []) {
+    const mac = String(sample?.mac || "").trim().toUpperCase();
+    if (sample?.received_at === null || sample?.received_at === undefined || sample?.wh === null || sample?.wh === undefined) continue;
+    const receivedAt = Number(sample?.received_at);
+    const wh = Number(sample?.wh);
+    if (!mac || !Number.isFinite(receivedAt) || !Number.isFinite(wh) || wh < 0) continue;
+    if (!byMeter.has(mac)) byMeter.set(mac, []);
+    byMeter.get(mac).push({ ...sample, mac, received_at: receivedAt, wh });
+  }
+
+  return [...byMeter.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([mac, meterSamples]) => {
+    const points = [];
+    let anchors = [];
+    let session = null;
+    let breakBefore = true;
+    for (const sample of meterSamples.sort((left, right) => left.received_at - right.received_at)) {
+      const nextSession = Number.isFinite(Number(sample.energy_session)) ? Number(sample.energy_session) : 0;
+      const previous = anchors[anchors.length - 1];
+      const gap = previous ? sample.received_at - previous.received_at : 0;
+      if (sample.plausible === false) {
+        anchors = [];
+        session = nextSession;
+        breakBefore = true;
+        continue;
+      }
+      if (session !== nextSession || gap <= 0 || gap > windowSeconds + 5 * 60) {
+        anchors = [];
+        breakBefore = true;
+      }
+      session = nextSession;
+      anchors.push(sample);
+      const cutoff = sample.received_at - windowSeconds;
+      while (anchors.length > 2 && anchors[1].received_at <= cutoff) anchors.shift();
+
+      let watts = null;
+      let source = null;
+      if (anchors.length >= 2) {
+        const first = anchors[0];
+        const elapsed = sample.received_at - first.received_at;
+        const energy = sample.wh - first.wh;
+        const recent = elapsed > 0 && energy >= 0 ? energy * 3600 / elapsed : null;
+        if (Number.isFinite(recent) && recent >= 0 && recent <= 50) {
+          watts = recent;
+          source = "recent_average";
+        }
+      }
+      if (watts === null) {
+        if (sample.bus_v === null || sample.bus_v === undefined || sample.current_ma === null || sample.current_ma === undefined) continue;
+        const busV = Number(sample.bus_v);
+        const currentMa = Number(sample.current_ma);
+        const instantaneous = busV * currentMa / 1000;
+        if (Number.isFinite(instantaneous) && instantaneous >= 0 && instantaneous <= 50) {
+          watts = instantaneous;
+          source = "instantaneous";
+        }
+      }
+      if (watts !== null) {
+        points.push({
+          received_at: sample.received_at,
+          watts,
+          source,
+          energy_session: session,
+          break_before: breakBefore,
+        });
+        breakBefore = false;
+      }
+    }
+    return { mac, points };
+  }).filter((series) => series.points.length > 0);
+}
+
+function mergePowerHistorySamples(existing, incoming, hours, nowSeconds = Date.now() / 1000) {
+  const cutoff = nowSeconds - Number(hours) * 60 * 60;
+  const unique = new Map();
+  for (const sample of [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])]) {
+    const receivedAt = Number(sample?.received_at);
+    if (!Number.isFinite(receivedAt) || receivedAt < cutoff) continue;
+    const key = `${sample.mac}|${receivedAt}|${sample.energy_session}|${sample.wh}`;
+    unique.set(key, sample);
+  }
+  return [...unique.values()].sort((left, right) => Number(left.received_at) - Number(right.received_at));
+}
+
+function overviewIssues(currentState) {
+  if (!currentState) return [];
+  const issues = [];
+  const conductor = currentState.conductor || {};
+  const lanternItems = Array.isArray(currentState.lanterns) ? currentState.lanterns : [];
+  const recovery = currentState.recovery || {};
+  const firmware = currentState.summary?.firmware || {};
+  const monitor = currentState.power_monitor || {};
+  const missing = lanternItems.filter((item) => item.status === "missing" && item.position === "Set").length;
+  const unpositioned = lanternItems.filter((item) => item.status === "alive" && item.position !== "Set").length;
+
+  if (conductor.connected !== true) {
+    issues.push({ severity: "bad", title: "Conductor disconnected", detail: "Commands and fresh field state are unavailable." });
+  } else if (conductor.sync !== "locked") {
+    issues.push({ severity: "warn", title: `Clock sync ${conductor.sync || "unknown"}`, detail: "Check conductor time sync before running coordinated patterns." });
+  }
+  if (missing) issues.push({ severity: "bad", title: `${missing} placed lantern${missing === 1 ? " is" : "s are"} missing`, detail: "Wake, power-cycle, or replace the missing lanterns." });
+  if (unpositioned) issues.push({ severity: "warn", title: `${unpositioned} online lantern${unpositioned === 1 ? " needs" : "s need"} a position`, detail: "Assign locations before the next layout-dependent pattern." });
+  if (firmware.consistent === false) issues.push({ severity: "bad", title: "Mixed field firmware", detail: "Reconcile firmware before show operation." });
+  const failedOta = Array.isArray(recovery.failed_ota) ? recovery.failed_ota.length : 0;
+  if (failedOta) issues.push({ severity: "bad", title: `${failedOta} firmware update failure${failedOta === 1 ? "" : "s"}`, detail: "Open Firmware for repair status." });
+  const stale = Number(monitor.stale_count || 0);
+  const implausible = Number(monitor.implausible_count || 0);
+  if (stale) issues.push({ severity: "warn", title: `${stale} stale power meter${stale === 1 ? "" : "s"}`, detail: "Stale readings are excluded from battery estimates." });
+  if (implausible) issues.push({ severity: "warn", title: `${implausible} implausible power reading${implausible === 1 ? "" : "s"}`, detail: "Check meter voltage and shunt wiring." });
+  if (monitor.history?.error) issues.push({ severity: "warn", title: "Power history is not recording", detail: String(monitor.history.error) });
+  return issues;
+}
+
+function setActiveView(viewName) {
+  const tab = $(`.tabs button[data-view="${viewName}"]`);
+  const view = $(`#view-${viewName}`);
+  if (!tab || !view) return;
+  $$(".tabs button").forEach((item) => item.classList.toggle("active", item === tab));
+  $$(".view").forEach((item) => item.classList.toggle("active", item === view));
+  renderDetailVisibility();
+}
+
+function chartTimeLabel(timestamp, hours) {
+  const date = new Date(timestamp * 1000);
+  return hours >= 48
+    ? date.toLocaleDateString([], { month: "short", day: "numeric" })
+    : date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function renderPowerHistoryChart() {
+  const chart = $("#power-history-chart");
+  const legend = $("#power-history-legend");
+  if (!chart || !legend) return;
+  if (powerHistory.loading && !powerHistory.loadedAt) {
+    chart.innerHTML = '<div class="empty-state">Loading measured power history.</div>';
+    legend.innerHTML = "";
+    return;
+  }
+  if (powerHistory.error) {
+    chart.innerHTML = `<div class="empty-state bad">Power history unavailable: ${escapeHtml(powerHistory.error)}</div>`;
+    legend.innerHTML = "";
+    return;
+  }
+
+  const series = powerDrawSeries(powerHistory.samples);
+  const end = Date.now() / 1000;
+  const start = end - powerHistory.hours * 60 * 60;
+  const visibleSeries = series.map((item) => ({
+    ...item,
+    points: item.points.filter((point) => point.received_at >= start && point.received_at <= end + 60),
+  })).filter((item) => item.points.length > 0);
+  if (!visibleSeries.length) {
+    chart.innerHTML = '<div class="empty-state">No usable power samples in this time range.</div>';
+    legend.innerHTML = "";
+    return;
+  }
+
+  const width = 900;
+  const height = 290;
+  const plot = { left: 56, right: 18, top: 22, bottom: 38 };
+  const plotWidth = width - plot.left - plot.right;
+  const plotHeight = height - plot.top - plot.bottom;
+  const peak = Math.max(...visibleSeries.flatMap((item) => item.points.map((point) => point.watts)));
+  const yMax = peak <= 1.5 ? 1.5 : Math.ceil(peak * 2) / 2;
+  const x = (timestamp) => plot.left + Math.max(0, Math.min(1, (timestamp - start) / (end - start))) * plotWidth;
+  const y = (watts) => plot.top + plotHeight - Math.max(0, Math.min(1, watts / yMax)) * plotHeight;
+  const grid = [];
+  for (let index = 0; index <= 4; index += 1) {
+    const watts = yMax * index / 4;
+    const py = y(watts);
+    grid.push(`<line class="power-chart-grid" x1="${plot.left}" y1="${py.toFixed(1)}" x2="${width - plot.right}" y2="${py.toFixed(1)}"></line>`);
+    grid.push(`<text class="power-chart-axis" x="${plot.left - 9}" y="${(py + 4).toFixed(1)}" text-anchor="end">${watts.toFixed(watts < 1 ? 2 : 1)} W</text>`);
+  }
+  for (let index = 0; index <= 4; index += 1) {
+    const timestamp = start + (end - start) * index / 4;
+    const px = x(timestamp);
+    grid.push(`<line class="power-chart-grid" x1="${px.toFixed(1)}" y1="${plot.top}" x2="${px.toFixed(1)}" y2="${plot.top + plotHeight}"></line>`);
+    grid.push(`<text class="power-chart-axis" x="${px.toFixed(1)}" y="${height - 12}" text-anchor="middle">${escapeHtml(chartTimeLabel(timestamp, powerHistory.hours))}</text>`);
+  }
+
+  const labelByMac = new Map(lanterns().map((item) => [String(item.mac || "").toUpperCase(), item.label || item.mac]));
+  const lines = [];
+  visibleSeries.forEach((item, seriesIndex) => {
+    const color = POWER_SERIES_COLORS[seriesIndex % POWER_SERIES_COLORS.length];
+    let path = "";
+    let previous = null;
+    for (const point of item.points) {
+      const command = point.break_before || !previous || point.received_at - previous.received_at > 5 * 60 ? "M" : "L";
+      path += `${command}${x(point.received_at).toFixed(1)},${y(point.watts).toFixed(1)} `;
+      previous = point;
+    }
+    lines.push(`<path class="power-chart-line" stroke="${color}" d="${path.trim()}"></path>`);
+    const latest = item.points[item.points.length - 1];
+    lines.push(`<circle class="power-chart-dot" fill="${color}" cx="${x(latest.received_at).toFixed(1)}" cy="${y(latest.watts).toFixed(1)}" r="3.5"><title>${escapeHtml(labelByMac.get(item.mac) || item.mac)}: ${latest.watts.toFixed(2)} W</title></circle>`);
+  });
+  chart.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Measured performer power draw over ${powerHistory.hours} hours">
+    ${grid.join("")}
+    ${lines.join("")}
+  </svg>`;
+  legend.innerHTML = visibleSeries.map((item, index) => {
+    const color = POWER_SERIES_COLORS[index % POWER_SERIES_COLORS.length];
+    const latest = item.points[item.points.length - 1];
+    return `<span><i class="power-chart-key" style="background:${color}"></i>${escapeHtml(labelByMac.get(item.mac) || item.mac)} · ${latest.watts.toFixed(2)} W</span>`;
+  }).join("");
+}
+
+function fieldPreviewFrameIndex(preview, elapsedMs) {
+  const frames = Array.isArray(preview?.frames) ? preview.frames : [];
+  if (!frames.length) return -1;
+  const interval = Math.max(1, Number(preview.frame_interval_ms || Math.round(1000 / FIELD_PREVIEW_FPS)));
+  return Math.floor(Math.max(0, Number(elapsedMs) || 0) / interval) % frames.length;
+}
+
+function fieldPreviewVisible() {
+  return !document.hidden && $("#view-overview")?.classList.contains("active");
+}
+
+function fieldPreviewRgb(value) {
+  const rgb = Array.isArray(value) ? value : [0, 0, 0];
+  return rgb.slice(0, 3).map((channel) => Math.min(255, Math.max(0, Number(channel) || 0)));
+}
+
+function drawFieldPreviewLantern(context, node, color, x, y, radius) {
+  const rgb = fieldPreviewRgb(color?.rgb);
+  const peak = Math.max(...rgb);
+  if (peak > 0) {
+    const glow = context.createRadialGradient(x, y, radius * 0.2, x, y, radius * 3.2);
+    glow.addColorStop(0, `rgba(${rgb.join(",")},${Math.min(0.72, 0.24 + peak / 510)})`);
+    glow.addColorStop(0.32, `rgba(${rgb.join(",")},0.18)`);
+    glow.addColorStop(1, `rgba(${rgb.join(",")},0)`);
+    context.fillStyle = glow;
+    context.beginPath();
+    context.arc(x, y, radius * 3.2, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  const pixels = Array.isArray(color?.pixels) ? color.pixels : [];
+  context.fillStyle = "#202821";
+  context.beginPath();
+  context.arc(x, y, radius + 2, 0, Math.PI * 2);
+  context.fill();
+  if (pixels.length) {
+    const ringRadius = radius * 0.72;
+    const ledRadius = Math.max(1.3, radius * 0.18);
+    pixels.forEach((pixel, index) => {
+      const angle = -Math.PI / 2 + Math.PI * 2 * index / pixels.length;
+      const ledRgb = fieldPreviewRgb(pixel);
+      context.fillStyle = `rgb(${ledRgb.join(",")})`;
+      context.beginPath();
+      context.arc(x + Math.cos(angle) * ringRadius, y + Math.sin(angle) * ringRadius, ledRadius, 0, Math.PI * 2);
+      context.fill();
+    });
+  } else {
+    context.fillStyle = `rgb(${rgb.join(",")})`;
+    context.beginPath();
+    context.arc(x, y, radius * 0.72, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  const attention = String(node.attention || "").toLowerCase();
+  const missing = node.status !== "alive";
+  const warning = !missing && attention && attention !== "none";
+  context.strokeStyle = missing ? "#ff5d52" : warning ? "#f0b35a" : "rgba(228,233,227,.28)";
+  context.lineWidth = missing || warning ? 2.5 : 1;
+  context.setLineDash(missing ? [4, 3] : []);
+  context.beginPath();
+  context.arc(x, y, radius + 4, 0, Math.PI * 2);
+  context.stroke();
+  context.setLineDash([]);
+}
+
+function drawFieldPreview(elapsedMs = 0) {
+  const canvas = $("#field-preview-canvas");
+  const stage = $("#field-preview-stage");
+  if (!canvas || !stage || !fieldPreview.nodes?.length || !fieldPreview.frames?.length) return;
+  const rect = stage.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const pixelWidth = Math.round(rect.width * dpr);
+  const pixelHeight = Math.round(rect.height * dpr);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  const context = canvas.getContext("2d");
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, rect.width, rect.height);
+
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  const frameIndex = fieldPreviewFrameIndex(fieldPreview, reducedMotion ? 0 : elapsedMs);
+  const frame = fieldPreview.frames[frameIndex];
+  if (!frame) return;
+  const paddingX = Math.max(28, rect.width * 0.07);
+  const paddingY = Math.max(28, rect.height * 0.10);
+  const availableWidth = Math.max(1, rect.width - paddingX * 2);
+  const availableHeight = Math.max(1, rect.height - paddingY * 2);
+  const radius = Math.max(6, Math.min(13, Math.min(rect.width, rect.height) / (Math.sqrt(fieldPreview.nodes.length) * 4.5)));
+  const showLabels = fieldPreview.nodes.length <= 24;
+  fieldPreview.nodes.forEach((node, index) => {
+    const x = paddingX + Math.min(1, Math.max(0, Number(node.x) || 0)) * availableWidth;
+    const y = paddingY + Math.min(1, Math.max(0, Number(node.y) || 0)) * availableHeight;
+    drawFieldPreviewLantern(context, node, frame.colors?.[index], x, y, radius);
+    if (showLabels) {
+      context.fillStyle = node.status === "alive" ? "#a7b0aa" : "#ff8a82";
+      context.font = '11px "JetBrains Mono", "IBM Plex Mono", monospace';
+      context.textAlign = "center";
+      context.fillText(node.label || "node", x, y + radius + 18);
+    }
+  });
+}
+
+function animateFieldPreview(timestamp) {
+  if (!fieldPreviewAnimationStartedAt) fieldPreviewAnimationStartedAt = timestamp;
+  if (fieldPreviewVisible()) drawFieldPreview(timestamp - fieldPreviewAnimationStartedAt);
+  fieldPreviewAnimationFrame = window.requestAnimationFrame(animateFieldPreview);
+}
+
+function startFieldPreviewAnimation() {
+  fieldPreviewAnimationStartedAt = 0;
+  if (fieldPreviewAnimationFrame === null) {
+    fieldPreviewAnimationFrame = window.requestAnimationFrame(animateFieldPreview);
+  }
+}
+
+function renderFieldPreviewStatus() {
+  const status = $("#field-preview-status");
+  const empty = $("#field-preview-empty");
+  const meta = $("#field-preview-meta");
+  const canvas = $("#field-preview-canvas");
+  if (!status || !empty || !meta || !canvas) return;
+
+  const statePositioned = lanterns().filter(isPositioned).length;
+  const stateUnpositioned = lanterns().filter((item) => item.status !== "retired" && !isPositioned(item)).length;
+  const positioned = Number(fieldPreview.positioned_count ?? statePositioned);
+  const unpositioned = Number(fieldPreview.unpositioned_count ?? stateUnpositioned);
+  const hasFrames = positioned > 0 && fieldPreview.frames?.length > 0;
+  empty.hidden = hasFrames;
+  canvas.hidden = !hasFrames;
+
+  if (fieldPreview.error) {
+    status.textContent = "unavailable";
+    status.className = "chip bad";
+    empty.innerHTML = `<strong>Expected field unavailable</strong><span>${escapeHtml(fieldPreview.error)}</span>`;
+  } else if (!positioned) {
+    status.textContent = "awaiting positions";
+    status.className = "chip active";
+    empty.innerHTML = "<strong>No lantern positions assigned yet</strong><span>Place a couple of lanterns on the map and their live pattern frames will appear here automatically.</span>";
+  } else if (!hasFrames || fieldPreview.loading) {
+    status.textContent = "rendering";
+    status.className = "chip sync";
+    empty.innerHTML = "<strong>Rendering expected field</strong><span>Building frames from the latest conductor state.</span>";
+  } else if (fieldPreview.leds_on === false) {
+    status.textContent = "LEDs off";
+    status.className = "chip active";
+  } else if (fieldPreview.mode === "locator") {
+    status.textContent = "locator view";
+    status.className = "chip active";
+  } else {
+    status.textContent = "live expected";
+    status.className = "chip sync";
+  }
+
+  const seq = fieldPreview.source_seq === null || fieldPreview.source_seq === undefined ? "" : ` · seq ${fieldPreview.source_seq}`;
+  meta.textContent = `${positioned} positioned · ${unpositioned} awaiting positions${seq}`;
+  canvas.setAttribute(
+    "aria-label",
+    `Expected field animation with ${positioned} positioned lantern${positioned === 1 ? "" : "s"} and ${unpositioned} awaiting positions`,
+  );
+  if (hasFrames) drawFieldPreview(0);
+}
+
+async function refreshFieldPreview() {
+  if (fieldPreviewRefreshPromise) return fieldPreviewRefreshPromise;
+  fieldPreview.loading = !fieldPreview.loadedAt;
+  renderFieldPreviewStatus();
+  fieldPreviewRefreshPromise = (async () => {
+    try {
+      const preview = await api(`/api/field-preview/frames.json?duration_ms=${FIELD_PREVIEW_DURATION_MS}&fps=${FIELD_PREVIEW_FPS}`);
+      fieldPreview = { ...preview, loading: false, error: null, loadedAt: Date.now() };
+      fieldPreviewAnimationStartedAt = 0;
+      startFieldPreviewAnimation();
+    } catch (error) {
+      fieldPreview = { ...fieldPreview, loading: false, error: error.message, loadedAt: Date.now() };
+    }
+    renderFieldPreviewStatus();
+    return fieldPreview;
+  })();
+  try {
+    return await fieldPreviewRefreshPromise;
+  } finally {
+    fieldPreviewRefreshPromise = null;
+  }
+}
+
+function startFieldPreviewPolling() {
+  const poll = async () => {
+    if (fieldPreviewVisible()) await refreshFieldPreview();
+    fieldPreviewPollTimer = window.setTimeout(poll, FIELD_PREVIEW_POLL_MS);
+  };
+  if (fieldPreviewPollTimer === null) poll();
+}
+
+function renderOverview() {
+  const monitor = state.power_monitor || {};
+  const summary = state.summary || {};
+  const conductor = state.conductor || {};
+  const firmware = summary.firmware || {};
+  const issues = overviewIssues(state);
+  const critical = issues.some((issue) => issue.severity === "bad");
+  const warning = issues.some((issue) => issue.severity === "warn");
+  const status = $("#overview-health-status");
+  status.textContent = critical ? "action required" : warning ? "check field" : "field healthy";
+  status.className = `chip ${critical ? "bad" : warning ? "active" : "sync"}`;
+
+  const online = Number(summary.alive || 0);
+  const total = Number(summary.total || 0);
+  $("#overview-field-online").textContent = `${online} / ${total}`;
+  $("#overview-field-online").className = `overview-value ${total > 0 && online === total ? "ok" : "bad"}`;
+  $("#overview-field-note").textContent = `${onlinePerformerCount(lanterns())} performers reporting now`;
+  $("#overview-sync").textContent = conductor.sync || "--";
+  $("#overview-sync").className = `overview-value ${conductor.connected && conductor.sync === "locked" ? "sync" : "bad"}`;
+  $("#overview-conductor-note").textContent = conductor.connected ? `Conductor online · seq ${conductor.seq ?? "--"}` : "Conductor disconnected";
+  const expected = Number(firmware.expected ?? total);
+  const matching = Number(firmware.matching || 0);
+  $("#overview-firmware").textContent = `${matching} / ${expected}`;
+  $("#overview-firmware").className = `overview-value ${firmware.consistent !== false ? "ok" : "bad"}`;
+  $("#overview-firmware-note").textContent = firmware.consistent !== false ? "Field on one build" : "Mixed builds detected";
+
+  const soc = monitor.soc_percent ?? monitor.estimated_node_soc_percent;
+  const performerDraw = monitor.average_performer_draw_w ?? monitor.avg_node_w;
+  $("#overview-battery").textContent = soc === null || soc === undefined ? "--" : `${Number(soc).toFixed(1)}%`;
+  $("#overview-battery").className = `overview-value ${soc === null || soc === undefined ? "" : soc < 25 ? "bad" : soc < 50 ? "warn" : "ok"}`;
+  $("#overview-power-note").textContent = Number(monitor.usable_sample_count || 0)
+    ? `${monitor.usable_sample_count} usable meter${Number(monitor.usable_sample_count) === 1 ? "" : "s"}`
+    : "No usable meter readings";
+  $("#overview-power-draw").textContent = performerDraw === null || performerDraw === undefined ? "--" : `${Number(performerDraw).toFixed(2)} W`;
+  $("#overview-meter-count").textContent = `${Number(monitor.usable_sample_count || 0)} / ${Number(monitor.sample_count || 0)}`;
+  $("#overview-history-status").textContent = powerHistory.loading
+    ? "updating"
+    : powerHistory.error
+      ? "error"
+      : `${powerHistory.count} samples`;
+  $("#overview-history-status").className = powerHistory.error ? "bad" : powerHistory.loading ? "sync" : "";
+
+  const issueBox = $("#overview-issues");
+  issueBox.innerHTML = issues.length
+    ? issues.map((issue) => `<div class="overview-issue ${issue.severity}">
+        <i class="overview-issue-dot" aria-hidden="true"></i>
+        <div><strong>${escapeHtml(issue.title)}</strong><span>${escapeHtml(issue.detail)}</span></div>
+      </div>`).join("")
+    : '<div class="overview-issue ok"><i class="overview-issue-dot" aria-hidden="true"></i><div><strong>No field issues detected</strong><span>Conductor, performers, firmware, and power telemetry look healthy.</span></div></div>';
+
+  const counts = groupPerformerCounts(lanterns());
+  const activeGroups = (state.groups || []).filter((group) => counts[Number(group.group_id)]?.total > 0);
+  $("#overview-groups").innerHTML = activeGroups.length
+    ? activeGroups.map((group) => {
+        const groupId = Number(group.group_id);
+        const config = patternForGroup(groupId);
+        const members = counts[groupId];
+        const playing = Number(config.brightness || 0) > 0 ? config.pattern : "Off";
+        return `<div class="overview-group-row">
+          <i class="overview-group-swatch" aria-hidden="true"></i>
+          <div><strong>${escapeHtml(group.label || groupLabel(groupId))}</strong><span>${escapeHtml(playing)} · brightness ${Number(config.brightness || 0)} / 192</span></div>
+          <span>${members.online} / ${members.total} online</span>
+        </div>`;
+      }).join("")
+    : '<div class="empty-state">No lantern groups have members yet.</div>';
+  renderFieldPreviewStatus();
+  renderPowerHistoryChart();
+}
+
 function render() {
   if (!state) return;
   if (!selectedMac && lanterns().length) selectedMac = lanterns()[0].mac;
@@ -430,6 +916,7 @@ function render() {
   $("#brightness").value = patternDraft.brightness;
   $("#brightness-value").textContent = patternDraft.brightness;
 
+  renderOverview();
   renderPatternControls();
   renderSavedPatterns();
   renderMap();
@@ -1129,7 +1616,7 @@ function renderDetail() {
     `power E=${fmt(lantern.power.wh)}Wh avg=${fmt(lantern.power.avg_w)}W · last report=${escapeHtml(lantern.power.last_report_label || "none")}`,
   ].join("<br>");
   $$('[data-action="move"]').forEach((button) => {
-    button.textContent = moveLabel;
+    button.innerHTML = `${moveLabel} <kbd>${isPositioned(lantern) ? "M" : "P"}</kbd>`;
   });
   document.body.classList.toggle("move-mode", movingLanternMac !== null);
   renderReplacePanel();
@@ -1676,7 +2163,8 @@ function renderCalibration() {
   $("#calibration-code-plan").textContent = calibrationCodePlan
     ? `${calibrationCodePlan.codes.length} nodes / ${calibrationCodePlan.bit_count} frames`
     : "--";
-  const calibrationMode = state?.pattern?.pattern === "Calibration";
+  const calibrationMode = state?.locator?.enabled
+    ?? state?.pattern?.pattern === "Calibration";
   const toggle = $('[data-action="toggle-calibration-mode"]');
   if (toggle) {
     toggle.textContent = calibrationMode ? "Stop lantern locator pattern" : "Play lantern locator pattern";
@@ -1934,7 +2422,9 @@ async function analyzeCalibrationVideo() {
 }
 
 async function toggleCalibrationMode() {
-  const enabled = state?.pattern?.pattern !== "Calibration";
+  const calibrationMode = state?.locator?.enabled
+    ?? state?.pattern?.pattern === "Calibration";
+  const enabled = !calibrationMode;
   const ack = await api("/api/operations/calibration-mode", {
     method: "POST",
     body: JSON.stringify({ enabled }),
@@ -2494,6 +2984,50 @@ async function refreshSavedPatterns() {
   renderSavedPatterns();
 }
 
+async function refreshPowerHistory({ incremental = false } = {}) {
+  if (powerHistoryRefreshPromise) return powerHistoryRefreshPromise;
+  powerHistory.loading = true;
+  if (state) renderOverview();
+  powerHistoryRefreshPromise = (async () => {
+    try {
+      const requestedHours = incremental && powerHistory.loadedAt ? Math.min(1, powerHistory.hours) : powerHistory.hours;
+      const history = await api(`/api/power/history?hours=${encodeURIComponent(requestedHours)}&limit=100000`);
+      const previousSamples = incremental && powerHistory.loadedAt ? powerHistory.samples : [];
+      const mergedSamples = mergePowerHistorySamples(previousSamples, history.samples, powerHistory.hours);
+      powerHistory = {
+        hours: powerHistory.hours,
+        samples: mergedSamples,
+        count: mergedSamples.length,
+        loading: false,
+        error: null,
+        loadedAt: Date.now(),
+      };
+    } catch (error) {
+      powerHistory = {
+        ...powerHistory,
+        loading: false,
+        error: error.message,
+        loadedAt: Date.now(),
+      };
+    }
+    if (state) renderOverview();
+    return powerHistory;
+  })();
+  try {
+    return await powerHistoryRefreshPromise;
+  } finally {
+    powerHistoryRefreshPromise = null;
+  }
+}
+
+function startPowerHistoryPolling() {
+  const poll = async () => {
+    await refreshPowerHistory({ incremental: powerHistory.loadedAt > 0 });
+    powerHistoryPollTimer = window.setTimeout(poll, POWER_HISTORY_POLL_MS);
+  };
+  if (powerHistoryPollTimer === null) poll();
+}
+
 async function refreshOtaInstall() {
   if (!otaInstallRefreshPromise) {
     otaInstallRefreshPromise = (async () => {
@@ -2551,6 +3085,38 @@ async function locateLantern(mac) {
   if (!mac) return;
   const ack = await api(`/api/lanterns/${encodeURIComponent(mac)}/identify`, { method: "POST" });
   toast(ack.message || "locator sent");
+}
+
+function lanternLocationHotkeyAction(key, lantern) {
+  if (!lantern) return null;
+  const normalized = String(key || "").toLowerCase();
+  if (normalized === "m") return isPositioned(lantern) ? "move" : null;
+  if (normalized === "p") return isPositioned(lantern) ? null : "move";
+  return {
+    l: "identify",
+    r: "replace",
+    d: "details",
+    f: "forget",
+  }[normalized] || null;
+}
+
+function triggerLanternLocationHotkey(key) {
+  const lantern = selectedLantern();
+  const normalized = String(key || "").toLowerCase();
+  const action = lanternLocationHotkeyAction(normalized, lantern);
+  if (action) {
+    runAction(action);
+    return true;
+  }
+  if (lantern && normalized === "m") {
+    toast(`${lantern.label} needs a position; press P to place it`, true);
+    return true;
+  }
+  if (lantern && normalized === "p") {
+    toast(`${lantern.label} is already positioned; press M to move it`, true);
+    return true;
+  }
+  return false;
 }
 
 async function runAction(action) {
@@ -2964,12 +3530,37 @@ function fmt(value) {
 
 $$(".tabs button").forEach((tab) => {
   tab.addEventListener("click", () => {
-    $$(".tabs button").forEach((item) => item.classList.remove("active"));
-    tab.classList.add("active");
-    $$(".view").forEach((view) => view.classList.remove("active"));
-    $(`#view-${tab.dataset.view}`).classList.add("active");
-    renderDetailVisibility();
+    setActiveView(tab.dataset.view);
+    if (tab.dataset.view === "overview" && Date.now() - powerHistory.loadedAt > POWER_HISTORY_POLL_MS) {
+      refreshPowerHistory({ incremental: powerHistory.loadedAt > 0 });
+    }
+    if (tab.dataset.view === "overview" && Date.now() - fieldPreview.loadedAt > FIELD_PREVIEW_POLL_MS) {
+      refreshFieldPreview();
+    }
   });
+});
+
+$$('[data-overview-view]').forEach((button) => {
+  button.addEventListener("click", () => setActiveView(button.dataset.overviewView));
+});
+
+$$('[data-power-range]').forEach((button) => {
+  button.addEventListener("click", async () => {
+    const hours = Number(button.dataset.powerRange);
+    if (!Number.isFinite(hours) || hours <= 0 || hours === powerHistory.hours) return;
+    powerHistory = { hours, samples: [], count: 0, loading: true, error: null, loadedAt: 0 };
+    $$('[data-power-range]').forEach((item) => item.classList.toggle("active", item === button));
+    renderOverview();
+    await refreshPowerHistory();
+  });
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (!$("#view-map")?.classList.contains("active")) return;
+  const target = event.target;
+  if (target?.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target?.tagName)) return;
+  if (triggerLanternLocationHotkey(event.key)) event.preventDefault();
 });
 
 $$(".filters .chip").forEach((chip) => {
@@ -3377,6 +3968,17 @@ window.addEventListener("pointercancel", () => {
   if (isPlacingUnpositioned()) renderPlacementMarker();
 });
 
+window.addEventListener("resize", () => {
+  if (fieldPreviewVisible()) drawFieldPreview(0);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    fieldPreviewAnimationStartedAt = 0;
+    if (fieldPreviewVisible()) drawFieldPreview(0);
+  }
+});
+
 window.addEventListener("mousemove", (event) => {
   if (!movingLanternMac || !movingDrag) return;
   const position = pointToField(event.clientX, event.clientY);
@@ -3391,4 +3993,6 @@ window.addEventListener("mouseup", (event) => {
 refresh().then(() => {
   connectWebSocket();
   startOtaInstallPolling();
+  startPowerHistoryPolling();
+  startFieldPreviewPolling();
 }).catch((error) => toast(error.message, true));
