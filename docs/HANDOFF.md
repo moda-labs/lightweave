@@ -8,10 +8,33 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**190 pass**) is green; **481 control tests** are green; all three
+(**206 pass**) is green; **492 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest in this feature branch (2026-08-10): the lantern locator is now one
+Latest in this feature branch (2026-08-10): **Wavefront, the Firefly chorus,
+and Fire2012 are ready for live pattern tuning.** `WAVEFRONT` (`pattern 11`)
+sends one soft directional band across the normalized 2-D field; angle 0 is the
+left-to-right test for the current ten-board line. `FIREFLY` (`pattern 6`) now
+uses deterministic irregular solo flashes, including skipped flashes and varied
+timing, before the field crossfades into exactly three synchronized beats and
+disperses again. `FIRE2012` (`pattern 10`) adapts FastLED's heat-cell simulation
+to the ring/strip emitter sequence with deterministic cooling, upward diffusion,
+sparking, and a black-to-red-to-yellow-to-white heat ramp. Its bounded,
+overlapping simulation checkpoints keep a cold field preview fast without
+visible heat resets. Firmware, control-plane preview, saved-pattern API, live UI
+controls, authoring docs, and host regression coverage are included for all
+three changes.
+
+All ten USB-connected performers were serial-flashed and read back as performer
+IDs 1–10 on `0.9.3-dev`, protocol 11, build `b1e7d434`; the conductor was flashed
+last and read back as conductor ID 1 on the same build. The restarted local
+control plane at `http://127.0.0.1:8000` reports `alive=10`, `total=10`, and a
+firmware-consistent `matching=10` / `seen=10` field with conductor build
+`b1e7d434`. Automatic OTA remains disabled and the prior interrupted OTA journal
+remains paused. No release has been cut: live appearance and parameter tuning on
+the ten rings is the next gate.
+
+Also in this feature branch (2026-08-10): the lantern locator is now one
 temporary field-wide beacon override instead of a calibration pattern copied
 into all eight group slots. It takes precedence over group rendering while
 active, leaves every saved group pattern untouched, and starts/stops with one
@@ -42,7 +65,8 @@ distinguish it from this live field rendering. That tab supports guarded
 single-key shortcuts for Locate (L), Move (M), Place (P), Replace (R), Details
 (D), and Forget (F), while ignoring typing targets and modified shortcuts. A
 small palette-matched SVG lantern favicon now identifies the control plane in
-browser tabs. These changes have not been flashed or deployed.
+browser tabs. These changes are included in the current local bench build; the
+production release remains pending the live pattern check.
 
 Latest in this feature branch (2026-08-08): control mutations now return as soon
 as the conductor accepts and persists desired state; field health is reported
@@ -573,10 +597,17 @@ full-repo adversarial self-review with all 5 correctness findings fixed, the
 production BOM, and the **pilot-batch order placed 2026-07-03** (most parts
 arrive Mon Jul 6, batteries Jul 10 — see "Pilot batch: ORDERED" below).
 
-## ▶ Next session: pick up here (updated 2026-08-04)
+## ▶ Next session: pick up here (updated 2026-08-10)
 
 Priority order:
-1. **Finish the remaining protocol-v10 repair checks:** simultaneous Group 1/2
+1. **Live-tune the new patterns on the ten-board line:** start with Wavefront at
+   angle 0 and confirm the band travels left-to-right in physical board order.
+   Then evaluate Firefly's irregular solo behavior and three-beat chorus, and
+   Fire2012's speed/cooling/sparking against the actual ring orientation and
+   diffuser. Keep Automatic OTA disabled during the show check. If the looks pass,
+   proceed with the normal reviewed release workflow; otherwise tune defaults and
+   repeat before release.
+2. **Finish the remaining protocol-v10 repair checks:** simultaneous Group 1/2
    patterns, 16/64 physical chains, live 16/32/64 profiles, profile NVS restore,
    reversible global blackout across conductor reboot, and selected-group off
    are hardware-verified. Still change one membership and one LED count while a
@@ -584,41 +615,41 @@ Priority order:
    targeted row repair and persists across performer reboot. Test a physical
    32-pixel chain when one is available; 32 is currently verified as the active
    prefix of the 64-pixel strip.
-2. **Fire Flicker bench tuning:** after the field shares the current protocol-v10
+3. **Fire Flicker bench tuning:** after the field shares the current protocol-v10
    build, select Fire at brightness 56 / period 1200 ms /
    hue 24 / saturation 95 / texture 85, and evaluate it through the physical
    diffuser. Tune for organic neighboring-pixel motion without a visible chase;
    check draw on the INA228 reference node before adopting a brighter default.
-3. **Remote-administration rollout (human-owned):** follow
+4. **Remote-administration rollout (human-owned):** follow
    [`deploy/pi/README.md`](../deploy/pi/README.md) and phase 4 of the remote
    administration plan. This needs the Pi, Starlink, Cloudflare account, final
    hostname, and 3-board bench. Do not record the shared password, hash, or
    tunnel token in this repository.
-4. **CV calibration apply workflow:** the phone-video proof is now good enough
+5. **CV calibration apply workflow:** the phone-video proof is now good enough
    on two real clips, including one with large glare/cable false positives.
    Add a guarded "apply proposal" endpoint/UI that writes assignments through
    the existing `/api/lanterns/{mac}/assign` path only after the operator
    reviews the image overlay and any missing/ambiguous rows.
-5. **Synthetic hardening follow-up only when needed:** run Simulate with jitter,
+6. **Synthetic hardening follow-up only when needed:** run Simulate with jitter,
    dim LEDs, glare, missing frames, and perspective values that approximate the
    phone capture. Tests already cover clean recovery, noisy recovery, and
    missing-frame alias prevention; add cases only when real media exposes a new
    failure mode.
-6. **Drone/field media validation:** when a drone clip exists, run it through
+7. **Drone/field media validation:** when a drone clip exists, run it through
    the same Lantern Locations flow and add a fixture if it exposes a new failure
    mode. Temporal code scoring should ignore constant extra lights; only extra
    lights blinking with the same planned code should remain ambiguous.
-7. **Hardware-verify scale-hardened OTA:** first run the requested 18-performer
+8. **Hardware-verify scale-hardened OTA:** first run the requested 18-performer
    field once all 18 are radio-visible. Confirm checkpoint status collection,
    targeted suffix repair, the explicit `18 / 18 staged` barrier with no reboots,
    one-action rolling activation, and live show control under real ESP-NOW
    contention. Record total duration, repair counts, and any nodes requiring a
    targeted restart. Later expand the same proof across the 53-board inventory.
-8. **Optional negative OTA-safety check:** if useful, intentionally flash one
+9. **Optional negative OTA-safety check:** if useful, intentionally flash one
    performer with a same-v8 but different build and confirm it appears as
    `Firmware mismatch`; restore all boards to one build afterward. Any
    protocol-mismatched board vanishes from the roster due to the version gate.
-9. **When parts are in hand:** phototransistors are no longer required for the
+10. **When parts are in hand:** phototransistors are no longer required for the
    main sleep strategy. Treat them as optional/fallback only. Wire INA228 on one
    reference node (SDA→21, SCL→22, chip in series between
    battery+ and buck input) → run the INA228 bench checklist below → first
@@ -628,12 +659,12 @@ Priority order:
    re-adopts its position within ~10 s of registering (the new single-row
    `[table]` reply; code-reviewed + host-tested but the radio path itself
    isn't hardware-verified yet).
-10. **User task, anytime (needs hands + DMM):** re-measure the 12 V
+11. **User task, anytime (needs hands + DMM):** re-measure the 12 V
    battery-side draw with naps running, **USB disconnected** (USB backfeeds the
    5 V rail and corrupts the reading) — quantifies the Stage-B win vs the old
    51 mA rest / 55 mA avg numbers. Same scene for apples-to-apples: amber GLOW
    @ bri 48.
-11. **Hardware topic to revisit:** buried battery/control boxes will likely make
+12. **Hardware topic to revisit:** buried battery/control boxes will likely make
    onboard 2.4 GHz antennas unreliable. Read `docs/RF_ENCLOSURE.md` before buying
    more MCUs or committing to enclosure geometry. The pilot FireBeetles already
    ordered are DFR0654-F onboard-antenna boards; buried-box deployment likely
@@ -666,7 +697,10 @@ revised cost roll-up.
   each beacon; a performer selects its cached group and free-runs that look.
   Built-ins include `PULSE` (uniform breathing), `PALETTE_DRIFT` (smooth
   rainbow hue cycle; `params[0]`=period ms, `params[1]`=spatial hue offset ×100 so
-  the rainbow travels or runs in unison), `SWEEP` (1-D traveling wave), and
+  the rainbow travels or runs in unison), `SWEEP` (1-D traveling wave),
+  `WAVEFRONT` (one directional 2-D band), `GLOW` (steady color), `FIREFLY`
+  (irregular solos plus a periodic three-beat chorus), `OCEAN_WAVE` (summed 2-D
+  wavefronts), `WHITE` (the dedicated white channel), and
   `SOLID` (`pattern 3`: every pixel full RGBW — the worst-case power draw, for
   bench-measuring the LED ceiling). Conductor broadcasts the pattern
   (`pattern_id`/`brightness`/`params[4]`); performers render it. Every node
@@ -674,6 +708,8 @@ revised cost roll-up.
   exceed the per-node power budget (see the worst-case measurement below).
   `FIRE_FLICKER` extends the local model to `f(x,y,pixel_index,t)` and is the
   first pattern to render distinct values across the ring; it appends ID 9.
+  `FIRE2012` (ID 10) adds deterministic heat cells across the active emitter
+  sequence, and `WAVEFRONT` is ID 11.
 - **NVS identity:** `id` + `(x,y)` + group persist across reboot; position/group
   are adopted from the conductor table.
 - **Group pattern configs persist** too: all eight
@@ -905,6 +941,13 @@ the physical chip.
 
 ## Hardware state
 
+- **As of 2026-08-10 (local control plane on `http://127.0.0.1:8000`):** ten
+  USB-connected performers, permanent IDs 1–10, and the USB-attached conductor
+  all run `0.9.3-dev`, protocol 11, clean build `b1e7d434`. Serial readback
+  verified every role and ID after flashing the conductor last. Live state
+  reports all 10 performers alive and firmware-consistent (`matching=10`,
+  `seen=10`). Automatic OTA is disabled; the interrupted prior install remains
+  paused while the patterns are tested.
 - **As of 2026-08-04 (live HTTPS API on `https://127.0.0.1:8000`):**
   - `/dev/cu.usbserial-0001`, `8C:94:DF:8F:71:50` — conductor, protocol 10,
     build `143a14a8` during the verified WIP flash.
@@ -975,7 +1018,7 @@ dimming real shows. Watts are fine; the gating issue is *hours* → daytime slee
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-pio test -e native                                  # 190 host tests
+pio test -e native                                  # 206 host tests
 pio run -e devkitc                                  # build
 pio run -e devkitc -t upload --upload-port /dev/cu.usbserial-XXXX
 pio device monitor -p /dev/cu.usbserial-XXXX        # provision + watch

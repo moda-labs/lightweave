@@ -96,6 +96,56 @@ def test_field_preview_renders_group_patterns_and_health_metadata() -> None:
     assert first_colors[2]["rgb"] == [0, 0, 0]
 
 
+def test_field_preview_preserves_fire2012_heat_cells_across_frames() -> None:
+    state = field_state()
+    state["patterns"][1]["config"] = {
+        "pattern": "Fire2012",
+        "brightness": 96,
+        "params": {"p0": 30, "p1": 55, "p2": 120, "p3": 0},
+    }
+
+    preview = render_field_preview_frames(state, 1000, 2, start_ms=0)
+
+    first = preview["frames"][0]["colors"][1]
+    second = preview["frames"][1]["colors"][1]
+    assert len(first["pixels"]) == 16
+    assert len(set(map(tuple, first["pixels"]))) >= 4
+    assert first["pixels"] != second["pixels"]
+
+
+def test_field_preview_seeds_fire2012_with_permanent_id_not_mac_rank() -> None:
+    state = field_state()
+    lantern = state["lanterns"][1]
+    lantern["node_id"] = 9
+    state["patterns"][1]["config"] = {
+        "pattern": "Fire2012",
+        "brightness": 96,
+        "params": {"p0": 30, "p1": 55, "p2": 120, "p3": 0},
+    }
+
+    preview = render_field_preview_frames(state, 500, 1, start_ms=0)
+    expected = preview_module._pattern_pixels(
+        "fire2012",
+        96,
+        state["patterns"][1]["config"]["params"],
+        0,
+        lantern["x"],
+        lantern["y"],
+        node_id=9,
+        pixel_count=64,
+        sample_count=16,
+    )
+
+    preview_index = next(
+        index
+        for index, node in enumerate(preview["nodes"])
+        if node["mac"] == lantern["mac"]
+    )
+    assert preview["frames"][0]["colors"][preview_index]["pixels"] == [
+        list(preview_module._rgbw_to_preview_rgb(pixel)) for pixel in expected
+    ]
+
+
 def test_field_preview_applies_locator_as_a_global_override() -> None:
     state = field_state()
     state["locator"] = {

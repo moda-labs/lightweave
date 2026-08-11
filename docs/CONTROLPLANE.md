@@ -520,12 +520,15 @@ number while showing "Not seen".
 
 - Group selector targets one of eight independent live pattern slots; each
   lantern renders only the slot named by its cached table membership.
-- Pattern picker includes field-space patterns plus the ring-addressable
-  `FIRE_FLICKER`; SOLID remains a bench-only power pattern.
+- Pattern picker includes field-space patterns, including the single-band 2-D
+  `WAVEFRONT`, plus the ring-addressable `FIRE_FLICKER` and `FIRE2012`; SOLID
+  remains a bench-only power pattern.
 - Brightness slider + per-pattern param controls with human labels:
-  Pulse/Glow expose hue, Sweep exposes period + wavelength, Palette Drift
-  exposes period + spatial spread, and Fire Flicker exposes speed, color, and
-  per-pixel texture depth. The Change Pattern button is disabled until the
+  Pulse/Glow expose hue, Sweep exposes period + wavelength, Wavefront exposes
+  period + band width + travel angle + color, Palette Drift exposes period +
+  spatial spread, Firefly exposes irregularity/scatter + chorus recurrence,
+  Fire Flicker exposes speed, color, and per-pixel texture depth, and Fire2012
+  exposes simulation speed, cooling, and sparking. The Change Pattern button is disabled until the
   visible draft differs from the live conductor state.
 - Pattern preview: the browser renders `f(x,y,t)` live on the map *before*
   broadcasting (JS port of the pure `pattern_math.h`). Cheap because the

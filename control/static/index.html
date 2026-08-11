@@ -276,9 +276,11 @@
             <button data-pattern="Pulse">Pulse</button>
             <button data-pattern="Palette Drift">Drift</button>
             <button data-pattern="Sweep">Sweep</button>
+            <button data-pattern="Wavefront">Wavefront</button>
             <button data-pattern="Glow">Glow</button>
             <button data-pattern="Firefly">Firefly</button>
             <button data-pattern="Fire Flicker">Fire</button>
+            <button data-pattern="Fire2012">Fire2012</button>
             <button data-pattern="Ocean Wave">Ocean</button>
             <button data-pattern="White">White</button>
             <button data-pattern="Solid">Solid</button>
@@ -314,6 +316,10 @@
             <label class="control-label" for="pattern-wavelength">Wavelength <span id="wavelength-value">3.0</span></label>
             <input id="pattern-wavelength" type="range" min="50" max="600" step="25" value="300">
           </div>
+          <div class="pattern-param" data-param-group="front-width">
+            <label class="control-label" for="pattern-front-width">Wave width <span id="front-width-value">0.28</span></label>
+            <input id="pattern-front-width" type="range" min="8" max="80" step="2" value="28">
+          </div>
           <div class="pattern-param" data-param-group="spatial">
             <label class="control-label" for="pattern-spatial">Spatial spread <span id="spatial-value">0.00</span></label>
             <input id="pattern-spatial" type="range" min="0" max="300" step="25" value="0">
@@ -322,9 +328,25 @@
             <label class="control-label" for="pattern-scatter">Firefly scatter <span id="scatter-value">100</span> / 100</label>
             <input id="pattern-scatter" type="range" min="20" max="100" step="5" value="100">
           </div>
+          <div class="pattern-param" data-param-group="chorus">
+            <label class="control-label" for="pattern-chorus">Chorus every <span id="chorus-value">36</span>s</label>
+            <input id="pattern-chorus" type="range" min="18" max="90" step="3" value="36">
+          </div>
           <div class="pattern-param" data-param-group="texture">
             <label class="control-label" for="pattern-texture">Flame texture <span id="texture-value">85</span> / 100</label>
             <input id="pattern-texture" type="range" min="0" max="100" step="5" value="85">
+          </div>
+          <div class="pattern-param" data-param-group="fire-speed">
+            <label class="control-label" for="pattern-fire-speed">Fire simulation speed <span id="fire-speed-value">30</span> fps</label>
+            <input id="pattern-fire-speed" type="range" min="10" max="60" step="5" value="30">
+          </div>
+          <div class="pattern-param" data-param-group="cooling">
+            <label class="control-label" for="pattern-cooling">Cooling <span id="cooling-value">55</span> / 100</label>
+            <input id="pattern-cooling" type="range" min="20" max="100" step="5" value="55">
+          </div>
+          <div class="pattern-param" data-param-group="sparking">
+            <label class="control-label" for="pattern-sparking">Sparking <span id="sparking-value">120</span> / 255</label>
+            <input id="pattern-sparking" type="range" min="50" max="200" step="5" value="120">
           </div>
           <div class="pattern-param" data-param-group="angle">
             <label class="control-label" for="pattern-angle">Wave direction <span id="angle-value">45</span>°</label>

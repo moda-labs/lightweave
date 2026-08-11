@@ -4,7 +4,7 @@ import json
 import math
 import struct
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -12,11 +12,15 @@ MAX_BRIGHTNESS = 192
 MAX_PREVIEW_FRAMES = 240
 COLOR_VALUE_MARKER = 0x8000
 FIREFLY_SCATTER_MASK = 0x007F
+FIREFLY_CHORUS_MARKER = 0x8000
 OCEAN_WAVELENGTH_MASK = 0x03FF
 OCEAN_ANGLE_MASK = 0x01FF
 RING_PIXEL_COUNT = 16
 FIELD_PREVIEW_PIXEL_COUNT = 16
 FIELD_GROUP_COUNT = 8
+FIRE2012_STREAM_MASKS = tuple(
+    (stream * 0xC2B2AE35) & 0xFFFFFFFF for stream in range(64)
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,18 @@ class Rgbw:
     g: int
     b: int
     w: int = 0
+
+
+@dataclass
+class Fire2012State:
+    heat: list[int] = field(default_factory=lambda: [0] * RING_PIXEL_COUNT)
+    primary_heat: list[int] = field(default_factory=lambda: [0] * RING_PIXEL_COUNT)
+    next_heat: list[int] = field(default_factory=lambda: [0] * RING_PIXEL_COUNT)
+    last_step: int = 0
+    next_last_step: int = 0
+    origin_step: int = 0
+    signature: int = 0
+    ready: bool = False
 
 
 def parse_params(raw: str | None, aliases: dict[str, int | float | str | None]) -> dict[str, Any]:
@@ -75,12 +91,15 @@ def render_preview_png(
     for lantern in lanterns:
         x = float(lantern["x"])
         y = float(lantern["y"])
-        colors = _pattern_pixels(normalized, brightness, params, synced_us, x, y)
+        colors = _pattern_pixels(
+            normalized, brightness, params, synced_us, x, y,
+            node_id=_lantern_node_id(lantern),
+        )
         color = _average_rgbw(colors)
         rgb = _rgbw_to_preview_rgb(color)
         cx = round(margin + x * (width - 2 * margin))
         cy = round(margin + y * (height - 2 * margin))
-        if normalized == "fire_flicker":
+        if normalized in {"fire_flicker", "fire2012"}:
             _draw_pixel_ring(pixels, width, height, cx, cy, radius, colors)
         else:
             _draw_disc(pixels, width, height, cx, cy, radius + 2, (34, 38, 46))
@@ -95,6 +114,7 @@ def render_preview_data(
     brightness: int,
     params: dict[str, Any],
     t_ms: int,
+    _fire_states: dict[str, Fire2012State] | None = None,
 ) -> dict[str, Any]:
     if brightness < 0 or brightness > MAX_BRIGHTNESS:
         raise ValueError(f"brightness must be between 0 and {MAX_BRIGHTNESS}")
@@ -115,7 +135,14 @@ def render_preview_data(
     for lantern in lanterns:
         x = float(lantern["x"])
         y = float(lantern["y"])
-        colors = _pattern_pixels(normalized, brightness, params, synced_us, x, y)
+        fire_state = None
+        if normalized == "fire2012" and _fire_states is not None:
+            state_key = str(lantern.get("mac") or lantern.get("label") or f"{x:.4f},{y:.4f}")
+            fire_state = _fire_states.setdefault(state_key, Fire2012State())
+        colors = _pattern_pixels(
+            normalized, brightness, params, synced_us, x, y,
+            node_id=_lantern_node_id(lantern), fire_state=fire_state,
+        )
         color = _average_rgbw(colors)
         rgb = _rgbw_to_preview_rgb(color)
         luma = _luma(rgb)
@@ -137,7 +164,7 @@ def render_preview_data(
             "luma": round(luma, 3),
             "ring_contrast": round(ring_contrast, 4),
         }
-        if normalized == "fire_flicker":
+        if normalized in {"fire_flicker", "fire2012"}:
             lantern_render["pixels"] = [
                 {"rgbw": [pixel.r, pixel.g, pixel.b, pixel.w], "rgb": list(pixel_rgb)}
                 for pixel, pixel_rgb in zip(colors, pixel_rgbs)
@@ -175,8 +202,9 @@ def render_preview_frames(
     fps: int,
 ) -> dict[str, Any]:
     frame_times = _frame_times(duration_ms, fps)
+    fire_states: dict[str, Fire2012State] = {}
     frames = [
-        render_preview_data(state, pattern, brightness, params, t_ms)
+        render_preview_data(state, pattern, brightness, params, t_ms, fire_states)
         for t_ms in frame_times
     ]
     return {
@@ -290,6 +318,7 @@ def render_field_preview_frames(
         node_id = calibration_ranks.get(str(item.get("mac") or "").upper(), 0)
         calibration_codes.append(codes[node_id - 1] if 0 < node_id <= len(codes) else 0)
 
+    fire_states: dict[str, Fire2012State] = {}
     frames = []
     for offset in offsets:
         t_ms = start_ms + offset
@@ -306,7 +335,18 @@ def render_field_preview_frames(
                 brightness = 0
             params = config.get("params") or {}
             led_count = _safe_led_count(item.get("led_count"))
-            node_id = calibration_ranks.get(str(item.get("mac") or "").upper(), 0)
+            calibration_node_id = calibration_ranks.get(
+                str(item.get("mac") or "").upper(), 0
+            )
+            node_id = (
+                calibration_node_id
+                if normalized == "calibration"
+                else _lantern_node_id(item)
+            )
+            fire_state = None
+            if normalized == "fire2012":
+                state_key = str(item.get("mac") or item.get("label") or node_id)
+                fire_state = fire_states.setdefault(state_key, Fire2012State())
             pixels = _pattern_pixels(
                 normalized,
                 brightness,
@@ -315,13 +355,14 @@ def render_field_preview_frames(
                 float(item["x"]),
                 float(item["y"]),
                 node_id=node_id,
+                fire_state=fire_state,
                 pixel_count=led_count,
                 sample_count=FIELD_PREVIEW_PIXEL_COUNT,
                 calibration_code=calibration_code,
             )
             average = _average_rgbw(pixels)
             rendered = {"rgb": list(_rgbw_to_preview_rgb(average))}
-            if normalized == "fire_flicker":
+            if normalized in {"fire_flicker", "fire2012"}:
                 rendered["pixels"] = [list(_rgbw_to_preview_rgb(pixel)) for pixel in pixels]
             colors.append(rendered)
         frames.append({"t": t_ms, "colors": colors})
@@ -410,9 +451,9 @@ def review_preview(
         issues.append(_issue("error", "no_lit_lanterns", "No positioned lantern is lit in the sampled window."))
     if metrics["avg_luma_mean"] < 2 and brightness > 0:
         issues.append(_issue("warn", "mostly_dark", "Average luma is near black across the sampled window."))
-    if normalized in {"sweep", "palette_drift", "pulse", "firefly", "ocean_wave", "fire_flicker"} and metrics["temporal_luma_range"] < 1:
+    if normalized in {"sweep", "wavefront", "palette_drift", "pulse", "firefly", "ocean_wave", "fire_flicker", "fire2012"} and metrics["temporal_luma_range"] < 1:
         issues.append(_issue("warn", "no_temporal_change", "The sampled window has almost no visible temporal change."))
-    if normalized in {"sweep", "palette_drift", "ocean_wave"} and metrics["max_contrast"] < 0.02:
+    if normalized in {"sweep", "wavefront", "palette_drift", "ocean_wave"} and metrics["max_contrast"] < 0.02:
         issues.append(_issue("warn", "low_spatial_contrast", "The field has little spatial variation at the sampled times."))
     if normalized == "solid":
         issues.append(_issue("warn", "bench_pattern", "SOLID is a bench power pattern, not a show pattern."))
@@ -449,6 +490,8 @@ def _normalize_pattern(pattern: str) -> str:
         "palette drift": "palette_drift",
         "drift": "palette_drift",
         "sweep": "sweep",
+        "wavefront": "wavefront",
+        "wave front": "wavefront",
         "solid": "solid",
         "glow": "glow",
         "firefly": "firefly",
@@ -458,6 +501,8 @@ def _normalize_pattern(pattern: str) -> str:
         "fire flicker": "fire_flicker",
         "fire": "fire_flicker",
         "flame": "fire_flicker",
+        "fire2012": "fire2012",
+        "fire 2012": "fire2012",
         "white": "white",
         "calibration": "calibration",
     }
@@ -483,6 +528,25 @@ def _pattern_color(pattern: str, brightness: int, params: dict[str, Any], synced
         wavelength = _number(params, "wavelength", "spatial", "p1", default=300) / 100.0
         intensity = _sweep_intensity(synced_us, x, period_s, wavelength)
         return Rgbw(0, 0, 0, round(intensity * brightness))
+    if pattern == "wavefront":
+        period_s = _number(params, "p0", "period", default=6000) / 1000.0
+        width_saturation = int(_number(params, "p1", "front_width", default=28))
+        angle_value = int(_number(params, "p2", "angle", default=0))
+        full_hsv = _color_value_present(angle_value)
+        width_raw = (width_saturation & OCEAN_WAVELENGTH_MASK
+                     if full_hsv else width_saturation)
+        angle_raw = angle_value & OCEAN_ANGLE_MASK if full_hsv else angle_value
+        width = (width_raw or 28) / 100.0
+        hue = _number(params, "p3", "hue", default=200)
+        hue = hue % 360 if full_hsv else (200 if hue == 0 else hue % 360)
+        saturation = (((width_saturation >> 10) & 0x3F) / 63.0
+                      if full_hsv else 1.0)
+        value = (((angle_value >> 9) & 0x3F) / 63.0
+                 if full_hsv else 1.0)
+        intensity = _wavefront_intensity(
+            synced_us, x, y, period_s, width, math.radians(angle_raw % 360)
+        )
+        return _hsv_color(brightness, intensity, hue, saturation, value)
     if pattern == "solid":
         return Rgbw(brightness, brightness, brightness, brightness)
     if pattern == "white":
@@ -505,10 +569,19 @@ def _pattern_color(pattern: str, brightness: int, params: dict[str, Any], synced
             scatter_raw = _number(params, "scatter", "p2", default=100)
             scatter = (100 if scatter_raw <= 0 else min(scatter_raw, 100)) / 100.0
             value = 1.0
-        saturation = _number(params, "p3", "saturation", default=85)
-        saturation = (min(max(saturation, 0), 100) if full_hsv
-                      else (85 if saturation <= 0 else min(saturation, 100))) / 100.0
-        intensity = _firefly_intensity(synced_us, x, y, period_s, scatter)
+        chorus_meta = int(_number(params, "p3", default=0))
+        if chorus_meta & FIREFLY_CHORUS_MARKER:
+            saturation_raw = min(chorus_meta & 0x7F, 100)
+            chorus_interval_s = (chorus_meta >> 7) & 0xFF
+        else:
+            saturation_raw = _number(params, "saturation", "p3", default=85)
+            saturation_raw = (min(max(saturation_raw, 0), 100) if full_hsv
+                              else (85 if saturation_raw <= 0 else min(saturation_raw, 100)))
+            chorus_interval_s = _number(params, "chorus", default=36)
+        intensity = _firefly_intensity(
+            synced_us, x, y, period_s, scatter, chorus_interval_s
+        )
+        saturation = saturation_raw / 100.0
         return _hsv_color(brightness, intensity, hue, saturation, value)
     if pattern == "ocean_wave":
         # Positional params (p0..p3); accept the friendly names too.
@@ -548,10 +621,35 @@ def _pattern_pixels(
     y: float,
     *,
     node_id: int = 0,
+    fire_state: Fire2012State | None = None,
     pixel_count: int = RING_PIXEL_COUNT,
     sample_count: int | None = None,
     calibration_code: int | None = None,
 ) -> list[Rgbw]:
+    physical_count = max(1, int(pixel_count))
+    rendered_count = max(1, int(sample_count or physical_count))
+    sample_indexes = [
+        min(physical_count - 1, math.floor(index * physical_count / rendered_count))
+        for index in range(rendered_count)
+    ]
+
+    if pattern == "fire2012":
+        fps = int(_number(params, "p0", "speed", default=30)) or 30
+        cooling = int(_number(params, "p1", "cooling", default=55)) or 55
+        sparking = int(_number(params, "p2", "sparking", default=120)) or 120
+        fps = fps if 10 <= fps <= 60 else 30
+        cooling = max(0, min(255, cooling))
+        sparking = max(0, min(255, sparking))
+        current = fire_state or Fire2012State()
+        seed = _fire2012_node_seed(x, y, node_id)
+        _fire2012_prepare(
+            current, synced_us, seed, physical_count, fps, cooling, sparking
+        )
+        return [
+            _fire2012_color(current.heat[index], brightness)
+            for index in sample_indexes
+        ]
+
     if pattern == "calibration":
         slot_ms = int(_number(params, "p0", "slot_ms", default=1000))
         bit_count = int(_number(params, "p1", "bit_count", default=1))
@@ -567,10 +665,10 @@ def _pattern_pixels(
             calibration_code,
         )
         color = Rgbw(0, 0, 0, brightness if on else 0)
-        return [color] * (sample_count or pixel_count)
+        return [color] * rendered_count
     if pattern != "fire_flicker":
         color = _pattern_color(pattern, brightness, params, synced_us, x, y)
-        return [color] * (sample_count or pixel_count)
+        return [color] * rendered_count
 
     period_s = _number(params, "p0", "period", default=1200) / 1000.0
     hue = _number(params, "p1", "hue", default=24) % 360
@@ -587,12 +685,6 @@ def _pattern_pixels(
     saturation = (min(max(saturation, 0), 100) if full_hsv
                   else (95 if saturation <= 0 else min(saturation, 100))) / 100.0
 
-    physical_count = max(1, int(pixel_count))
-    rendered_count = max(1, int(sample_count or physical_count))
-    sample_indexes = [
-        min(physical_count - 1, math.floor(index * physical_count / rendered_count))
-        for index in range(rendered_count)
-    ]
     pixels = []
     for pixel_index in sample_indexes:
         intensity, heat = _fire_flicker_sample(
@@ -603,6 +695,16 @@ def _pattern_pixels(
             brightness, intensity, hue + hue_shift, saturation, value
         ))
     return pixels
+
+
+def _lantern_node_id(lantern: dict[str, Any]) -> int:
+    value = lantern.get("node_id")
+    if isinstance(value, int) and value > 0:
+        return value
+    label = str(lantern.get("label") or "")
+    if label.startswith("#") and label[1:].isdigit():
+        return int(label[1:])
+    return 0
 
 
 def _calibration_code_value(
@@ -795,6 +897,33 @@ def _sweep_intensity(synced_us: int, x: float, period_s: float, wavelength: floa
     return 0.5 * (1.0 - math.cos(2.0 * math.pi * p))
 
 
+def _wavefront_intensity(
+    synced_us: int,
+    x: float,
+    y: float,
+    period_s: float,
+    width: float,
+    angle_rad: float,
+) -> float:
+    if period_s <= 0:
+        period_s = 6.0
+    width = min(1.0, max(0.04, width))
+    cx = math.cos(angle_rad)
+    cy = math.sin(angle_rad)
+    minimum = min(0.0, cx) + min(0.0, cy)
+    maximum = max(0.0, cx) + max(0.0, cy)
+    span = maximum - minimum
+    projection = ((x * cx + y * cy - minimum) / span
+                  if span > 1e-5 else 0.5)
+    projection = min(1.0, max(0.0, projection))
+    center = -width + _phase(synced_us, period_s) * (1.0 + 2.0 * width)
+    distance = abs(projection - center)
+    if distance >= width:
+        return 0.0
+    edge = 1.0 - distance / width
+    return edge * edge * (3.0 - 2.0 * edge)
+
+
 def _smoothstep01(x: float) -> float:
     if x <= 0.0:
         return 0.0
@@ -819,7 +948,9 @@ def _firefly_flash_frac(period_s: float) -> float:
     return max(0.05, min(0.95, 1.0 - dark_gap_s / period_s))
 
 
-def _firefly_intensity(synced_us: int, x: float, y: float, period_s: float, scatter: float) -> float:
+def _firefly_regular_intensity(
+    synced_us: int, x: float, y: float, period_s: float, scatter: float
+) -> float:
     if period_s <= 0:
         raise ValueError("period must be positive")
     p = _phase(synced_us, period_s) + _firefly_stagger(x, y, scatter)
@@ -835,6 +966,283 @@ def _firefly_intensity(synced_us: int, x: float, y: float, period_s: float, scat
         env = 1.0 - _smoothstep01((u - attack) / (1.0 - attack))
     shimmer = 1.0 - 0.12 * (0.5 - 0.5 * math.cos(2.0 * math.pi * 6.0 * u))
     return max(0.0, min(1.0, env * shimmer))
+
+
+def _firefly_node_seed(x: float, y: float) -> int:
+    xq = _lround(x * 10000.0)
+    yq = _lround(y * 10000.0)
+    return _fire2012_mix(
+        _u32(xq * 0x9E3779B1) ^ _u32(yq * 0x85EBCA6B) ^ 0xF1EF17
+    )
+
+
+def _firefly_random01(seed: int, epoch: int, stream: int) -> float:
+    raw_epoch = epoch & 0xFFFFFFFFFFFFFFFF
+    value = seed ^ _u32(raw_epoch * 0x9E3779B1)
+    value ^= _u32((raw_epoch >> 32) * 0x85EBCA6B)
+    value ^= _u32(stream * 0xC2B2AE35)
+    return (_fire2012_mix(value) >> 8) / 16777216.0
+
+
+def _firefly_random_solo_intensity(
+    synced_us: int, x: float, y: float, period_s: float
+) -> float:
+    if period_s <= 0:
+        period_s = 7.0
+    window_us = max(1, _lround(period_s * 1_000_000.0))
+    epoch = synced_us // window_us
+    seed = _firefly_node_seed(x, y)
+    if _firefly_random01(seed, epoch, 0) < 0.17:
+        return 0.0
+    start = epoch * window_us + period_s * 1_000_000.0 * (
+        0.06 + 0.60 * _firefly_random01(seed, epoch, 1)
+    )
+    duration = period_s * 1_000_000.0 * (
+        0.18 + 0.12 * _firefly_random01(seed, epoch, 2)
+    )
+    u = (synced_us - start) / duration
+    if u < 0.0 or u >= 1.0:
+        return 0.0
+    attack = 0.19
+    env = (_smoothstep01(u / attack) if u < attack
+           else 1.0 - _smoothstep01((u - attack) / (1.0 - attack)))
+    amplitude = 0.72 + 0.28 * _firefly_random01(seed, epoch, 3)
+    shimmer_phase = _firefly_random01(seed, epoch, 4)
+    shimmer = 0.94 + 0.06 * math.cos(
+        2.0 * math.pi * (5.0 * u + shimmer_phase)
+    )
+    return max(0.0, min(1.0, amplitude * env * shimmer))
+
+
+def _firefly_chorus_beat(beat_phase: float) -> float:
+    beat_phase %= 1.0
+    if beat_phase >= 0.72:
+        return 0.0
+    u = beat_phase / 0.72
+    attack = 0.18
+    return (_smoothstep01(u / attack) if u < attack
+            else 1.0 - _smoothstep01((u - attack) / (1.0 - attack)))
+
+
+def _firefly_intensity(
+    synced_us: int,
+    x: float,
+    y: float,
+    period_s: float,
+    scatter: float,
+    chorus_interval_s: float = 36.0,
+) -> float:
+    if period_s <= 0:
+        period_s = 7.0
+    scatter = min(1.0, max(0.0, scatter))
+    regular = _firefly_regular_intensity(synced_us, x, y, period_s, 0.0)
+    random = _firefly_random_solo_intensity(synced_us, x, y, period_s)
+    solo = regular * (1.0 - scatter) + random * scatter
+    if chorus_interval_s < 8.0:
+        return solo
+    beat_period_s = 1.35
+    chorus_duration_s = beat_period_s * 3.0
+    chorus_interval_s = max(chorus_interval_s, chorus_duration_s + 2.0)
+    cycle_s = _phase(synced_us, chorus_interval_s) * chorus_interval_s
+    chorus_start_s = chorus_interval_s - chorus_duration_s
+    if cycle_s < chorus_start_s:
+        return solo
+    local_s = cycle_s - chorus_start_s
+    synced = _firefly_chorus_beat(local_s / beat_period_s)
+    crossfade_s = 0.38
+    blend_in = _smoothstep01(local_s / crossfade_s)
+    blend_out = 1.0 - _smoothstep01(
+        (local_s - (chorus_duration_s - crossfade_s)) / crossfade_s
+    )
+    blend = blend_in * blend_out
+    return solo * (1.0 - blend) + synced * blend
+
+
+def _u32(value: int) -> int:
+    return value & 0xFFFFFFFF
+
+
+def _fire2012_mix(value: int) -> int:
+    # Keep masks inline so this remains a cheap 32-bit reference operation in
+    # CPython as well as an exact mirror of the firmware mixer.
+    value &= 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x7FEB352D) & 0xFFFFFFFF
+    value ^= value >> 15
+    value = (value * 0x846CA68B) & 0xFFFFFFFF
+    value ^= value >> 16
+    return value & 0xFFFFFFFF
+
+
+def _fire2012_random_mix(value: int) -> int:
+    """Fast 32-bit mixer for the per-cell Fire2012 random stream."""
+    value &= 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x7FEB352D) & 0xFFFFFFFF
+    value ^= value >> 15
+    return value & 0xFFFFFFFF
+
+
+def _lround(value: float) -> int:
+    return math.floor(value + 0.5) if value >= 0 else math.ceil(value - 0.5)
+
+
+def _fire2012_node_seed(x: float, y: float, node_id: int) -> int:
+    xq = _lround(x * 10000.0)
+    yq = _lround(y * 10000.0)
+    seed = _u32(xq * 0x9E3779B1)
+    seed ^= _u32(yq * 0x85EBCA6B)
+    seed ^= _u32(node_id * 0xC2B2AE35)
+    return _fire2012_mix(seed ^ 0x20120718)
+
+
+def _fire2012_random8(seed: int, step: int, stream: int) -> int:
+    raw_step = step & 0xFFFFFFFFFFFFFFFF
+    value = seed ^ ((raw_step * 0x9E3779B1) & 0xFFFFFFFF)
+    value ^= ((raw_step >> 32) * 0x85EBCA6B) & 0xFFFFFFFF
+    value ^= (stream * 0xC2B2AE35) & 0xFFFFFFFF
+    return _fire2012_random_mix(value) >> 24
+
+
+def _fire2012_signature(seed: int, cell_count: int, fps: int, cooling: int, sparking: int) -> int:
+    config = cell_count | (fps << 8) | (cooling << 16) | (sparking << 24)
+    return _fire2012_mix(seed ^ _u32(config))
+
+
+def _fire2012_step(
+    heat: list[int],
+    step: int,
+    seed: int,
+    cell_count: int,
+    cooling: int,
+    sparking: int,
+) -> None:
+    cooling_limit = min(256, (cooling * 10) // cell_count + 2)
+    raw_step = step & 0xFFFFFFFFFFFFFFFF
+    step_value = seed ^ ((raw_step * 0x9E3779B1) & 0xFFFFFFFF)
+    step_value ^= ((raw_step >> 32) * 0x85EBCA6B) & 0xFFFFFFFF
+    stream_masks = FIRE2012_STREAM_MASKS
+    mask = 0xFFFFFFFF
+    for index in range(cell_count):
+        # Inline the mixer in this hot loop. A maximum-size field preview runs
+        # it over ten million times, while the standalone helper remains the
+        # readable reference used everywhere else.
+        value = step_value ^ stream_masks[index]
+        value ^= value >> 16
+        value = (value * 0x7FEB352D) & mask
+        value ^= value >> 15
+        loss = value >> 24
+        loss %= cooling_limit
+        heat[index] = 0 if loss >= heat[index] else heat[index] - loss
+    for index in range(cell_count - 1, 1, -1):
+        heat[index] = (heat[index - 1] + heat[index - 2] * 2) // 3
+    spark_roll = _fire2012_random_mix(
+        step_value ^ ((0x100 * 0xC2B2AE35) & 0xFFFFFFFF)
+    ) >> 24
+    if spark_roll < sparking:
+        base_cells = min(7, cell_count)
+        index = (
+            _fire2012_random_mix(step_value ^ ((0x101 * 0xC2B2AE35) & 0xFFFFFFFF))
+            >> 24
+        ) % base_cells
+        added = 160 + (
+            _fire2012_random_mix(step_value ^ ((0x102 * 0xC2B2AE35) & 0xFFFFFFFF))
+            >> 24
+        ) % 95
+        heat[index] = min(255, heat[index] + added)
+
+
+def _fire2012_prepare(
+    state: Fire2012State,
+    synced_us: int,
+    seed: int,
+    cell_count: int,
+    fps: int,
+    cooling: int,
+    sparking: int,
+) -> None:
+    signature = _fire2012_signature(seed, cell_count, fps, cooling, sparking)
+    target_step = (synced_us * fps) // 1_000_000
+    block_steps = fps * 4
+    origin_step = (target_step // block_steps) * block_steps - block_steps
+    same_config = state.ready and state.signature == signature
+    advance_one_block = (
+        same_config
+        and origin_step == state.origin_step + block_steps
+        and target_step >= state.next_last_step
+    )
+    rebuild = (
+        not same_config
+        or (state.origin_step != origin_step and not advance_one_block)
+        or target_step < state.last_step
+    )
+    if rebuild:
+        state.heat = [0] * cell_count
+        state.primary_heat = [0] * cell_count
+        state.next_heat = [0] * cell_count
+        state.signature = signature
+        state.origin_step = origin_step
+        state.last_step = origin_step
+        state.next_last_step = origin_step + block_steps
+        state.ready = True
+    elif advance_one_block:
+        state.primary_heat = list(state.next_heat)
+        state.next_heat = [0] * cell_count
+        state.origin_step = origin_step
+        state.last_step = state.next_last_step
+        state.next_last_step = origin_step + block_steps
+    while state.last_step < target_step:
+        state.last_step += 1
+        _fire2012_step(
+            state.primary_heat,
+            state.last_step,
+            seed,
+            cell_count,
+            cooling,
+            sparking,
+        )
+    while state.next_last_step < target_step:
+        state.next_last_step += 1
+        _fire2012_step(
+            state.next_heat,
+            state.next_last_step,
+            seed,
+            cell_count,
+            cooling,
+            sparking,
+        )
+
+    block_start = origin_step + block_steps
+    crossfade_steps = max(1, fps // 2)
+    crossfade_start = block_start + block_steps - crossfade_steps
+    blend = 0.0
+    if target_step > crossfade_start:
+        blend = min(1.0, (target_step - crossfade_start) / crossfade_steps)
+        blend = _smoothstep01(blend)
+    state.heat = [
+        _lround(primary * (1.0 - blend) + following * blend)
+        for primary, following in zip(state.primary_heat, state.next_heat)
+    ]
+
+
+def _fire2012_heat_color(temperature: int) -> tuple[int, int, int]:
+    t192 = (temperature * 191 + 255) >> 8
+    heat_ramp = (t192 & 0x3F) << 2
+    if t192 & 0x80:
+        return 255, 255, heat_ramp
+    if t192 & 0x40:
+        return 255, heat_ramp, 0
+    return heat_ramp, 0, 0
+
+
+def _fire2012_color(temperature: int, brightness: int) -> Rgbw:
+    red, green, blue = _fire2012_heat_color(temperature)
+    return Rgbw(
+        (red * brightness + 127) // 255,
+        (green * brightness + 127) // 255,
+        (blue * brightness + 127) // 255,
+        0,
+    )
 
 
 def _fire_flicker_sample(

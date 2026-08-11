@@ -2066,6 +2066,11 @@ def create_app(
         spatial: int | None = None,
         wavelength: int | None = None,
         texture: int | None = None,
+        speed: int | None = None,
+        cooling: int | None = None,
+        sparking: int | None = None,
+        front_width: int | None = None,
+        chorus: int | None = None,
     ) -> Response:
         try:
             state = await conductor_call("snapshot")
@@ -2076,6 +2081,11 @@ def create_app(
                 "spatial": spatial,
                 "wavelength": wavelength,
                 "texture": texture,
+                "speed": speed,
+                "cooling": cooling,
+                "sparking": sparking,
+                "front_width": front_width,
+                "chorus": chorus,
             })
             png = await asyncio.to_thread(
                 render_preview_png,
@@ -2105,6 +2115,11 @@ def create_app(
         spatial: int | None = None,
         wavelength: int | None = None,
         texture: int | None = None,
+        speed: int | None = None,
+        cooling: int | None = None,
+        sparking: int | None = None,
+        front_width: int | None = None,
+        chorus: int | None = None,
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -2115,6 +2130,11 @@ def create_app(
                 "spatial": spatial,
                 "wavelength": wavelength,
                 "texture": texture,
+                "speed": speed,
+                "cooling": cooling,
+                "sparking": sparking,
+                "front_width": front_width,
+                "chorus": chorus,
             })
             return await asyncio.to_thread(render_preview_data, state, pattern, brightness, decoded_params, t)
         except SerialProtocolError as error:
@@ -2135,6 +2155,11 @@ def create_app(
         spatial: int | None = None,
         wavelength: int | None = None,
         texture: int | None = None,
+        speed: int | None = None,
+        cooling: int | None = None,
+        sparking: int | None = None,
+        front_width: int | None = None,
+        chorus: int | None = None,
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -2145,6 +2170,11 @@ def create_app(
                 "spatial": spatial,
                 "wavelength": wavelength,
                 "texture": texture,
+                "speed": speed,
+                "cooling": cooling,
+                "sparking": sparking,
+                "front_width": front_width,
+                "chorus": chorus,
             })
             return await asyncio.to_thread(
                 render_preview_frames,
@@ -2173,6 +2203,11 @@ def create_app(
         spatial: int | None = None,
         wavelength: int | None = None,
         texture: int | None = None,
+        speed: int | None = None,
+        cooling: int | None = None,
+        sparking: int | None = None,
+        front_width: int | None = None,
+        chorus: int | None = None,
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -2183,6 +2218,11 @@ def create_app(
                 "spatial": spatial,
                 "wavelength": wavelength,
                 "texture": texture,
+                "speed": speed,
+                "cooling": cooling,
+                "sparking": sparking,
+                "front_width": front_width,
+                "chorus": chorus,
             })
             return await asyncio.to_thread(
                 review_preview,
@@ -3570,6 +3610,32 @@ def create_app(
                                 "active_mac": mac,
                                 "activated_macs": sorted(activated),
                             })
+                            # OTA status on the primary is freshness-gated. A
+                            # prior performer's reboot can take long enough for
+                            # the remaining staged rows to age out, even though
+                            # their writers are still valid. Refresh immediately
+                            # before each activation; if this target still is not
+                            # staged, leave the loop so the normal final-checkpoint
+                            # repair path can complete it first.
+                            current = await probe()
+                            node = next(
+                                (
+                                    item
+                                    for item in fresh_ota_nodes(
+                                        current.get("nodes") or []
+                                    )
+                                    if str(item.get("mac")) == mac
+                                ),
+                                None,
+                            )
+                            if not (
+                                node
+                                and node.get("phase")
+                                in {"staged", "activating", "complete"}
+                                and int(node.get("offset") or 0) == artifact.size
+                                and int(node.get("crc32") or 0) == artifact.crc32
+                            ):
+                                break
                             await call_until_ok("ota_activate", mac)
                             current = await progress()
                             node = next(
@@ -3584,6 +3650,8 @@ def create_app(
                                 activated.add(mac)
                                 break
                             await asyncio.sleep(OTA_ACTIVATION_POLL_S)
+                        if mac not in activated:
+                            break
                         app.state.ota_install.update({
                             "activated_macs": sorted(activated),
                             "nodes": fresh_ota_nodes(

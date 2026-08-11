@@ -17,13 +17,17 @@ enum PatternId : uint16_t {
   GLOW = 4,          // steady solid color at a fixed hue (no time term): the
                      // field holds one calm warm color, flat (non-pulsing) draw
   CALIBRATION = 5,   // identity blink sequence for camera-based positioning
-  FIREFLY = 6,       // "hotaru": each node swells up, shimmers, and fades on its
-                     // own position-staggered cycle, like fireflies in a meadow
+  FIREFLY = 6,       // "hotaru": irregular solo flashes periodically converge
+                     // into three synchronized beats, then disperse again
   OCEAN_WAVE = 7,    // soft 2-D ocean swell: summed sine wavefronts travel across
                      // the field, deep blue in the troughs with foam-capped crests
   WHITE = 8,         // steady neutral white using only the SK6812 white channel
-  FIRE_FLICKER = 9   // ring-aware flame: every LED gets its own deterministic
+  FIRE_FLICKER = 9,  // ring-aware flame: every LED gets its own deterministic
                      // brightness/temperature sample while staying clock-synced
+  FIRE2012 = 10,     // deterministic adaptation of FastLED's 1-D heat-cell fire:
+                     // cool, diffuse upward, spark at the base, map heat to color
+  WAVEFRONT = 11     // one soft directional band crosses the field, with a dark
+                     // interval between passes so its motion reads clearly
 };
 
 // True when f(x,y,t) has no time term: the rendered color never changes until
