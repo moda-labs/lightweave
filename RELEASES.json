@@ -2,6 +2,21 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.4",
+      "date": "2026-08-10",
+      "title": "Spatial fire and firefly choruses",
+      "control_changes": [
+        "Added Wavefront and Fire2012 to pattern authoring, saved shows, previews, and field visualization, with controls for direction, color, speed, cooling, and sparking.",
+        "Kept Fire2012 previews visually aligned with each board's permanent identity while smoothing replay checkpoints and keeping maximum-size field previews within the dashboard refresh interval.",
+        "Made firmware activation re-check each performer's staged image immediately before reboot and return incomplete nodes to repair instead of activating stale data."
+      ],
+      "firmware_changes": [
+        "Added a directional two-dimensional Wavefront band and a deterministic Fire2012 heat-cell flame with independently seeded lantern texture.",
+        "Changed Firefly from regular pulses to irregular solo flashes that periodically gather into three synchronized chorus beats.",
+        "Kept radio protocol v11, so existing v0.9.x direct and relayed field layouts remain compatible with this build."
+      ]
+    },
+    {
       "version": "0.9.3",
       "date": "2026-08-09",
       "title": "Focused operator controls",
