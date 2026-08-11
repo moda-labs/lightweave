@@ -677,8 +677,8 @@ void test_fire2012_matches_control_preview_golden_frame() {
   uint32_t seed = pmath::fire2012NodeSeed(0.2f, 0.8f, 6);
   pmath::fire2012Prepare(state, 3'000'000, seed, 16, 30, 55, 120);
   const uint8_t expected[16] = {
-      44, 115, 67, 105, 94, 110, 156, 210,
-      122, 94, 110, 91, 29, 0, 0, 0,
+      156, 255, 182, 173, 88, 115, 25, 40,
+      9, 3, 0, 0, 0, 0, 0, 0,
   };
   TEST_ASSERT_EQUAL_UINT32(2547460822u, seed);
   for (uint16_t i = 0; i < 16; i++)

@@ -454,6 +454,17 @@ inline uint32_t fire2012Mix(uint32_t value) {
   return value;
 }
 
+// The per-cell random stream is the hottest path in large control-plane
+// previews. One strong multiplicative round is sufficient here because the
+// inputs have already been separated by seed, step, and stream constants.
+// Keep this dependency-free so firmware and preview use identical bytes.
+inline uint32_t fire2012RandomMix(uint32_t value) {
+  value ^= value >> 16;
+  value *= 0x7feb352du;
+  value ^= value >> 15;
+  return value;
+}
+
 inline uint32_t fire2012NodeSeed(float x, float y, uint16_t node_id) {
   int32_t xq = (int32_t)lroundf(x * 10000.0f);
   int32_t yq = (int32_t)lroundf(y * 10000.0f);
@@ -469,7 +480,7 @@ inline uint8_t fire2012Random8(uint32_t seed, int64_t step,
   uint32_t value = seed ^ (uint32_t)raw_step * 0x9e3779b1u;
   value ^= (uint32_t)(raw_step >> 32) * 0x85ebca6bu;
   value ^= stream * 0xc2b2ae35u;
-  return (uint8_t)(fire2012Mix(value) >> 24);
+  return (uint8_t)(fire2012RandomMix(value) >> 24);
 }
 
 inline void fire2012Clear(Fire2012State& state) {

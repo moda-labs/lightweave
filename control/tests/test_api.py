@@ -1447,8 +1447,8 @@ def test_fire2012_preview_matches_firmware_golden_frame() -> None:
 
     assert seed == 2_547_460_822
     assert state.heat == [
-        44, 115, 67, 105, 94, 110, 156, 210,
-        122, 94, 110, 91, 29, 0, 0, 0,
+        156, 255, 182, 173, 88, 115, 25, 40,
+        9, 3, 0, 0, 0, 0, 0, 0,
     ]
 
 

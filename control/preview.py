@@ -18,6 +18,9 @@ OCEAN_ANGLE_MASK = 0x01FF
 RING_PIXEL_COUNT = 16
 FIELD_PREVIEW_PIXEL_COUNT = 16
 FIELD_GROUP_COUNT = 8
+FIRE2012_STREAM_MASKS = tuple(
+    (stream * 0xC2B2AE35) & 0xFFFFFFFF for stream in range(64)
+)
 
 
 @dataclass(frozen=True)
@@ -1060,13 +1063,24 @@ def _u32(value: int) -> int:
 
 
 def _fire2012_mix(value: int) -> int:
-    value = _u32(value)
+    # Keep masks inline so this remains a cheap 32-bit reference operation in
+    # CPython as well as an exact mirror of the firmware mixer.
+    value &= 0xFFFFFFFF
     value ^= value >> 16
-    value = _u32(value * 0x7FEB352D)
+    value = (value * 0x7FEB352D) & 0xFFFFFFFF
     value ^= value >> 15
-    value = _u32(value * 0x846CA68B)
+    value = (value * 0x846CA68B) & 0xFFFFFFFF
     value ^= value >> 16
-    return _u32(value)
+    return value & 0xFFFFFFFF
+
+
+def _fire2012_random_mix(value: int) -> int:
+    """Fast 32-bit mixer for the per-cell Fire2012 random stream."""
+    value &= 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x7FEB352D) & 0xFFFFFFFF
+    value ^= value >> 15
+    return value & 0xFFFFFFFF
 
 
 def _lround(value: float) -> int:
@@ -1084,10 +1098,10 @@ def _fire2012_node_seed(x: float, y: float, node_id: int) -> int:
 
 def _fire2012_random8(seed: int, step: int, stream: int) -> int:
     raw_step = step & 0xFFFFFFFFFFFFFFFF
-    value = seed ^ _u32(raw_step * 0x9E3779B1)
-    value ^= _u32((raw_step >> 32) * 0x85EBCA6B)
-    value ^= _u32(stream * 0xC2B2AE35)
-    return _fire2012_mix(value) >> 24
+    value = seed ^ ((raw_step * 0x9E3779B1) & 0xFFFFFFFF)
+    value ^= ((raw_step >> 32) * 0x85EBCA6B) & 0xFFFFFFFF
+    value ^= (stream * 0xC2B2AE35) & 0xFFFFFFFF
+    return _fire2012_random_mix(value) >> 24
 
 
 def _fire2012_signature(seed: int, cell_count: int, fps: int, cooling: int, sparking: int) -> int:
@@ -1104,15 +1118,37 @@ def _fire2012_step(
     sparking: int,
 ) -> None:
     cooling_limit = min(256, (cooling * 10) // cell_count + 2)
+    raw_step = step & 0xFFFFFFFFFFFFFFFF
+    step_value = seed ^ ((raw_step * 0x9E3779B1) & 0xFFFFFFFF)
+    step_value ^= ((raw_step >> 32) * 0x85EBCA6B) & 0xFFFFFFFF
+    stream_masks = FIRE2012_STREAM_MASKS
+    mask = 0xFFFFFFFF
     for index in range(cell_count):
-        loss = _fire2012_random8(seed, step, index) % cooling_limit
-        heat[index] = max(0, heat[index] - loss)
+        # Inline the mixer in this hot loop. A maximum-size field preview runs
+        # it over ten million times, while the standalone helper remains the
+        # readable reference used everywhere else.
+        value = step_value ^ stream_masks[index]
+        value ^= value >> 16
+        value = (value * 0x7FEB352D) & mask
+        value ^= value >> 15
+        loss = value >> 24
+        loss %= cooling_limit
+        heat[index] = 0 if loss >= heat[index] else heat[index] - loss
     for index in range(cell_count - 1, 1, -1):
         heat[index] = (heat[index - 1] + heat[index - 2] * 2) // 3
-    if _fire2012_random8(seed, step, 0x100) < sparking:
+    spark_roll = _fire2012_random_mix(
+        step_value ^ ((0x100 * 0xC2B2AE35) & 0xFFFFFFFF)
+    ) >> 24
+    if spark_roll < sparking:
         base_cells = min(7, cell_count)
-        index = _fire2012_random8(seed, step, 0x101) % base_cells
-        added = 160 + _fire2012_random8(seed, step, 0x102) % 95
+        index = (
+            _fire2012_random_mix(step_value ^ ((0x101 * 0xC2B2AE35) & 0xFFFFFFFF))
+            >> 24
+        ) % base_cells
+        added = 160 + (
+            _fire2012_random_mix(step_value ^ ((0x102 * 0xC2B2AE35) & 0xFFFFFFFF))
+            >> 24
+        ) % 95
         heat[index] = min(255, heat[index] + added)
 
 
