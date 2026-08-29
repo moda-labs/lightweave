@@ -1571,6 +1571,34 @@ console.log(JSON.stringify([sample("#ff8800"), sample("#804400"), sample("#80808
     assert gray["params"]["p2"] & 0x8000
 
 
+def test_color_wheel_maps_pointer_position_to_hue_and_saturation() -> None:
+    script = r'''
+const fs = require("fs");
+const src = fs.readFileSync("control/static/app.js", "utf8");
+eval(src.slice(0, src.indexOf("function isPatternDirty")));
+const rect = { left: 10, top: 20, width: 200, height: 200 };
+console.log(JSON.stringify({
+  right: colorWheelSelection(rect, 202, 120, 40),
+  bottom: colorWheelSelection(rect, 110, 212, 40),
+  center: colorWheelSelection(rect, 110, 120, 217),
+  marker: colorWheelPosition(180, 50),
+}));
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    values = json.loads(result.stdout)
+
+    assert values["right"] == {"hue": 0, "saturation": 100}
+    assert values["bottom"] == {"hue": 90, "saturation": 100}
+    assert values["center"] == {"hue": 217, "saturation": 0}
+    assert values["marker"]["left"] == pytest.approx(27)
+    assert values["marker"]["top"] == pytest.approx(50)
+
+
 def test_fire_flicker_ui_packs_speed_color_value_and_texture_into_wire_params() -> None:
     script = r'''
 const fs = require("fs");

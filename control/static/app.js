@@ -135,6 +135,30 @@ function hueSaturationValueToHex(hue, saturation, value) {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
+function colorWheelPosition(hue, saturation) {
+  const angle = (((Number(hue) % 360) + 360) % 360) * Math.PI / 180;
+  const radius = Math.min(100, Math.max(0, Number(saturation))) * 0.46;
+  return {
+    left: 50 + Math.cos(angle) * radius,
+    top: 50 + Math.sin(angle) * radius,
+  };
+}
+
+function colorWheelSelection(rect, clientX, clientY, fallbackHue = 0) {
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  const dx = Number(clientX) - centerX;
+  const dy = Number(clientY) - centerY;
+  const maxRadius = Math.max(1, Math.min(rect.width, rect.height) * 0.46);
+  const distance = Math.hypot(dx, dy);
+  return {
+    hue: distance < 1
+      ? ((Math.round(Number(fallbackHue)) % 360) + 360) % 360
+      : Math.round((Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360) % 360,
+    saturation: Math.round(Math.min(1, distance / maxRadius) * 100),
+  };
+}
+
 function colorValuePack(value) {
   return COLOR_VALUE_MARKER | Math.min(255, Math.max(0, Math.round(Number(value))));
 }
@@ -1356,18 +1380,23 @@ function renderPatternControls() {
   });
   const isColorPattern = patternDraft.pattern === "Pulse" || patternDraft.pattern === "Glow" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Fire Flicker" || patternDraft.pattern === "Ocean Wave" || patternDraft.pattern === "Wavefront";
   $("#color-presets").hidden = !isColorPattern;
-  $("#hex-color-row").hidden = !isColorPattern;
+  $("#color-wheel-row").hidden = !isColorPattern;
   if (isColorPattern) {
     const hex = hueSaturationValueToHex(
       patternDraft.hue,
       patternDraft.saturation ?? 100,
       patternDraft.value ?? 255,
     );
-    if (document.activeElement !== $("#pattern-hex")) $("#pattern-hex").value = hex;
-    $("#pattern-hex").classList.remove("invalid");
     $("#pattern-color-picker").value = hex;
-    $("#color-swatch").style.backgroundColor = hex;
-    $("#hex-error").hidden = true;
+    const wheelPosition = colorWheelPosition(patternDraft.hue, patternDraft.saturation ?? 100);
+    const wheel = $("#pattern-color-wheel");
+    const thumb = $("#color-wheel-thumb");
+    thumb.style.left = `${wheelPosition.left}%`;
+    thumb.style.top = `${wheelPosition.top}%`;
+    thumb.style.setProperty("--selected-color", hex);
+    wheel.setAttribute("aria-valuenow", String(Math.round(Number(patternDraft.hue))));
+    wheel.setAttribute("aria-valuetext", `Hue ${Math.round(Number(patternDraft.hue))} degrees, saturation ${Math.round(Number(patternDraft.saturation ?? 100))} percent`);
+    $("#color-wheel-value").textContent = `Hue ${Math.round(Number(patternDraft.hue))}° · Saturation ${Math.round(Number(patternDraft.saturation ?? 100))}%`;
   }
   $('[data-param-group="period"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Wavefront" || patternDraft.pattern === "Palette Drift" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Fire Flicker" || patternDraft.pattern === "Ocean Wave");
   $('[data-param-group="wavelength"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Ocean Wave");
@@ -3739,12 +3768,7 @@ $("#color-presets").addEventListener("click", (event) => {
 
 function applyHexColor(hex) {
   const rgb = parseHexColor(hex);
-  if (!rgb) {
-    $("#pattern-hex").classList.add("invalid");
-    $("#hex-error").textContent = "Enter a hex color like #ff8800 or #f80.";
-    $("#hex-error").hidden = false;
-    return;
-  }
+  if (!rgb) return;
   if (!patternDraft && state) patternDraft = patternDraftFromState();
   if (!patternDraft) return;
   const { hue, saturation, value } = rgbToHueSaturationValue(rgb.r, rgb.g, rgb.b);
@@ -3754,12 +3778,66 @@ function applyHexColor(hex) {
   renderPatternControls();
 }
 
-$("#pattern-hex").addEventListener("input", (event) => {
+$("#pattern-color-picker").addEventListener("input", (event) => {
   applyHexColor(event.target.value);
 });
 
-$("#pattern-color-picker").addEventListener("input", (event) => {
-  applyHexColor(event.target.value);
+let colorWheelDragging = false;
+
+function applyColorWheelPoint(clientX, clientY) {
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (!patternDraft) return;
+  const wheel = $("#pattern-color-wheel");
+  const selected = colorWheelSelection(
+    wheel.getBoundingClientRect(),
+    clientX,
+    clientY,
+    patternDraft.hue,
+  );
+  patternDraft.hue = selected.hue;
+  patternDraft.saturation = selected.saturation;
+  patternDraft.value = 255;
+  renderPatternControls();
+}
+
+$("#pattern-color-wheel").addEventListener("pointerdown", (event) => {
+  colorWheelDragging = true;
+  event.currentTarget.focus({ preventScroll: true });
+  event.currentTarget.setPointerCapture(event.pointerId);
+  applyColorWheelPoint(event.clientX, event.clientY);
+  event.preventDefault();
+});
+
+$("#pattern-color-wheel").addEventListener("pointermove", (event) => {
+  if (!colorWheelDragging) return;
+  applyColorWheelPoint(event.clientX, event.clientY);
+});
+
+$("#pattern-color-wheel").addEventListener("pointerup", (event) => {
+  colorWheelDragging = false;
+  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+});
+
+$("#pattern-color-wheel").addEventListener("pointercancel", () => {
+  colorWheelDragging = false;
+});
+
+$("#pattern-color-wheel").addEventListener("keydown", (event) => {
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (!patternDraft) return;
+  const step = event.shiftKey ? 10 : 2;
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    patternDraft.hue = (Number(patternDraft.hue) + (event.key === "ArrowRight" ? step : -step) + 360) % 360;
+  } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    patternDraft.saturation = Math.min(100, Math.max(0, Number(patternDraft.saturation ?? 100) + (event.key === "ArrowUp" ? step : -step)));
+  } else {
+    return;
+  }
+  patternDraft.value = 255;
+  renderPatternControls();
+  event.preventDefault();
 });
 
 $("#pattern-period").addEventListener("input", (event) => {

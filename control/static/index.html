@@ -299,14 +299,32 @@
             <button type="button" data-hex="006125"><span class="preset-sw" style="background:#006125"></span>Lotus lantern</button>
             <button type="button" data-hex="00711D"><span class="preset-sw" style="background:#00711D"></span>Green lantern</button>
           </div>
-          <div class="pattern-param" id="hex-color-row">
-            <label class="control-label" for="pattern-hex">Custom color (hex)</label>
-            <div class="hex-input-group">
-              <div class="color-swatch" id="color-swatch" aria-hidden="true"></div>
-              <input id="pattern-hex" type="text" inputmode="text" placeholder="#ff8800" maxlength="7" autocomplete="off" spellcheck="false">
-              <input id="pattern-color-picker" type="color" value="#ff8800" aria-label="Pick a color">
+          <div class="pattern-param" id="color-wheel-row">
+            <span class="control-label" id="color-wheel-label">Custom color</span>
+            <div class="color-wheel-layout">
+              <div
+                class="color-wheel"
+                id="pattern-color-wheel"
+                role="slider"
+                tabindex="0"
+                aria-labelledby="color-wheel-label"
+                aria-describedby="color-wheel-help"
+                aria-valuemin="0"
+                aria-valuemax="359"
+              >
+                <span class="color-wheel-thumb" id="color-wheel-thumb" aria-hidden="true"></span>
+              </div>
+              <div class="color-wheel-readout">
+                <label class="selected-color" for="pattern-color-picker">
+                  <input id="pattern-color-picker" type="color" value="#ff8800">
+                  <span>
+                    <strong>Selected color</strong>
+                    <output id="color-wheel-value">Hue 32° · Saturation 100%</output>
+                  </span>
+                </label>
+                <p id="color-wheel-help">Drag around the wheel, or use arrow keys. Click the swatch for the system color picker.</p>
+              </div>
             </div>
-            <div class="hex-error" id="hex-error" hidden></div>
           </div>
           <div class="pattern-param" data-param-group="period">
             <label class="control-label" for="pattern-period">Period <span id="period-value">4.0</span>s</label>
