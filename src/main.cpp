@@ -150,8 +150,8 @@ static Roster         g_state_roster_snapshot;
 static OtaStatusTable g_state_ota_status_snapshot;
 // Machine commands are parsed only by loopTask, so one reusable workspace is
 // sufficient. Keep it in static storage: placing this growing aggregate in
-// handleCommand() consumed most of loopTask's 8 KiB stack and made even `info`
-// trip FreeRTOS's stack guard.
+// Keeping it here also prevents the machine-command parser from consuming most
+// of loopTask's 8 KiB stack before command dispatch begins.
 static SerialJsonCommand g_serial_json_command;
 
 // Performer return traffic is serialized because ESP-NOW delivery callbacks
@@ -3393,15 +3393,19 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
   }
 }
 
-static void handleCommand(char* line) {
-  if (serialJsonLooksLike(line)) {
-    SerialJsonCommand& cmd = g_serial_json_command;
-    const char* error = nullptr;
-    if (serialJsonParse(line, cmd, error)) handleMachineCommand(cmd);
-    else jsonError(cmd.id, error ? error : "bad json");
-    return;
-  }
+// Keep machine-command dispatch out of the much larger legacy text-command
+// frame below. Both are called from Arduino's 8 KiB loopTask stack; nesting a
+// state response inside the text parser's frame exhausted that stack while an
+// OTA session added its status rows. noinline makes this safety boundary
+// explicit and keeps future compiler decisions from folding it back together.
+static void __attribute__((noinline)) handleMachineLine(char* line) {
+  SerialJsonCommand& cmd = g_serial_json_command;
+  const char* error = nullptr;
+  if (serialJsonParse(line, cmd, error)) handleMachineCommand(cmd);
+  else jsonError(cmd.id, error ? error : "bad json");
+}
 
+static void __attribute__((noinline)) handleTextCommand(char* line) {
   char* cmd = strtok(line, " \t");
   if (!cmd) return;
 
@@ -3721,7 +3725,12 @@ static void pollSerialCommands() {
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
-      if (len) { buf[len] = '\0'; handleCommand(buf); len = 0; }
+      if (len) {
+        buf[len] = '\0';
+        if (serialJsonLooksLike(buf)) handleMachineLine(buf);
+        else handleTextCommand(buf);
+        len = 0;
+      }
     } else if (len < sizeof(buf) - 1) {
       buf[len++] = c;
     }
