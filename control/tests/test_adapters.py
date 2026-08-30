@@ -128,6 +128,33 @@ def test_pattern_command_can_target_one_group() -> None:
     assert json.loads(transport.writes[0])["group_id"] == 2
 
 
+def test_uploaded_program_install_sends_exact_identity_and_bytes() -> None:
+    transport = FakeTransport([json.dumps({"id": 1, "ok": True})])
+    conductor = JsonLineSerialConductor(transport)
+
+    conductor.install_uploaded_program(0x1234ABCD, 1, b"\x01\x02\xff")
+
+    assert json.loads(transport.writes[0]) == {
+        "id": 1,
+        "cmd": "program_install",
+        "program_id": 0x1234ABCD,
+        "program_tag": 0,
+        "vm_version": 1,
+        "data": "0102ff",
+    }
+
+
+def test_uploaded_program_progress_uses_compact_command() -> None:
+    progress = {"target_id": 7, "target_tag": 9, "ready": True}
+    transport = FakeTransport([
+        json.dumps({"id": 1, "ok": True, "uploaded_program": progress})
+    ])
+    conductor = JsonLineSerialConductor(transport)
+
+    assert conductor.uploaded_program_progress() == progress
+    assert json.loads(transport.writes[0]) == {"id": 1, "cmd": "program_progress"}
+
+
 def test_locator_command_is_separate_from_group_patterns() -> None:
     transport = FakeTransport([json.dumps({"id": 1, "ok": True})])
     conductor = JsonLineSerialConductor(transport)

@@ -22,6 +22,7 @@ from control.group_store import GroupStore
 from control.mock_conductor import Lantern, MockConductor
 from control.ota_store import OtaArtifactStore, OtaInstallStore
 from control.pattern_store import PatternStore
+from control.uploaded_patterns import DEFAULT_UPLOADED_PROGRAM, UploadedPatternStore
 from control.power_monitor import PowerHistoryStore, PowerMonitorStore
 from control.preview import (
     Fire2012State,
@@ -33,6 +34,9 @@ from control.preview import (
     _firefly_random_solo_intensity,
     _fire_flicker_sample,
     _wavefront_intensity,
+    _ocean_swell_value,
+    _pond_ripple_intensity,
+    _visible_hsv_color,
 )
 
 
@@ -302,6 +306,50 @@ class ExplodingOtaConductor(MockConductor):
 class RejectingPatternConductor(MockConductor):
     def update_pattern(self, pattern: str, brightness: int, params: dict) -> dict:
         return {"ok": False, "error": "bad pattern"}
+
+
+class BlockingUploadedProgressConductor(MockConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.progress_started = threading.Event()
+        self.progress_calls = 0
+
+    def uploaded_program_progress(self) -> dict:
+        self.progress_calls += 1
+        self.progress_started.set()
+        progress = super().uploaded_program_progress()
+        if self.progress_calls == 1:
+            progress["ready"] = False
+            progress["ready_count"] = 0
+        return progress
+
+
+class RejectingUploadedInstallConductor(MockConductor):
+    def install_uploaded_program(
+        self, program_id: int, vm_version: int, data: bytes
+    ) -> dict:
+        return {"ok": False, "error": "uploaded staging unavailable"}
+
+
+class NeverReadyUploadedConductor(MockConductor):
+    def uploaded_program_progress(self) -> dict:
+        progress = super().uploaded_program_progress()
+        progress["ready"] = False
+        progress["ready_count"] = 0
+        return progress
+
+
+class RejectingUploadedActivationConductor(MockConductor):
+    def update_pattern(
+        self,
+        pattern: str,
+        brightness: int,
+        params: dict,
+        group_id: int | None = None,
+    ) -> dict:
+        if pattern == "Uploaded Pattern":
+            return {"ok": False, "error": "uploaded activation refused"}
+        return super().update_pattern(pattern, brightness, params, group_id)
 
 
 class RejectingLocatorConductor(MockConductor):
@@ -1166,6 +1214,356 @@ def test_pattern_update_round_trips_to_state() -> None:
     assert state["pattern"]["params"] == {"period": 8000}
 
 
+def test_pond_ripple_broadcast_requires_capable_reconciled_firmware() -> None:
+    class LegacyConductor(MockConductor):
+        def snapshot(self) -> dict:
+            state = super().snapshot()
+            state["conductor"]["firmware"].pop("features", None)
+            return state
+
+    legacy = LegacyConductor()
+    legacy._lanterns = make_placed_conductor(3)._lanterns
+    blocked = TestClient(create_app(legacy)).post(
+        "/api/show/pattern",
+        json={
+            "pattern": "Pond Ripple",
+            "brightness": 64,
+            "params": {"p0": 6000, "p1": 50, "p2": 500, "p3": 500},
+        },
+    )
+
+    ready = make_placed_conductor(3)
+    accepted = TestClient(create_app(ready)).post(
+        "/api/show/pattern",
+        json={
+            "pattern": "Pond Ripple",
+            "brightness": 64,
+            "params": {"p0": 6000, "p1": 50, "p2": 500, "p3": 500},
+        },
+    )
+
+    assert blocked.status_code == 409
+    assert "ripple-capable firmware" in blocked.json()["detail"]
+    assert accepted.status_code == 200
+    assert ready.pattern["pattern"] == "Pond Ripple"
+
+
+def test_pond_ripple_broadcast_requires_at_least_one_placed_lantern() -> None:
+    response = TestClient(create_app(MockConductor())).post(
+        "/api/show/pattern",
+        json={
+            "pattern": "Pond Ripple",
+            "brightness": 64,
+            "params": {"p0": 6000, "p1": 50, "p2": 500, "p3": 500},
+        },
+    )
+
+    assert response.status_code == 409
+    assert "every placed lantern" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("pattern", ["12", "0012", "13", "0013"])
+def test_numeric_capability_pattern_aliases_cannot_bypass_firmware_gate(
+    pattern: str,
+) -> None:
+    response = TestClient(create_app(MockConductor())).post(
+        "/api/show/pattern",
+        json={"pattern": pattern, "brightness": 64, "params": {}},
+    )
+
+    assert response.status_code == 409
+
+
+def test_oversized_numeric_pattern_alias_does_not_raise_server_error() -> None:
+    response = TestClient(create_app(MockConductor())).post(
+        "/api/show/pattern",
+        json={"pattern": "0" * 5000 + "12", "brightness": 64, "params": {}},
+    )
+
+    assert response.status_code == 409
+
+
+def test_capability_gated_pattern_can_always_be_turned_off() -> None:
+    class LegacyConductor(MockConductor):
+        def snapshot(self) -> dict:
+            state = super().snapshot()
+            state["conductor"]["firmware"].pop("features", None)
+            return state
+
+    conductor = LegacyConductor()
+    conductor._lanterns = make_placed_conductor(3)._lanterns
+    client = TestClient(create_app(conductor))
+
+    response = client.post(
+        "/api/show/pattern",
+        json={
+            "pattern": "Pond Ripple",
+            "brightness": 0,
+            "params": {"p0": 6000, "p1": 50, "p2": 500, "p3": 500},
+        },
+    )
+
+    assert response.status_code == 200
+    assert conductor.pattern["brightness"] == 0
+
+
+def test_uploaded_pattern_compiles_distributes_then_activates(tmp_path) -> None:
+    conductor = make_placed_conductor(3)
+    client = TestClient(create_app(
+        conductor,
+        uploaded_pattern_store=UploadedPatternStore(tmp_path / "uploaded"),
+    ))
+    created = client.post(
+        "/api/uploaded-patterns",
+        json={
+            "name": "Blue diagonal",
+            "brightness": 56,
+            "program": DEFAULT_UPLOADED_PROGRAM,
+        },
+    )
+    assert created.status_code == 200
+    pattern_id = created.json()["pattern"]["id"]
+
+    preview = client.post(
+        "/api/uploaded-patterns/preview",
+        json={
+            "name": "Blue diagonal",
+            "brightness": 56,
+            "program": DEFAULT_UPLOADED_PROGRAM,
+        },
+    )
+    assert preview.status_code == 200
+    assert preview.json()["compiled"]["bytes"] <= 192
+
+    broadcast = client.post(f"/api/uploaded-patterns/{pattern_id}/broadcast?group_id=2")
+    state = client.get("/api/state").json()
+
+    assert broadcast.status_code == 200
+    compiled = broadcast.json()["compiled"]
+    assert state["patterns"][2]["config"]["pattern"] == "Uploaded Pattern"
+    params = state["patterns"][2]["config"]["params"]
+    assert int(params["p0"]) | (int(params["p1"]) << 16) == compiled["program_id"]
+    assert int(params["p2"]) | (int(params["p3"]) << 16) == compiled["program_tag"]
+    assert state["uploaded_program"]["ready"] is True
+    assert state["uploaded_program"]["active_id"] == compiled["program_id"]
+    assert state["uploaded_program"]["active_tag"] == compiled["program_tag"]
+
+
+def test_newer_blackout_cancels_pending_uploaded_activation(tmp_path) -> None:
+    conductor = BlockingUploadedProgressConductor()
+    conductor._lanterns = make_placed_conductor(2)._lanterns
+    client = TestClient(create_app(
+        conductor,
+        uploaded_pattern_store=UploadedPatternStore(tmp_path / "uploaded"),
+    ))
+    result: dict[str, object] = {}
+
+    def broadcast() -> None:
+        result["response"] = client.post(
+            "/api/uploaded-patterns/broadcast",
+            json={
+                "name": "Canceled wave",
+                "brightness": 56,
+                "program": DEFAULT_UPLOADED_PROGRAM,
+            },
+        )
+
+    worker = threading.Thread(target=broadcast)
+    worker.start()
+    assert conductor.progress_started.wait(timeout=5)
+    blacked_out = client.post("/api/show/blackout")
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+    broadcast_response = result["response"]
+    assert blacked_out.status_code == 200
+    assert broadcast_response.status_code == 409  # type: ignore[union-attr]
+    assert "newer show command" in broadcast_response.json()["detail"]  # type: ignore[union-attr]
+    assert all(item["brightness"] == 0 for item in conductor.group_patterns)
+
+
+def test_uploaded_broadcast_leaves_show_unchanged_when_staging_is_rejected(
+    tmp_path,
+) -> None:
+    conductor = RejectingUploadedInstallConductor()
+    conductor._lanterns = make_placed_conductor(2)._lanterns
+    client = TestClient(create_app(
+        conductor,
+        uploaded_pattern_store=UploadedPatternStore(tmp_path / "uploaded"),
+    ))
+
+    response = client.post(
+        "/api/uploaded-patterns/broadcast",
+        json={
+            "name": "Rejected wave",
+            "brightness": 56,
+            "program": DEFAULT_UPLOADED_PROGRAM,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "uploaded staging unavailable"
+    assert conductor.uploaded_program_id == 0
+    assert all(item["pattern"] == "Glow" for item in conductor.group_patterns)
+
+
+def test_uploaded_broadcast_times_out_without_activating_partial_fleet(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conductor = NeverReadyUploadedConductor()
+    conductor._lanterns = make_placed_conductor(2)._lanterns
+    client = TestClient(create_app(
+        conductor,
+        uploaded_pattern_store=UploadedPatternStore(tmp_path / "uploaded"),
+    ))
+    ticks = iter((0.0, 50.0, 100.0))
+    clock = type(
+        "AdvancingClock",
+        (),
+        {
+            "monotonic": staticmethod(lambda: next(ticks)),
+            "time": staticmethod(time.time),
+        },
+    )
+    monkeypatch.setattr(app_module, "time", clock)
+
+    response = client.post(
+        "/api/uploaded-patterns/broadcast",
+        json={
+            "name": "Incomplete wave",
+            "brightness": 56,
+            "program": DEFAULT_UPLOADED_PROGRAM,
+        },
+    )
+
+    assert response.status_code == 409
+    assert "not activated" in response.json()["detail"]
+    assert conductor.uploaded_program_id != 0
+    assert all(item["pattern"] == "Glow" for item in conductor.group_patterns)
+
+
+def test_uploaded_broadcast_surfaces_activation_refusal_without_show_change(
+    tmp_path,
+) -> None:
+    conductor = RejectingUploadedActivationConductor()
+    conductor._lanterns = make_placed_conductor(2)._lanterns
+    client = TestClient(create_app(
+        conductor,
+        uploaded_pattern_store=UploadedPatternStore(tmp_path / "uploaded"),
+    ))
+
+    response = client.post(
+        "/api/uploaded-patterns/broadcast",
+        json={
+            "name": "Refused wave",
+            "brightness": 56,
+            "program": DEFAULT_UPLOADED_PROGRAM,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "uploaded activation refused"
+    assert conductor.uploaded_program_id != 0
+    assert all(item["pattern"] == "Glow" for item in conductor.group_patterns)
+
+
+def test_uploaded_draft_broadcast_does_not_create_saved_pattern(tmp_path) -> None:
+    store = UploadedPatternStore(tmp_path / "uploaded")
+    client = TestClient(create_app(
+        make_placed_conductor(2), uploaded_pattern_store=store
+    ))
+
+    response = client.post(
+        "/api/uploaded-patterns/broadcast?group_id=1",
+        json={
+            "name": "Unsaved tuning pass",
+            "brightness": 48,
+            "program": DEFAULT_UPLOADED_PROGRAM,
+        },
+    )
+
+    assert response.status_code == 200
+    assert store.list() == []
+
+
+def test_uploaded_preview_and_broadcast_map_serial_timeout_to_503(tmp_path) -> None:
+    store = UploadedPatternStore(tmp_path / "uploaded")
+    client = TestClient(create_app(
+        DownConductor(), uploaded_pattern_store=store
+    ))
+    payload = {
+        "name": "Offline preview",
+        "brightness": 48,
+        "program": DEFAULT_UPLOADED_PROGRAM,
+    }
+
+    preview = client.post("/api/uploaded-patterns/preview", json=payload)
+    broadcast = client.post("/api/uploaded-patterns/broadcast", json=payload)
+
+    assert preview.status_code == 503
+    assert broadcast.status_code == 503
+
+
+def test_uploaded_pattern_endpoints_reject_float32_overflow_as_bad_input(tmp_path) -> None:
+    client = TestClient(create_app(
+        MockConductor(),
+        uploaded_pattern_store=UploadedPatternStore(tmp_path / "uploaded"),
+    ))
+    payload = {
+        "name": "Too large",
+        "brightness": 48,
+        "program": {"hue": 1e300},
+    }
+
+    assert client.post("/api/uploaded-patterns", json=payload).status_code == 400
+    assert client.post("/api/uploaded-patterns/preview", json=payload).status_code == 400
+
+
+def test_uploaded_pattern_never_activates_on_mixed_or_missing_firmware(tmp_path) -> None:
+    conductor = make_placed_conductor(3)
+    conductor._lanterns[1].firmware = {
+        "version": "0.9.4",
+        "proto": 11,
+        "build_id": 123,
+        "build_label": "0000007b",
+        "dirty": False,
+        "features": ["pond_ripple"],
+    }
+    client = TestClient(create_app(
+        conductor,
+        uploaded_pattern_store=UploadedPatternStore(tmp_path / "uploaded"),
+    ))
+    pattern_id = client.post(
+        "/api/uploaded-patterns",
+        json={"name": "Guarded wave", "brightness": 48, "program": DEFAULT_UPLOADED_PROGRAM},
+    ).json()["pattern"]["id"]
+    before = conductor.group_patterns[0].copy()
+
+    blocked = client.post(f"/api/uploaded-patterns/{pattern_id}/broadcast")
+
+    assert blocked.status_code == 409
+    assert "every placed lantern" in blocked.json()["detail"]
+    assert conductor.group_patterns[0] == before
+    assert conductor.uploaded_program_id == 0
+
+
+def test_direct_uploaded_activation_is_blocked_before_exact_program_verification() -> None:
+    conductor = make_placed_conductor(2)
+    client = TestClient(create_app(conductor))
+
+    blocked = client.post(
+        "/api/show/pattern",
+        json={
+            "pattern": "Uploaded Pattern",
+            "brightness": 48,
+            "params": {"p0": 1, "p1": 2, "p2": 0, "p3": 0},
+        },
+    )
+
+    assert blocked.status_code == 409
+    assert conductor.pattern["pattern"] == "Glow"
+
+
 def test_blackout_restore_endpoint_recovers_previous_group_brightness() -> None:
     conductor = MockConductor()
     conductor.update_pattern("White", 24, {}, group_id=0)
@@ -1599,6 +1997,89 @@ console.log(JSON.stringify({
     assert values["marker"]["top"] == pytest.approx(50)
 
 
+def test_pond_ripple_ui_packs_period_wavelength_and_center() -> None:
+    script = r'''
+const fs = require("fs");
+const src = fs.readFileSync("control/static/app.js", "utf8");
+eval(src.slice(0, src.indexOf("function isPatternDirty")));
+console.log(JSON.stringify(patternParams({
+  pattern: "Pond Ripple", brightness: 64,
+  period: 6000, wavelength: 50, centerX: 325, centerY: 675,
+})));
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == {
+        "p0": 6000,
+        "p1": 50,
+        "p2": 325,
+        "p3": 675,
+    }
+
+
+def test_pond_ripple_ui_requires_consistent_online_firmware_to_broadcast() -> None:
+    script = r'''
+const fs = require("fs");
+const src = fs.readFileSync("control/static/app.js", "utf8");
+eval(src.slice(0, src.indexOf("function renderPatternControls")) + `
+  state = {
+    conductor: {firmware: {features: ["pond_ripple"]}},
+    summary: {firmware: {consistent: false, matching: 7, seen: 8, expected: 9}},
+  };
+  const mixed = patternFirmwareReady("Pond Ripple");
+  state.summary.firmware = {consistent: true, matching: 0, seen: 0, expected: 0};
+  const empty = patternFirmwareReady("Pond Ripple");
+  state.summary.firmware = {consistent: true, matching: 9, seen: 9, expected: 9};
+  const reconciled = patternFirmwareReady("Pond Ripple");
+  state.conductor.firmware.features = [];
+  const oldFirmware = patternFirmwareReady("Pond Ripple");
+  const legacyPattern = patternFirmwareReady("Glow");
+  console.log(JSON.stringify({mixed, empty, reconciled, oldFirmware, legacyPattern}));
+`);
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == {
+        "mixed": False,
+        "empty": False,
+        "reconciled": True,
+        "oldFirmware": False,
+        "legacyPattern": True,
+    }
+
+
+def test_pond_ripple_preview_is_radial_and_moves_outward() -> None:
+    assert _pond_ripple_intensity(0, 0.5, 0.5, 6.0, 0.45, 0.5, 0.5) == pytest.approx(1.0)
+    assert _pond_ripple_intensity(0, 0.8, 0.5, 6.0, 0.45, 0.5, 0.5) == pytest.approx(
+        _pond_ripple_intensity(0, 0.5, 0.8, 6.0, 0.45, 0.5, 0.5)
+    )
+    travel_us = round(6.0 * 0.3 / 0.45 * 1_000_000)
+    assert _pond_ripple_intensity(
+        travel_us, 0.8, 0.5, 6.0, 0.45, 0.5, 0.5
+    ) == pytest.approx(1.0)
+
+
+def test_ocean_preview_keeps_dim_trough_lit_and_full_crest() -> None:
+    assert _ocean_swell_value(0.0) == pytest.approx(0.22)
+    assert _ocean_swell_value(1.0) == pytest.approx(1.0)
+
+    trough = _visible_hsv_color(8, 215, 0.98, _ocean_swell_value(0.0))
+    crest = _visible_hsv_color(8, 180, 0.28, _ocean_swell_value(1.0))
+    off = _visible_hsv_color(0, 215, 0.98, _ocean_swell_value(0.0))
+
+    assert sum((trough.r, trough.g, trough.b, trough.w)) == 1
+    assert sum((crest.r, crest.g, crest.b, crest.w)) > 1
+    assert sum((off.r, off.g, off.b, off.w)) == 0
+
+
 def test_fire_flicker_ui_packs_speed_color_value_and_texture_into_wire_params() -> None:
     script = r'''
 const fs = require("fs");
@@ -1759,6 +2240,30 @@ def test_preview_json_endpoint_returns_lantern_samples_and_metrics() -> None:
     assert len(first["rgbw"]) == 4
     assert len(first["rgb"]) == 3
     assert isinstance(first["luma"], float)
+
+
+def test_preview_json_endpoint_renders_pond_ripple_with_friendly_center_params() -> None:
+    client = TestClient(create_app(MockConductor()))
+
+    response = client.get(
+        "/preview.json",
+        params={
+            "pattern": "Pond Ripple",
+            "brightness": 64,
+            "period": 6000,
+            "wavelength": 50,
+            "center_x": 500,
+            "center_y": 500,
+            "t": 0,
+        },
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["pattern"] == "Pond Ripple"
+    assert body["params"]["center_x"] == 500
+    assert body["params"]["center_y"] == 500
+    assert body["metrics"]["contrast"] > 0
 
 
 def test_preview_json_endpoint_renders_white_channel_pattern() -> None:
@@ -2066,6 +2571,60 @@ def test_pattern_library_broadcast_updates_live_pattern(tmp_path) -> None:
     assert state["pattern"]["pattern"] == "Sweep"
     assert state["pattern"]["brightness"] == 64
     assert state["pattern"]["params"] == {"period": 8000, "spatial": 300}
+
+
+def test_saved_pond_ripple_broadcast_rejects_mixed_firmware(tmp_path) -> None:
+    conductor = make_placed_conductor(3)
+    conductor._lanterns[0].firmware = {
+        "version": "0.2.0",
+        "proto": 11,
+        "build_id": 0x12345678,
+        "build_label": "12345678",
+        "dirty": False,
+    }
+    client = TestClient(
+        create_app(conductor, pattern_store=PatternStore(tmp_path))
+    )
+    created = client.post(
+        "/api/patterns",
+        json={
+            "name": "Center Ripple",
+            "pattern": "Pond Ripple",
+            "brightness": 64,
+            "params": {"p0": 6000, "p1": 50, "p2": 500, "p3": 500},
+        },
+    )
+    pattern_id = created.json()["pattern"]["id"]
+
+    preview = client.get(f"/api/patterns/{pattern_id}/preview.json")
+    broadcast = client.post(f"/api/patterns/{pattern_id}/broadcast")
+
+    assert preview.status_code == 200
+    assert broadcast.status_code == 409
+    assert "Finish firmware reconciliation" in broadcast.json()["detail"]
+    assert conductor.pattern["pattern"] == "Glow"
+
+
+def test_saved_numeric_pattern_alias_cannot_bypass_firmware_gate(tmp_path) -> None:
+    conductor = MockConductor()
+    client = TestClient(
+        create_app(conductor, pattern_store=PatternStore(tmp_path))
+    )
+    created = client.post(
+        "/api/patterns",
+        json={
+            "name": "Numeric ripple",
+            "pattern": "0012",
+            "brightness": 64,
+            "params": {"p0": 6000, "p1": 50, "p2": 500, "p3": 500},
+        },
+    )
+    pattern_id = created.json()["pattern"]["id"]
+
+    broadcast = client.post(f"/api/patterns/{pattern_id}/broadcast")
+
+    assert broadcast.status_code == 409
+    assert conductor.pattern["pattern"] == "Glow"
 
 
 def test_pattern_library_broadcast_can_target_one_group(tmp_path) -> None:

@@ -5,8 +5,10 @@ broadcast show patterns for Do Baskets Dream.
 
 This is a control-plane workflow for the current compiled pattern vocabulary:
 `Pulse`, `Glow`, `Sweep`, `Wavefront`, `Palette Drift`, `Firefly`, `Ocean Wave`,
-`Fire Flicker`, and `Fire2012`. It does
-not create arbitrary new firmware pattern functions. New C++ pattern functions
+`Pond Ripple`, `Fire Flicker`, and `Fire2012`. The separate `Uploaded Pattern`
+option accepts bounded JSON
+expressions for new `f(x,y,pixel,t)` looks without another firmware update. It
+does not load native code or change compiled pattern functions; new C++ built-ins
 still belong in `include/pattern_math.h` with host tests.
 
 ## Preconditions
@@ -130,7 +132,9 @@ firmware places them in the right slots.
 
 `Ocean Wave` is a soft 2-D swell of light rolling across the field — a sum of
 three traveling sine wavefronts (dispersion-detuned so it never quite repeats),
-deep blue in the troughs with foam-capped cyan-white crests. Also **positional**:
+dim deep blue in the troughs with foam-capped cyan-white crests. A non-black
+Ocean config always retains at least the minimum visible PWM level between
+crests instead of switching its LEDs fully off. Also **positional**:
 
 - `p0` = primary swell period in ms (a crest crosses the field), default 9000.
 - `p1` = wavelength ×100 (coord units); ~100 (=1.0) keeps 1-2 crests on the field
@@ -183,6 +187,80 @@ reproducible across preview, restart, and dropped-beacon free-running.
 
 Preview/review also accept the friendly names `speed`, `cooling`, and
 `sparking`. A live broadcast or saved candidate should use `p0..p3`.
+
+`Pond Ripple`
+
+```json
+{"pattern":"Pond Ripple","brightness":64,"params":{"p0":6000,"p1":50,"p2":500,"p3":500}}
+```
+
+`Pond Ripple` emits repeating concentric cyan-water crests from a selected field
+point. Its controls are positional on the live wire:
+
+- `p0` = period between rings in ms, default 6000.
+- `p1` = wavelength ×100 in normalized field-coordinate units, default 50.
+- `p2` = center X ×1000, default 500 (the field midpoint).
+- `p3` = center Y ×1000, default 500 (the field midpoint).
+
+Preview/review also accept `period`, `wavelength`, `center_x`, and `center_y`.
+Live broadcasts and saved candidates should use `p0..p3`.
+
+## Uploaded Pattern Programs
+
+An uploaded program has four outputs: hue in cycles, saturation, perceptual
+value, and intensity. Each output may be a finite number, an input (`x`, `y`,
+`time`, or normalized `pixel`), or an operation object. Firmware supports
+`add`, `sub`, `mul`, `div`, `min`, `max`, `pow`, `sin`, `cos`, `abs`, `fract`,
+`clamp`, `neg`, `sqrt`, `hash`, `floor`, `mix`, and `smoothstep`; the compiler
+also expands the friendly `wave` and `distance` operations.
+
+```json
+{
+  "hue": 0.56,
+  "saturation": 0.9,
+  "value": {
+    "op": "mix",
+    "args": [0.2, 1.0, {
+      "op": "wave",
+      "args": [{"op": "add", "args": ["x", {"op": "mul", "args": ["time", 0.12]}]}]
+    }]
+  },
+  "intensity": 1.0
+}
+```
+
+Validate and preview against the positioned inventory without changing the field:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/uploaded-patterns/preview \
+  -H 'content-type: application/json' \
+  -d '{"name":"Blue wave","brightness":56,"program":{"hue":0.56,"saturation":0.9,"value":{"op":"wave","args":[{"op":"add","args":["x",{"op":"mul","args":["time",0.12]}]}]},"intensity":1}}'
+```
+
+An editor draft can be broadcast without saving it as a named pattern:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/uploaded-patterns/broadcast \
+  -H 'content-type: application/json' \
+  -d '{"name":"Blue wave","brightness":56,"program":{"hue":0.56,"saturation":0.9,"value":{"op":"wave","args":[{"op":"add","args":["x",{"op":"mul","args":["time",0.12]}]}]},"intensity":1}}'
+```
+
+To retain it, save the same payload with `POST /api/uploaded-patterns`, list it
+with `GET /api/uploaded-patterns`, then broadcast the returned ID only after user
+approval:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/uploaded-patterns/blue-wave/broadcast
+```
+
+Broadcast is transactional from the show's perspective: it first requires every
+placed lantern online on the exact interpreter-capable firmware, distributes and
+verifies the exact 64-bit BLAKE2s-addressed program everywhere, and only then changes the
+selected pattern. A timeout or mixed fleet leaves the existing pattern active.
+The conductor repeats this barrier independently, so bypassing the UI cannot
+activate a partially distributed program. Readiness reports include exact firmware
+identity and must postdate the node's latest registration, so a reboot or rollback
+cannot reuse a stale acknowledgement.
 
 ## Draft Review Loop
 

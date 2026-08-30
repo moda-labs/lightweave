@@ -16,6 +16,7 @@ enum PerformerTxPurpose : uint8_t {
   PERFORMER_TX_POWER,
   PERFORMER_TX_OTA_STATUS,
   PERFORMER_TX_RELAY_ACK,
+  PERFORMER_TX_PROGRAM_STATUS,
 };
 
 struct PerformerTxState {

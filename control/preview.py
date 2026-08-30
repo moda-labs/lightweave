@@ -498,6 +498,8 @@ def _normalize_pattern(pattern: str) -> str:
         "hotaru": "firefly",
         "ocean wave": "ocean_wave",
         "ocean": "ocean_wave",
+        "pond ripple": "pond_ripple",
+        "ripple": "pond_ripple",
         "fire flicker": "fire_flicker",
         "fire": "fire_flicker",
         "flame": "fire_flicker",
@@ -603,12 +605,27 @@ def _pattern_color(pattern: str, brightness: int, params: dict[str, Any], synced
         n = _ocean_intensity(synced_us, x, y, period_s, wavelength, angle_rad)
         foam = max(0.0, min(1.0, (n - 0.72) / 0.28))
         foam *= foam
-        value = base_value * (0.14 + 0.86 * (n ** 1.3))
+        value = _ocean_swell_value(n, base_value)
         hue = (hue_base + 10.0 - 27.0 * n - 8.0 * foam) / 360.0
         saturation = min(1.0, max(0.0, ((0.98 - 0.15 * n) - 0.70 * foam) * base_saturation))
         if not full_hsv:
             saturation = max(0.06, saturation)
-        return _hsv_color(brightness, 1.0, hue * 360.0, saturation, value)
+        return _visible_hsv_color(
+            brightness, hue * 360.0, saturation, value
+        )
+    if pattern == "pond_ripple":
+        period_s = _number(params, "p0", "period", default=6000) / 1000.0
+        wavelength = _number(params, "p1", "wavelength", default=50) / 100.0
+        center_x = _number(params, "p2", "center_x", default=500) / 1000.0
+        center_y = _number(params, "p3", "center_y", default=500) / 1000.0
+        crest = _pond_ripple_intensity(
+            synced_us, x, y, period_s, wavelength, center_x, center_y
+        )
+        foam = crest * crest
+        hue = 207.0 - 20.0 * crest
+        saturation = 0.96 - 0.58 * foam
+        value = 0.08 + 0.92 * (crest ** 1.15)
+        return _hsv_color(brightness, 1.0, hue, saturation, value)
     raise ValueError(f"unknown pattern: {pattern}")
 
 
@@ -1303,6 +1320,33 @@ def _ocean_intensity(synced_us: int, x: float, y: float, period_s: float, wavele
     return max(0.0, min(1.0, n))
 
 
+def _ocean_swell_value(intensity: float, base_value: float = 1.0) -> float:
+    intensity = max(0.0, min(1.0, intensity))
+    base_value = max(0.0, min(1.0, base_value))
+    trough_value = 0.22
+    return base_value * (
+        trough_value + (1.0 - trough_value) * (intensity ** 1.3)
+    )
+
+
+def _pond_ripple_intensity(
+    synced_us: int,
+    x: float,
+    y: float,
+    period_s: float,
+    wavelength: float,
+    center_x: float,
+    center_y: float,
+) -> float:
+    period_s = period_s if period_s > 0 else 6.0
+    wavelength = wavelength if wavelength > 0 else 0.50
+    radius = math.hypot(x - center_x, y - center_y)
+    phase = (synced_us / 1_000_000.0) / period_s - radius / wavelength
+    phase -= math.floor(phase)
+    broad = 0.5 * (1.0 + math.cos(2.0 * math.pi * phase))
+    return max(0.0, min(1.0, broad * broad * broad))
+
+
 def _drift_hue(synced_us: int, x: float, period_s: float, spatial: float) -> float:
     if period_s <= 0:
         raise ValueError("period must be positive")
@@ -1333,6 +1377,28 @@ def _hsv_color(
         round((b - w) * scale),
         round(w * scale),
     )
+
+
+def _visible_hsv_color(
+    brightness: int,
+    hue_degrees: float,
+    saturation: float,
+    value: float,
+) -> Rgbw:
+    color = _hsv_color(brightness, 1.0, hue_degrees, saturation, value)
+    if brightness <= 0 or value <= 0 or any((color.r, color.g, color.b, color.w)):
+        return color
+
+    r, g, b = _hsv_to_rgb(hue_degrees / 360.0, saturation, value)
+    channels = [_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b)]
+    white_mix = 1.0 - min(max(saturation, 0.0) / 0.05, 1.0)
+    white = min(channels) * white_mix
+    channels = [channel - white for channel in channels] + [white]
+    if max(channels) <= 0:
+        return color
+    visible = [0, 0, 0, 0]
+    visible[channels.index(max(channels))] = 1
+    return Rgbw(*visible)
 
 
 def _srgb_to_linear(value: float) -> float:

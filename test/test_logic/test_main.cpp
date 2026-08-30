@@ -29,6 +29,7 @@
 #include "serial_json.h"
 #include "table.h"
 #include "table_wire.h"
+#include "uploaded_pattern.h"
 
 // ---- Sync: locking & offset --------------------------------------------------
 
@@ -829,6 +830,72 @@ void test_ocean_angle_changes_propagation() {
   TEST_ASSERT_TRUE(fabsf(a - b) > 0.02f);
 }
 
+void test_ocean_swell_value_keeps_a_dim_floor_and_full_crest() {
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.22f, pmath::oceanSwellValue(0.0f));
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, pmath::oceanSwellValue(1.0f));
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.11f,
+                           pmath::oceanSwellValue(0.0f, 0.5f));
+  TEST_ASSERT_TRUE(pmath::oceanSwellValue(0.75f) >
+                   pmath::oceanSwellValue(0.25f));
+}
+
+void test_ocean_trough_survives_low_brightness_quantization() {
+  pmath::RgbwUnit trough = pmath::hsvToRgbw(
+      215.0f / 360.0f, 0.98f, pmath::oceanSwellValue(0.0f), 1.0f);
+  pmath::RgbwUnit visible = pmath::oceanEnsureVisible(trough, 8);
+  uint16_t pwm_total =
+      (uint16_t)lroundf(visible.r * 8) +
+      (uint16_t)lroundf(visible.g * 8) +
+      (uint16_t)lroundf(visible.b * 8) +
+      (uint16_t)lroundf(visible.w * 8);
+  TEST_ASSERT_EQUAL_UINT16(1, pwm_total);
+
+  pmath::RgbwUnit black = pmath::oceanEnsureVisible({0, 0, 0, 0}, 8);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, black.r + black.g + black.b + black.w);
+}
+
+// ---- Pond ripple ----------------------------------------------------------
+
+void test_pond_ripple_stays_in_unit_range() {
+  for (int64_t us = 0; us < 20'000'000; us += 47'000)
+    for (float x = 0.0f; x <= 1.0f; x += 0.17f)
+      for (float y = 0.0f; y <= 1.0f; y += 0.23f) {
+        float n = pmath::pondRippleIntensity(
+            us, x, y, 6.0f, 0.45f, 0.5f, 0.5f);
+        TEST_ASSERT_TRUE(n >= 0.0f && n <= 1.0f);
+      }
+}
+
+void test_pond_ripple_is_radially_symmetric() {
+  const int64_t t = 1'730'000;
+  float right = pmath::pondRippleIntensity(t, 0.8f, 0.5f, 6.0f, 0.45f, 0.5f, 0.5f);
+  float left = pmath::pondRippleIntensity(t, 0.2f, 0.5f, 6.0f, 0.45f, 0.5f, 0.5f);
+  float down = pmath::pondRippleIntensity(t, 0.5f, 0.8f, 6.0f, 0.45f, 0.5f, 0.5f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, right, left);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, right, down);
+}
+
+void test_pond_ripple_crest_moves_outward() {
+  const float period = 6.0f, wavelength = 0.45f, distance = 0.3f;
+  int64_t travel_us = (int64_t)(period * distance / wavelength * 1e6f);
+  float center_now = pmath::pondRippleIntensity(
+      0, 0.5f, 0.5f, period, wavelength, 0.5f, 0.5f);
+  float outer_later = pmath::pondRippleIntensity(
+      travel_us, 0.8f, 0.5f, period, wavelength, 0.5f, 0.5f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 1.0f, center_now);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, center_now, outer_later);
+}
+
+void test_pond_ripple_center_is_live_tunable() {
+  const int64_t t = 0;
+  float at_selected_center = pmath::pondRippleIntensity(
+      t, 0.2f, 0.8f, 6.0f, 0.45f, 0.2f, 0.8f);
+  float halfway_to_next_ring = pmath::pondRippleIntensity(
+      t, 0.425f, 0.8f, 6.0f, 0.45f, 0.2f, 0.8f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 1.0f, at_selected_center);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.0f, halfway_to_next_ring);
+}
+
 // ---- Roster: conductor's MAC-keyed node list --------------------------------
 
 // Distinct MAC per index, so tests can fabricate nodes cheaply.
@@ -1059,6 +1126,14 @@ void test_firmware_fleet_consistency_requires_every_seen_node_to_match() {
 
   TEST_ASSERT_TRUE(firmwareFleetConsistent(expected, matching, 2));
   TEST_ASSERT_FALSE(firmwareFleetConsistent(expected, mixed, 2));
+}
+
+void test_firmware_fleet_readiness_requires_every_placed_node_online_and_matching() {
+  TEST_ASSERT_TRUE(firmwareFleetReady(2, 2, 2));
+  TEST_ASSERT_FALSE(firmwareFleetReady(0, 0, 0));
+  TEST_ASSERT_FALSE(firmwareFleetReady(2, 1, 1));
+  TEST_ASSERT_FALSE(firmwareFleetReady(2, 2, 1));
+  TEST_ASSERT_FALSE(firmwareFleetReady(2, 3, 2));
 }
 
 void test_power_policy_window_handles_daytime_and_overnight_ranges() {
@@ -2539,6 +2614,23 @@ void test_serial_json_wavefront_maps_pattern_name_and_controls() {
   TEST_ASSERT_EQUAL_UINT16(200, cmd.params[3]);
 }
 
+void test_serial_json_pond_ripple_maps_pattern_name_and_positional_params() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":13,\"cmd\":\"pattern\",\"pattern\":\"Pond Ripple\","
+      "\"brightness\":64,\"params\":{\"p0\":6000,\"p1\":50,"
+      "\"p2\":500,\"p3\":500}}",
+      cmd, error));
+
+  TEST_ASSERT_EQUAL_UINT16(patterns::POND_RIPPLE, cmd.pattern_id);
+  TEST_ASSERT_EQUAL_UINT16(6000, cmd.params[0]);
+  TEST_ASSERT_EQUAL_UINT16(50, cmd.params[1]);
+  TEST_ASSERT_EQUAL_UINT16(500, cmd.params[2]);
+  TEST_ASSERT_EQUAL_UINT16(500, cmd.params[3]);
+}
+
 void test_serial_json_calibration_maps_params() {
   SerialJsonCommand cmd;
   const char* error = nullptr;
@@ -3048,9 +3140,71 @@ void test_stable_transport_packets_fit_espnow() {
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(RosterMsg));
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(BeaconMsg));
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(OtaChunkMsg));
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(ProgramInstallMsg));
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(ProgramQueryMsg));
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(250, sizeof(ProgramStatusMsg));
+  TEST_ASSERT_FALSE(programInstallMsgLenPlausible(
+      (int)offsetof(ProgramInstallMsg, data)));
+  TEST_ASSERT_TRUE(programInstallMsgLenPlausible(
+      (int)offsetof(ProgramInstallMsg, data) + 1));
+  TEST_ASSERT_TRUE(programInstallMsgLenPlausible(sizeof(ProgramInstallMsg)));
+  TEST_ASSERT_FALSE(programInstallMsgLenPlausible(
+      sizeof(ProgramInstallMsg) + 1));
+  TEST_ASSERT_TRUE(programInstallMsgLenValid(
+      (int)offsetof(ProgramInstallMsg, data) + 12, 12));
+  TEST_ASSERT_FALSE(programInstallMsgLenValid(
+      (int)offsetof(ProgramInstallMsg, data) + 13, 12));
   TEST_ASSERT_EQUAL_UINT8(4, relayTargetCopies(MSG_OTA_BEGIN));
   TEST_ASSERT_EQUAL_UINT8(2, relayTargetCopies(MSG_OTA_CHUNK));
+  TEST_ASSERT_EQUAL_UINT8(3, relayTargetCopies(MSG_PROGRAM_INSTALL));
   TEST_ASSERT_EQUAL_UINT8(4, relayTargetCopies(MSG_OTA_END));
+}
+
+void test_existing_pattern_wire_ids_are_never_renumbered() {
+  TEST_ASSERT_EQUAL_UINT16(0, patterns::PULSE);
+  TEST_ASSERT_EQUAL_UINT16(1, patterns::PALETTE_DRIFT);
+  TEST_ASSERT_EQUAL_UINT16(2, patterns::SWEEP);
+  TEST_ASSERT_EQUAL_UINT16(3, patterns::SOLID);
+  TEST_ASSERT_EQUAL_UINT16(4, patterns::GLOW);
+  TEST_ASSERT_EQUAL_UINT16(5, patterns::CALIBRATION);
+  TEST_ASSERT_EQUAL_UINT16(6, patterns::FIREFLY);
+  TEST_ASSERT_EQUAL_UINT16(7, patterns::OCEAN_WAVE);
+  TEST_ASSERT_EQUAL_UINT16(8, patterns::WHITE);
+  TEST_ASSERT_EQUAL_UINT16(9, patterns::FIRE_FLICKER);
+  TEST_ASSERT_EQUAL_UINT16(10, patterns::FIRE2012);
+  TEST_ASSERT_EQUAL_UINT16(11, patterns::WAVEFRONT);
+  TEST_ASSERT_EQUAL_UINT16(12, patterns::POND_RIPPLE);
+  TEST_ASSERT_EQUAL_UINT16(13, patterns::UPLOADED);
+}
+
+void test_new_pattern_ids_fall_back_when_firmware_mismatches() {
+  TEST_ASSERT_TRUE(patterns::patternNeedsCurrentFirmware(patterns::POND_RIPPLE));
+  TEST_ASSERT_TRUE(patterns::patternNeedsCurrentFirmware(patterns::UPLOADED));
+  TEST_ASSERT_FALSE(patterns::patternNeedsCurrentFirmware(patterns::GLOW));
+  TEST_ASSERT_EQUAL_UINT16(
+      patterns::GLOW,
+      patterns::patternAfterFirmwareMismatch(patterns::POND_RIPPLE));
+  TEST_ASSERT_EQUAL_UINT16(
+      patterns::GLOW,
+      patterns::patternAfterFirmwareMismatch(patterns::UPLOADED));
+  TEST_ASSERT_EQUAL_UINT16(
+      patterns::OCEAN_WAVE,
+      patterns::patternAfterFirmwareMismatch(patterns::OCEAN_WAVE));
+  TEST_ASSERT_TRUE(patterns::patternMismatchRequiresFallback(true, false));
+  TEST_ASSERT_FALSE(patterns::patternMismatchRequiresFallback(true, true));
+  TEST_ASSERT_FALSE(patterns::patternMismatchRequiresFallback(false, false));
+  TEST_ASSERT_TRUE(patterns::patternBrightnessRequiresReadiness(
+      patterns::UPLOADED, 1));
+  TEST_ASSERT_TRUE(patterns::patternBrightnessRequiresReadiness(
+      patterns::POND_RIPPLE, 192));
+  TEST_ASSERT_FALSE(patterns::patternBrightnessRequiresReadiness(
+      patterns::UPLOADED, 0));
+  TEST_ASSERT_FALSE(patterns::patternBrightnessRequiresReadiness(
+      patterns::GLOW, 192));
+  TEST_ASSERT_FALSE(
+      patterns::patternParamsMayChangeDirectly(patterns::UPLOADED));
+  TEST_ASSERT_TRUE(patterns::patternParamsMayChangeDirectly(
+      patterns::POND_RIPPLE));
 }
 
 void test_performer_parent_is_sticky_then_fails_over_for_same_primary() {
@@ -3350,6 +3504,340 @@ void test_v11_relay_forwards_future_application_protocol_registration() {
       routePrimaryReceiveValid(primary, relay, true, forwarded.hdr));
 }
 
+static void uploadedEmit(UploadedProgram& program, uint8_t opcode) {
+  program.data[program.length++] = opcode;
+}
+
+static void uploadedEmitConst(UploadedProgram& program, float value) {
+  uploadedEmit(program, UOP_CONST);
+  memcpy(program.data + program.length, &value, sizeof(value));
+  program.length += sizeof(value);
+}
+
+static UploadedProgram uploadedWaveFixture() {
+  UploadedProgram program = {};
+  program.version = UPLOADED_VM_VERSION;
+  // H = 0.55, S = 0.9, V = mix(0.2, 1, (sin(x + t*0.25)+1)/2), I = 1.
+  uploadedEmitConst(program, 0.55f);
+  uploadedEmitConst(program, 0.9f);
+  uploadedEmitConst(program, 0.2f);
+  uploadedEmitConst(program, 1.0f);
+  uploadedEmit(program, UOP_X);
+  uploadedEmit(program, UOP_TIME);
+  uploadedEmitConst(program, 0.25f);
+  uploadedEmit(program, UOP_MUL);
+  uploadedEmit(program, UOP_ADD);
+  uploadedEmit(program, UOP_SIN);
+  uploadedEmitConst(program, 1.0f);
+  uploadedEmit(program, UOP_ADD);
+  uploadedEmitConst(program, 0.5f);
+  uploadedEmit(program, UOP_MUL);
+  uploadedEmit(program, UOP_MIX);
+  uploadedEmitConst(program, 1.0f);
+  program.id = uploadedProgramId(program.version, program.data, program.length);
+  return program;
+}
+
+void test_uploaded_program_validates_and_executes_bounded_wave() {
+  UploadedProgram program = uploadedWaveFixture();
+  // Golden BLAKE2s identity locks the dependency-free firmware implementation.
+  TEST_ASSERT_EQUAL_UINT64(0x9B49FDB41BC0A22DULL, program.id);
+  bool uses_time = false;
+  uint8_t instructions = 0;
+  TEST_ASSERT_TRUE(uploadedProgramInspect(program, &uses_time, &instructions));
+  TEST_ASSERT_TRUE(uses_time);
+  TEST_ASSERT_TRUE(instructions <= UPLOADED_PROGRAM_MAX_INSTRUCTIONS);
+
+  UploadedVmOutput a = uploadedProgramRun(program, 0, 0.0f, 0.0f, 0, 16);
+  UploadedVmOutput b = uploadedProgramRun(program, 1'000'000, 0.0f, 0.0f, 0, 16);
+  TEST_ASSERT_TRUE(a.ok);
+  TEST_ASSERT_TRUE(b.ok);
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.55f, a.hue);
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.9f, a.saturation);
+  TEST_ASSERT_TRUE(a.value >= 0.2f && a.value <= 1.0f);
+  TEST_ASSERT_TRUE(b.value >= 0.2f && b.value <= 1.0f);
+  TEST_ASSERT_NOT_EQUAL(a.value, b.value);
+}
+
+void test_uploaded_program_rejects_bad_crc_stack_and_opcode() {
+  UploadedProgram program = uploadedWaveFixture();
+  program.id ^= 1;
+  TEST_ASSERT_FALSE(uploadedProgramValid(program));
+
+  program = {};
+  program.version = UPLOADED_VM_VERSION;
+  uploadedEmit(program, UOP_ADD);
+  program.id = uploadedProgramId(program.version, program.data, program.length);
+  TEST_ASSERT_FALSE(uploadedProgramValid(program));
+
+  program = {};
+  program.version = UPLOADED_VM_VERSION;
+  uploadedEmit(program, 0xFF);
+  program.id = uploadedProgramId(program.version, program.data, program.length);
+  TEST_ASSERT_FALSE(uploadedProgramValid(program));
+}
+
+void test_uploaded_program_rejects_excessive_execution_cost() {
+  UploadedProgram program = {};
+  program.version = UPLOADED_VM_VERSION;
+  uploadedEmit(program, UOP_X);
+  for (uint8_t i = 0; i < 20; i++) uploadedEmit(program, UOP_SIN);
+  uploadedEmitConst(program, 1.0f);
+  uploadedEmitConst(program, 1.0f);
+  uploadedEmitConst(program, 1.0f);
+  program.id = uploadedProgramId(program.version, program.data, program.length);
+  TEST_ASSERT_FALSE(uploadedProgramValid(program));
+}
+
+void test_uploaded_program_sanitizes_ternary_overflow() {
+  UploadedProgram program = {};
+  program.version = UPLOADED_VM_VERSION;
+  uploadedEmitConst(program, -3.0e38f);
+  uploadedEmitConst(program, 3.0e38f);
+  uploadedEmitConst(program, 0.5f);
+  uploadedEmit(program, UOP_MIX);
+  uploadedEmitConst(program, 1.0f);
+  uploadedEmitConst(program, 1.0f);
+  uploadedEmitConst(program, 1.0f);
+  program.id = uploadedProgramId(program.version, program.data, program.length);
+  TEST_ASSERT_TRUE(uploadedProgramValid(program));
+
+  UploadedVmOutput output = uploadedProgramRun(program, 0, 0, 0, 0, 16);
+  TEST_ASSERT_TRUE(output.ok);
+  TEST_ASSERT_TRUE(isfinite(output.hue));
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, output.hue);
+  TEST_ASSERT_FALSE(uploadedProgramUsesTimeValidated(program));
+}
+
+void test_uploaded_program_matches_control_float32_trig_golden() {
+  UploadedProgram program = {};
+  program.version = UPLOADED_VM_VERSION;
+  uploadedEmitConst(program, 1'000'000.0f);
+  uploadedEmit(program, UOP_SIN);
+  uploadedEmitConst(program, 1'000'000.0f);
+  uploadedEmit(program, UOP_COS);
+  uploadedEmitConst(program, 1'000'000.0f);
+  uploadedEmit(program, UOP_SIN);
+  uploadedEmitConst(program, 1.0f);
+  uploadedEmit(program, UOP_ADD);
+  uploadedEmitConst(program, 0.5f);
+  uploadedEmit(program, UOP_MUL);
+  uploadedEmitConst(program, 1.0f);
+  program.id = uploadedProgramId(program.version, program.data, program.length);
+
+  TEST_ASSERT_EQUAL_UINT64(0xBD154A269010422AULL, program.id);
+  UploadedVmOutput output = uploadedProgramRun(program, 0, 0, 0, 0, 16);
+  TEST_ASSERT_TRUE(output.ok);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.1916278f, output.hue);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.9814677f, output.saturation);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.5958139f, output.value);
+}
+
+void test_uploaded_identity_matches_control_at_blake2s_block_boundary() {
+  const uint8_t exactly_one_block[] = {
+      0x01,0xcd,0xcc,0xcc,0x3d,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,
+      0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x01,
+      0xcd,0xcc,0xcc,0x3d,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,
+      0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,
+      0x01,0x00,0x00,0x80,0x3f,0x01,0x00,0x00,0x80,0x3f};
+  const uint8_t crosses_block[] = {
+      0x01,0xcd,0xcc,0xcc,0x3d,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,
+      0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x22,
+      0x01,0xcd,0xcc,0xcc,0x3d,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,
+      0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,0x10,0x02,
+      0x10,0x01,0x00,0x00,0x80,0x3f,0x01,0x00,0x00,0x80,0x3f};
+
+  TEST_ASSERT_EQUAL_UINT8(62, sizeof(exactly_one_block));
+  TEST_ASSERT_EQUAL_UINT64(
+      0xD6F10D2541758792ULL,
+      uploadedProgramIdentity(UPLOADED_VM_VERSION, exactly_one_block,
+                              sizeof(exactly_one_block)));
+  TEST_ASSERT_EQUAL_UINT8(63, sizeof(crosses_block));
+  TEST_ASSERT_EQUAL_UINT64(
+      0x7CA2B0C24FBECD73ULL,
+      uploadedProgramIdentity(UPLOADED_VM_VERSION, crosses_block,
+                              sizeof(crosses_block)));
+}
+
+void test_uploaded_identity_distinguishes_known_crc32_collision() {
+  const uint8_t first[] = {
+      0x01,0xf1,0x09,0x2f,0xc4,0x01,0xe4,0x40,0x94,0x41,0x10,0x01,0x00,
+      0x00,0x80,0x3f,0x01,0x00,0x00,0x80,0x3f,0x01,0x00,0x00,0x80,0x3f};
+  const uint8_t second[] = {
+      0x01,0x40,0x98,0xad,0xc3,0x01,0xa8,0xbe,0x3f,0xc4,0x10,0x01,0x00,
+      0x00,0x80,0x3f,0x01,0x00,0x00,0x80,0x3f,0x01,0x00,0x00,0x80,0x3f};
+  const uint8_t prefix[] = {UPLOADED_VM_VERSION, sizeof(first)};
+  TEST_ASSERT_EQUAL_HEX32(
+      uploadedCrc32Update(uploadedCrc32Update(0, prefix, sizeof(prefix)),
+                          first, sizeof(first)),
+      uploadedCrc32Update(uploadedCrc32Update(0, prefix, sizeof(prefix)),
+                          second, sizeof(second)));
+  TEST_ASSERT_NOT_EQUAL(
+      uploadedProgramIdentity(UPLOADED_VM_VERSION, first, sizeof(first)),
+      uploadedProgramIdentity(UPLOADED_VM_VERSION, second, sizeof(second)));
+}
+
+void test_uploaded_program_double_buffer_preserves_active_slot() {
+  UploadedProgramSlots slots;
+  uploadedProgramSlotsInit(slots);
+  UploadedProgram first = uploadedWaveFixture();
+  uint8_t changed = UINT8_MAX;
+  TEST_ASSERT_TRUE(uploadedProgramInstall(slots, first, 0, &changed));
+  TEST_ASSERT_EQUAL_UINT8(0, changed);
+
+  UploadedProgram second = first;
+  second.data[4] ^= 1;
+  second.id = uploadedProgramId(second.version, second.data, second.length);
+  TEST_ASSERT_TRUE(uploadedProgramInstall(slots, second, first.id, &changed));
+  TEST_ASSERT_EQUAL_UINT8(1, changed);
+  TEST_ASSERT_TRUE(uploadedProgramFind(slots, first.id) >= 0);
+  TEST_ASSERT_TRUE(uploadedProgramFind(slots, second.id) >= 0);
+}
+
+void test_uploaded_program_staging_preserves_all_active_group_programs() {
+  UploadedProgramSlots slots;
+  uploadedProgramSlotsInit(slots);
+  uint64_t active_ids[GROUP_COUNT] = {0};
+  for (uint8_t i = 0; i < GROUP_COUNT; i++) {
+    UploadedProgram program = uploadedWaveFixture();
+    program.data[4] = i;
+    program.id = uploadedProgramId(program.version, program.data, program.length);
+    TEST_ASSERT_TRUE(uploadedProgramInstallPreserving(
+        slots, program, active_ids, i, nullptr));
+    active_ids[i] = program.id;
+  }
+
+  UploadedProgram replacement = uploadedWaveFixture();
+  replacement.data[4] = GROUP_COUNT;
+  replacement.id = uploadedProgramId(
+      replacement.version, replacement.data, replacement.length);
+  uint8_t changed = UINT8_MAX;
+  TEST_ASSERT_TRUE(uploadedProgramInstallPreserving(
+      slots, replacement, active_ids, GROUP_COUNT, &changed));
+  TEST_ASSERT_EQUAL_UINT8(GROUP_COUNT, changed);
+  for (uint8_t i = 0; i < GROUP_COUNT; i++)
+    TEST_ASSERT_TRUE(uploadedProgramFind(slots, active_ids[i]) >= 0);
+
+  uint64_t all_active[UPLOADED_PROGRAM_SLOTS] = {0};
+  for (uint8_t i = 0; i < UPLOADED_PROGRAM_SLOTS; i++)
+    all_active[i] = slots.slots[i].id;
+  UploadedProgram no_room = replacement;
+  no_room.data[4]++;
+  no_room.id = uploadedProgramId(no_room.version, no_room.data, no_room.length);
+  TEST_ASSERT_FALSE(uploadedProgramInstallPreserving(
+      slots, no_room, all_active, UPLOADED_PROGRAM_SLOTS, nullptr));
+}
+
+void test_uploaded_status_requires_exact_fresh_capability_and_program() {
+  UploadedProgramStatusTable table;
+  uploadedStatusInit(table);
+  const uint8_t mac[6] = {1, 2, 3, 4, 5, 6};
+  FirmwareVersion firmware = currentFirmwareVersion(PROTO_VERSION);
+  FirmwareVersion other = firmware;
+  other.build_id++;
+  TEST_ASSERT_TRUE(uploadedStatusUpsert(table, mac, UPLOADED_VM_VERSION,
+                                        0x1234, true, firmware, 100));
+  TEST_ASSERT_TRUE(uploadedStatusReady(table, mac, 0x1234, firmware, 100));
+  TEST_ASSERT_FALSE(uploadedStatusReady(table, mac, 0x9999, firmware, 100));
+  TEST_ASSERT_FALSE(uploadedStatusReady(table, mac, 0x1234, other, 100));
+  TEST_ASSERT_FALSE(uploadedStatusReady(table, mac, 0x1234, firmware, 101));
+  uploadedStatusInvalidate(table, mac);
+  TEST_ASSERT_FALSE(uploadedStatusReady(table, mac, 0x1234, firmware, 0));
+  TEST_ASSERT_TRUE(uploadedStatusUpsert(
+      table, mac, 0, 0x1234, true, firmware, 300));
+  TEST_ASSERT_FALSE(uploadedStatusReady(table, mac, 0x1234, firmware, 0));
+}
+
+void test_uploaded_status_retries_are_spread_backed_off_and_radio_bounded() {
+  UploadedStatusTxSchedule schedule;
+  uploadedStatusScheduleInit(schedule);
+  const uint8_t mac[6] = {1, 2, 3, 4, 5, 6};
+  uploadedStatusScheduleRequest(schedule, 100, mac);
+  TEST_ASSERT_TRUE(schedule.pending);
+  TEST_ASSERT_TRUE(schedule.next_us >= 100);
+  TEST_ASSERT_TRUE(schedule.next_us <=
+                   100 + UPLOADED_STATUS_INITIAL_SPREAD_US);
+  TEST_ASSERT_FALSE(uploadedStatusScheduleDue(schedule, schedule.next_us - 1));
+  TEST_ASSERT_TRUE(uploadedStatusScheduleDue(schedule, schedule.next_us));
+  TEST_ASSERT_TRUE(uploadedProgramHoldsRadio(false, schedule, 100));
+  TEST_ASSERT_FALSE(uploadedProgramHoldsRadio(
+      false, schedule, 100 + UPLOADED_STATUS_HOLD_US));
+  TEST_ASSERT_TRUE(uploadedStatusScheduleExpired(
+      schedule, 100 + UPLOADED_STATUS_HOLD_US));
+  TEST_ASSERT_FALSE(uploadedStatusScheduleDue(
+      schedule, 100 + UPLOADED_STATUS_HOLD_US));
+
+  int64_t failed_at = schedule.next_us;
+  uploadedStatusScheduleResult(schedule, failed_at, mac, false);
+  TEST_ASSERT_TRUE(schedule.next_us > failed_at);
+  TEST_ASSERT_FALSE(uploadedStatusScheduleDue(schedule, failed_at));
+  uploadedStatusScheduleResult(schedule, schedule.next_us, mac, true);
+  TEST_ASSERT_FALSE(schedule.pending);
+}
+
+void test_uploaded_repair_skips_inactive_and_mismatched_targets() {
+  TEST_ASSERT_EQUAL(UPLOADED_REPAIR_NONE,
+      uploadedRepairAction(false, false, true, false, false));
+  TEST_ASSERT_EQUAL(UPLOADED_REPAIR_NONE,
+      uploadedRepairAction(true, true, false, false, false));
+  TEST_ASSERT_EQUAL(UPLOADED_REPAIR_INSTALL,
+      uploadedRepairAction(true, false, true, false, false));
+  TEST_ASSERT_EQUAL(UPLOADED_REPAIR_QUERY,
+      uploadedRepairAction(false, true, true, true, false));
+  TEST_ASSERT_EQUAL(UPLOADED_REPAIR_NONE,
+      uploadedRepairAction(false, true, true, true, true));
+  TEST_ASSERT_EQUAL(UPLOADED_REPAIR_QUERY,
+      uploadedRepairAction(true, false, true, true, false));
+  TEST_ASSERT_EQUAL_UINT64(
+      0x1111, uploadedRepairProgramId(0x1111, true, 0x2222));
+  TEST_ASSERT_EQUAL_UINT64(
+      0x2222, uploadedRepairProgramId(0x1111, false, 0x2222));
+}
+
+void test_serial_json_uploaded_program_requires_valid_identity_and_bytecode() {
+  UploadedProgram program = uploadedWaveFixture();
+  char hex[UPLOADED_PROGRAM_MAX_BYTES * 2 + 1] = {0};
+  for (uint8_t i = 0; i < program.length; i++)
+    snprintf(hex + i * 2, 3, "%02x", program.data[i]);
+  char json[1024];
+  snprintf(json, sizeof(json),
+           "{\"id\":7,\"cmd\":\"program_install\",\"program_id\":%lu,"
+           "\"program_tag\":%lu,"
+           "\"vm_version\":1,\"data\":\"%s\"}",
+           (unsigned long)(program.id & 0xffffffffULL),
+           (unsigned long)(program.id >> 32), hex);
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+  TEST_ASSERT_TRUE(serialJsonParse(json, cmd, error));
+  TEST_ASSERT_EQUAL(SJ_PROGRAM_INSTALL, cmd.kind);
+  TEST_ASSERT_EQUAL_UINT64(program.id, cmd.uploaded_program.id);
+
+  char* id_pos = strstr(json, "\"program_id\":") + strlen("\"program_id\":");
+  *id_pos = *id_pos == '1' ? '2' : '1';
+  TEST_ASSERT_FALSE(serialJsonParse(json, cmd, error));
+}
+
+void test_serial_json_uploaded_progress_is_compact_read_only_command() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":9,\"cmd\":\"program_progress\"}", cmd, error));
+  TEST_ASSERT_EQUAL(SJ_PROGRAM_PROGRESS, cmd.kind);
+}
+
+void test_serial_json_uploaded_pattern_maps_exact_program_id_words() {
+  SerialJsonCommand cmd;
+  const char* error = nullptr;
+  TEST_ASSERT_TRUE(serialJsonParse(
+      "{\"id\":8,\"cmd\":\"pattern\",\"pattern\":\"Uploaded Pattern\","
+      "\"brightness\":48,\"p0\":41517,\"p1\":7104,"
+      "\"p2\":64948,\"p3\":39753}",
+      cmd, error));
+  TEST_ASSERT_EQUAL_UINT16(patterns::UPLOADED, cmd.pattern_id);
+  TEST_ASSERT_EQUAL_UINT64(0x9B49FDB41BC0A22DULL,
+      patterns::uploadedPatternProgramId(cmd.params));
+}
+
 void test_relay_peer_kind_keeps_upstream_out_of_rotating_child_lease() {
   const uint8_t primary[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t child[6] = {2, 2, 3, 4, 5, 6};
@@ -3432,6 +3920,12 @@ int main(int, char**) {
   RUN_TEST(test_ocean_intensity_swells_over_time);
   RUN_TEST(test_ocean_intensity_varies_across_field);
   RUN_TEST(test_ocean_angle_changes_propagation);
+  RUN_TEST(test_ocean_swell_value_keeps_a_dim_floor_and_full_crest);
+  RUN_TEST(test_ocean_trough_survives_low_brightness_quantization);
+  RUN_TEST(test_pond_ripple_stays_in_unit_range);
+  RUN_TEST(test_pond_ripple_is_radially_symmetric);
+  RUN_TEST(test_pond_ripple_crest_moves_outward);
+  RUN_TEST(test_pond_ripple_center_is_live_tunable);
   RUN_TEST(test_roster_starts_empty);
   RUN_TEST(test_roster_appends_distinct_macs);
   RUN_TEST(test_roster_dedup_updates_in_place);
@@ -3444,6 +3938,7 @@ int main(int, char**) {
   RUN_TEST(test_performer_tx_ignores_wrong_callback_and_cancels_queue_failure);
   RUN_TEST(test_firmware_version_matches_proto_build_and_dirty);
   RUN_TEST(test_firmware_fleet_consistency_requires_every_seen_node_to_match);
+  RUN_TEST(test_firmware_fleet_readiness_requires_every_placed_node_online_and_matching);
   RUN_TEST(test_power_policy_window_handles_daytime_and_overnight_ranges);
   RUN_TEST(test_power_policy_force_awake_overrides_schedule);
   RUN_TEST(test_power_policy_force_sleep_overrides_disabled_schedule);
@@ -3541,6 +4036,7 @@ int main(int, char**) {
   RUN_TEST(test_serial_json_fire_flicker_maps_pattern_name_and_positional_params);
   RUN_TEST(test_serial_json_fire2012_maps_pattern_name_and_controls);
   RUN_TEST(test_serial_json_wavefront_maps_pattern_name_and_controls);
+  RUN_TEST(test_serial_json_pond_ripple_maps_pattern_name_and_positional_params);
   RUN_TEST(test_serial_json_calibration_maps_params);
   RUN_TEST(test_serial_json_locator_is_one_atomic_override_command);
   RUN_TEST(test_serial_json_power_policy_parses_runtime_sleep_controls);
@@ -3565,6 +4061,8 @@ int main(int, char**) {
   RUN_TEST(test_timer_wake_rendezvous_blocks_sleep_until_beacon_or_deadline);
   RUN_TEST(test_boot_serial_seed_expires_longest_grace);
   RUN_TEST(test_stable_transport_packets_fit_espnow);
+  RUN_TEST(test_existing_pattern_wire_ids_are_never_renumbered);
+  RUN_TEST(test_new_pattern_ids_fall_back_when_firmware_mismatches);
   RUN_TEST(test_performer_parent_is_sticky_then_fails_over_for_same_primary);
   RUN_TEST(test_relay_learns_only_a_direct_primary);
   RUN_TEST(test_primary_validates_direct_and_relayed_logical_origins);
@@ -3576,6 +4074,21 @@ int main(int, char**) {
   RUN_TEST(test_relay_queue_rejects_second_hop_and_counts_overflow);
   RUN_TEST(test_roster_retains_role_and_immediate_route);
   RUN_TEST(test_v11_relay_forwards_future_application_protocol_registration);
+  RUN_TEST(test_uploaded_program_validates_and_executes_bounded_wave);
+  RUN_TEST(test_uploaded_program_rejects_bad_crc_stack_and_opcode);
+  RUN_TEST(test_uploaded_program_rejects_excessive_execution_cost);
+  RUN_TEST(test_uploaded_program_sanitizes_ternary_overflow);
+  RUN_TEST(test_uploaded_program_matches_control_float32_trig_golden);
+  RUN_TEST(test_uploaded_identity_matches_control_at_blake2s_block_boundary);
+  RUN_TEST(test_uploaded_identity_distinguishes_known_crc32_collision);
+  RUN_TEST(test_uploaded_program_double_buffer_preserves_active_slot);
+  RUN_TEST(test_uploaded_program_staging_preserves_all_active_group_programs);
+  RUN_TEST(test_uploaded_status_requires_exact_fresh_capability_and_program);
+  RUN_TEST(test_uploaded_status_retries_are_spread_backed_off_and_radio_bounded);
+  RUN_TEST(test_uploaded_repair_skips_inactive_and_mismatched_targets);
+  RUN_TEST(test_serial_json_uploaded_program_requires_valid_identity_and_bytecode);
+  RUN_TEST(test_serial_json_uploaded_progress_is_compact_read_only_command);
+  RUN_TEST(test_serial_json_uploaded_pattern_maps_exact_program_id_words);
   RUN_TEST(test_relay_peer_kind_keeps_upstream_out_of_rotating_child_lease);
   return UNITY_END();
 }

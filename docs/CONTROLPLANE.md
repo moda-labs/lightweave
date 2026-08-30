@@ -256,6 +256,16 @@ The map renders only positioned lanterns.
 - `POST /api/patterns/{id}/broadcast?group_id=2` -> broadcast that saved pattern
   config to Group 3 and publish a desired-state acceptance event. Omit
   `group_id` only for the legacy all-groups behavior.
+- `GET /api/uploaded-patterns` and `POST /api/uploaded-patterns` -> list and
+  save bounded expression-program drafts; `DELETE /api/uploaded-patterns/{id}`
+  removes one.
+- `POST /api/uploaded-patterns/preview` -> compile and sample an unsaved draft
+  against the positioned inventory without changing the field.
+- `POST /api/uploaded-patterns/broadcast?group_id=2` -> compile, distribute,
+  verify, and activate an unsaved draft without persisting it.
+- `POST /api/uploaded-patterns/{id}/broadcast?group_id=2` -> do the same for a
+  saved uploaded pattern. Activation occurs only after the complete placed
+  fleet confirms the exact 64-bit program identity.
 - `POST /api/show/pattern` with
   `{"pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300},"group_id":2}`
   -> change only Group 3. Omitting `group_id` updates all eight groups for
@@ -404,6 +414,9 @@ only treat a pattern change as saved after a successful ack.
 Pattern library CRUD is server-side control-plane state, persisted under
 `.control_patterns/patterns.json`; broadcasting a saved pattern is still a
 separate `POST /api/show/pattern` operation.
+Uploaded pattern drafts are persisted separately under
+`.control_uploaded_patterns/patterns.json`; broadcasting an editor draft does
+not implicitly save it.
 
 ## Adapter contract
 
@@ -424,6 +437,8 @@ forget(mac) -> ack
 replace(old_mac, new_mac) -> ack
 reserve_id(mac, reported_id=0) -> ack
 update_pattern(pattern, brightness, params, group_id=None) -> ack
+install_uploaded_program(program_id, vm_version, data) -> ack
+uploaded_program_progress() -> dict
 blackout() -> ack
 update_power_policy(policy) -> ack
 set_ota_mode(enabled) -> ack
@@ -460,6 +475,8 @@ Requests are one compact JSON object per line:
 {"id":8,"cmd":"blackout"}
 {"id":9,"cmd":"restore_blackout"}
 {"id":10,"cmd":"reserve_id","mac":"8C:94:DF:57:7F:14","reported_id":0}
+{"id":11,"cmd":"program_install","program_id":1672088068,"program_tag":3310738355,"vm_version":1,"data":"0100000000010000000001000000000100000000"}
+{"id":12,"cmd":"program_progress"}
 ```
 
 Responses echo the request id:
@@ -521,15 +538,20 @@ number while showing "Not seen".
 - Group selector targets one of eight independent live pattern slots; each
   lantern renders only the slot named by its cached table membership.
 - Pattern picker includes field-space patterns, including the single-band 2-D
-  `WAVEFRONT`, plus the ring-addressable `FIRE_FLICKER` and `FIRE2012`; SOLID
-  remains a bench-only power pattern.
+  `WAVEFRONT` and center-selectable `POND_RIPPLE`, plus the ring-addressable
+  `FIRE_FLICKER` and `FIRE2012`. `UPLOADED` adds bounded expression programs
+  that are distributed and verified before activation; SOLID remains a
+  bench-only power pattern.
 - Brightness slider + per-pattern param controls with human labels:
   Pulse/Glow expose hue, Sweep exposes period + wavelength, Wavefront exposes
   period + band width + travel angle + color, Palette Drift exposes period +
   spatial spread, Firefly exposes irregularity/scatter + chorus recurrence,
-  Fire Flicker exposes speed, color, and per-pixel texture depth, and Fire2012
-  exposes simulation speed, cooling, and sparking. The Change Pattern button is disabled until the
-  visible draft differs from the live conductor state.
+  Fire Flicker exposes speed, color, and per-pixel texture depth, Fire2012
+  exposes simulation speed, cooling, and sparking, and Pond Ripple exposes
+  period, wavelength, and center. The Change Pattern button is disabled until
+  the visible draft differs from the live conductor state; new-only patterns
+  are also disabled until the complete placed fleet reports matching capable
+  firmware.
 - Pattern preview: the browser renders `f(x,y,t)` live on the map *before*
   broadcasting (JS port of the pure `pattern_math.h`). Cheap because the
   math is pure and host-tested; turns knob-tuning into instant feedback.

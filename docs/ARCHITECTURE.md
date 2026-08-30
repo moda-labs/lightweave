@@ -94,7 +94,9 @@ cached table `group_id`.
     start, duration, amplitude, shimmer, and occasional skipped flashes. Near
     the end of each recurrence window every node crossfades into exactly three
     shared beats, then returns to independent timing. **[done; hardware tuning pending]**
-  - `OCEAN_WAVE` — true 2-D summed wavefronts with tunable travel angle. **[done]**
+  - `OCEAN_WAVE` — true 2-D summed wavefronts with tunable travel angle. Its
+    deep-water trough retains a dim visible floor while the crest brightens,
+    including at low nonzero show brightness. **[done]**
   - `FIRE_FLICKER` — first ring-local pattern: deterministic billow plus coherent
     angular waves give every active LED distinct brightness and flame temperature.
     It remains clock/position-derived, so missed beacons do not freeze or desync
@@ -104,7 +106,13 @@ cached table `group_id`.
     fed by seeded sparks near pixel zero before a black-body color mapping. The
     active LED sequence is its vertical axis; speed, cooling, and sparking are
     tunable. **[done in firmware/control plane; hardware tuning pending]**
-  - **[planned]** additional 2-D primitives such as a radial ripple from a center.
+  - `POND_RIPPLE` — concentric cyan-water crests expanding from a live-tunable
+    `(center_x, center_y)`. Period, wavelength, and center occupy the existing
+    four params, so the beacon and transport-v11 layouts remain unchanged.
+    **[done in code; hardware tuning pending]**
+  - `UPLOADED` — a bounded, data-driven `f(x,y,pixel,t)` program compiled by the
+    control plane and distributed separately from the beacon. Existing pattern
+    IDs and their renderers are unchanged. **[done in code; hardware verification pending]**
 
 Every node hard-clamps rendered brightness to `MAX_BRIGHTNESS` (config.h, **192**),
 so no pattern or broadcast config can exceed the tested 16-ring brightness
@@ -115,6 +123,49 @@ that battery-budget measurement. See power management below.
 
 Pure pattern math lives in `include/pattern_math.h` (host-unit-tested); the
 LED-library binding is in `include/patterns.h`.
+
+### 4.0.1 Uploaded pattern programs **[done in code; hardware verification pending]**
+
+`UPLOADED` is an additional pattern option, not a replacement for the compiled
+patterns. The control plane compiles a JSON expression tree into a versioned,
+64-bit BLAKE2s-addressed stack program. The firmware interpreter is deliberately
+bounded: 192 bytes, at most 64 straight-line instructions, a weighted execution
+budget of 128, a 16-value stack, no jumps, loops, allocation, native code, or
+hardware access. Expensive operations such as trigonometry and powers consume
+more of the weighted budget. Its only outputs are HSV and intensity, so the normal
+per-group brightness and global `MAX_BRIGHTNESS` clamp still own the power ceiling.
+
+Programs use additive transport-v11 message types; `MsgHeader`, `BeaconMsg`, and
+all existing pattern configs remain byte-for-byte stable. Each node persists nine
+program slots: up to one active program for each of eight groups plus one inactive
+staging slot. Installing a replacement cannot overwrite any program referenced by
+an active group. Activation broadcasts the complete 64-bit program identity
+through the ordinary four pattern params after every placed lantern reports the
+exact VM version and program identity.
+
+Mixed-firmware behavior is fail-closed. Before a target program exists, the new
+firmware sends no program discovery or repair traffic. The control plane requires
+a fresh, complete, exact firmware match for the placed inventory before staging;
+the conductor independently requires an exact program acknowledgement from every
+placed online node before accepting `UPLOADED`. Both new pattern IDs are also
+gated at the firmware's serial-command boundary, while a zero-brightness command
+remains available as a safe off path. Each acknowledgement carries the
+reporting node's exact firmware identity and must be at least as new as that
+node's latest registration, preventing a pre-reboot acknowledgement from proving
+a rolled-back or restarted node ready. If a mismatch appears after activation,
+the conductor atomically reverts all new-only group patterns to the compiled
+`GLOW` fallback. Legacy nodes ignore the additive messages, and no new pattern ID
+is broadcast while they are present, so existing compiled patterns and the stable
+v11 beacon path remain unchanged throughout a partial OTA.
+
+Program status responses use a MAC-derived initial spread across 500 ms and
+bounded exponential retry backoff inside a two-second response window rather
+than a simultaneous or unbounded fleet response.
+Repair for a staged but inactive target is limited to the 60-second verification
+window; after activation, repair is registration-driven and stops when the exact
+target is confirmed. The control plane polls a compact program-progress response
+rather than repeatedly requesting the full inventory snapshot. There is no
+steady-state program broadcast.
 
 ### 4.1 Lantern groups **[done; hardware verification pending]**
 

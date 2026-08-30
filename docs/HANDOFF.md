@@ -8,33 +8,45 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**206 pass**) is green; **492 control tests** are green; all three
+(**229 pass**) is green; **516 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
-Latest in this feature branch (2026-08-10): **Wavefront, the Firefly chorus,
-and Fire2012 are ready for live pattern tuning.** `WAVEFRONT` (`pattern 11`)
-sends one soft directional band across the normalized 2-D field; angle 0 is the
-left-to-right test for the current ten-board line. `FIREFLY` (`pattern 6`) now
-uses deterministic irregular solo flashes, including skipped flashes and varied
-timing, before the field crossfades into exactly three synchronized beats and
-disperses again. `FIRE2012` (`pattern 10`) adapts FastLED's heat-cell simulation
-to the ring/strip emitter sequence with deterministic cooling, upward diffusion,
-sparking, and a black-to-red-to-yellow-to-white heat ramp. Its bounded,
-overlapping simulation checkpoints keep a cold field preview fast without
-visible heat resets. Firmware, control-plane preview, saved-pattern API, live UI
-controls, authoring docs, and host regression coverage are included for all
-three changes.
+Latest in `feat/radial-ripple` (2026-08-30): `POND_RIPPLE` adds concentric,
+center-selectable outward waves
+without changing the stable v11 transport layout; the control plane blocks its
+broadcast until every placed lantern is online on the exact current firmware.
+`OCEAN_WAVE` now retains a 22% perceptual deep-water floor plus a one-PWM
+quantization guard, so a non-black Ocean config never drops fully dark between
+crests at low nonzero brightness. `UPLOADED` preserves every existing pattern
+option and adds a versioned, loop-free 192-byte expression VM. The control plane
+preflights exact full-fleet firmware, stages into a slot that cannot overwrite any
+of eight active group programs, waits for exact acknowledgements from every placed
+node, and only then activates the full 64-bit BLAKE2s program identity. Every acknowledgement includes the
+reporter's exact firmware identity and must be newer than its latest registration,
+so a rollback or reboot cannot reuse stale readiness. A mixed rollout has no
+uploaded target, sends no program traffic, and cannot broadcast the new ID;
+built-in rendering and the stable v11 beacon remain unchanged. If firmware becomes
+mixed after activation, the conductor reverts every new-only group to compiled
+Glow; zero brightness remains available as a safe off command. Status responses
+are deterministically spread across 500 ms and use bounded retry backoff inside
+a two-second response window, and the control plane uses a compact progress poll.
+Repair
+for a staged but inactive target ends after a 60-second verification window;
+active targets are repaired only when a node registers. Firmware and preview
+implementations share host/control regression coverage. The interpreter enforces
+a weighted execution budget in addition to its instruction and stack limits.
+The field build uses 73,472 B RAM (22.4%) and 903,793 B flash (69.0%), an
+exact-base delta of +5,968 B RAM and +17,736 B flash from deployed `a3e19cf`.
+Nothing from this worktree has been flashed, broadcast, or deployed; bench proof
+of distribution through a relay and frame timing is still owed before release.
 
-All ten USB-connected performers were serial-flashed and read back as performer
-IDs 1–10 on `0.9.3-dev`, protocol 11, build `b1e7d434`; the conductor was flashed
-last and read back as conductor ID 1 on the same build. The restarted local
-control plane at `http://127.0.0.1:8000` reports `alive=10`, `total=10`, and a
-firmware-consistent `matching=10` / `seen=10` field with conductor build
-`b1e7d434`. Automatic OTA remains disabled and the prior interrupted OTA journal
-remains paused. No release has been cut: live appearance and parameter tuning on
-the ten rings is the next gate.
+Also present from v0.9.4: `WAVEFRONT` remains pattern 11, `FIRE2012` remains
+pattern 10, while new IDs are allocated after them (`POND_RIPPLE` 12 and
+`UPLOADED` 13). Firefly retains its deterministic three-beat chorus. All ten
+USB-connected performers were last read back on protocol 11; no pattern ID from
+that release may be reused by later firmware.
 
-Also in this feature branch (2026-08-10): the lantern locator is now one
+Latest in this feature branch (2026-08-10): the lantern locator is now one
 temporary field-wide beacon override instead of a calibration pattern copied
 into all eight group slots. It takes precedence over group rendering while
 active, leaves every saved group pattern untouched, and starts/stops with one
@@ -709,7 +721,9 @@ revised cost roll-up.
   `FIRE_FLICKER` extends the local model to `f(x,y,pixel_index,t)` and is the
   first pattern to render distinct values across the ring; it appends ID 9.
   `FIRE2012` (ID 10) adds deterministic heat cells across the active emitter
-  sequence, and `WAVEFRONT` is ID 11.
+  sequence, `WAVEFRONT` is ID 11, `POND_RIPPLE` is ID 12, and the bounded
+  data-driven `UPLOADED` option is ID 13. Uploaded programs use a separate
+  capability-gated distribution path; all earlier renderers stay unchanged.
 - **NVS identity:** `id` + `(x,y)` + group persist across reboot; position/group
   are adopted from the conductor table.
 - **Group pattern configs persist** too: all eight
@@ -1136,7 +1150,8 @@ wall-powered; gate all of this on `role == performer`.
   performer with `powersave on` and **only while the radio is already off**
   (never into a listen window); a nap ends at the earliest of the next radio
   duty transition, the next ~30 fps frame (animated patterns only — GLOW/SOLID
-  skip this and sleep clear through), the next heartbeat edge (keeps the GPIO2
+  and uploaded programs without a time input skip this and sleep clear through),
+  the next heartbeat edge (keeps the GPIO2
   sync blink square), or a 1 s safety cap. Serial safety: any serial byte holds
   naps off for 30 s, a UART wakeup (typing at a sleeping node — hit Enter once,
   then type) does the same, and boot seeds the grace so a fresh flash has a

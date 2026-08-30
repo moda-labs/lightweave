@@ -848,6 +848,7 @@ def test_fresh_page_retries_terminal_ota_reservation_gap_in_javascript() -> None
 let state = null;
 let otaInstall = null;
 let savedPatterns = [];
+let uploadedPatterns = [];
 let otaArtifact = null;
 let calibrationFrames = [];
 let releaseInfo = null;
@@ -868,6 +869,7 @@ async function api(path) {{
     return {{conductor: {{}}, summary: {{}}, pattern: {{}}}};
   }}
   if (path === "/api/patterns") return {{patterns: []}};
+  if (path === "/api/uploaded-patterns") return {{patterns: []}};
   if (path === "/api/releases") return {{control: {{}}, firmware: {{}}, history: []}};
   if (path === "/api/operations/ota-artifact") return {{artifact: null}};
   if (path === "/api/calibration/frames") return {{frames: []}};

@@ -282,6 +282,8 @@
             <button data-pattern="Fire Flicker">Fire</button>
             <button data-pattern="Fire2012">Fire2012</button>
             <button data-pattern="Ocean Wave">Ocean</button>
+            <button data-pattern="Pond Ripple">Ripple</button>
+            <button data-pattern="Uploaded Pattern">Uploaded</button>
             <button data-pattern="White">White</button>
             <button data-pattern="Solid">Solid</button>
           </div>
@@ -370,6 +372,24 @@
             <label class="control-label" for="pattern-angle">Wave direction <span id="angle-value">45</span>°</label>
             <input id="pattern-angle" type="range" min="0" max="355" step="5" value="45">
           </div>
+          <div class="pattern-param" data-param-group="ripple-center">
+            <label class="control-label" for="pattern-center-x">Ripple center X <span id="center-x-value">0.50</span></label>
+            <input id="pattern-center-x" type="range" min="0" max="1000" step="25" value="500">
+            <label class="control-label" for="pattern-center-y">Ripple center Y <span id="center-y-value">0.50</span></label>
+            <input id="pattern-center-y" type="range" min="0" max="1000" step="25" value="500">
+          </div>
+          <div class="pattern-param uploaded-pattern-editor" id="uploaded-pattern-editor" hidden>
+            <label class="control-label" for="uploaded-pattern-name">Uploaded pattern name</label>
+            <input id="uploaded-pattern-name" type="text" maxlength="80" value="Blue diagonal wave" autocomplete="off">
+            <label class="control-label" for="uploaded-pattern-json">Pattern program</label>
+            <textarea id="uploaded-pattern-json" rows="16" spellcheck="false"></textarea>
+            <p class="muted-inline">Outputs are hue, saturation, value, and intensity. Inputs: <code>x</code>, <code>y</code>, <code>time</code>, and <code>pixel</code>. Operations are bounded; uploaded code cannot loop or access hardware.</p>
+            <div class="button-row">
+              <button type="button" data-action="preview-uploaded">Validate &amp; preview data</button>
+              <span class="muted-inline" id="uploaded-pattern-status">Not validated</span>
+            </div>
+          </div>
+          <p class="pattern-warning" id="pattern-firmware-warning" hidden>Pattern broadcast is paused until every placed lantern is online and running compatible firmware. Finish reconciliation in Firmware first.</p>
           <div class="button-row">
             <button class="primary" data-action="broadcast" disabled>Change pattern</button>
             <button data-action="save-pattern">Save draft</button>
@@ -383,6 +403,14 @@
               <div class="chip" id="saved-pattern-count">0 saved</div>
             </div>
             <div class="saved-pattern-list" id="saved-pattern-list"></div>
+          </div>
+          <div class="saved-patterns">
+            <div class="section-head">
+              <h3>Uploaded patterns</h3>
+              <div class="chip" id="uploaded-pattern-count">0 saved</div>
+            </div>
+            <p>These programs are distributed and verified first; activation happens only after every placed lantern confirms the exact program.</p>
+            <div class="saved-pattern-list" id="uploaded-pattern-list"></div>
           </div>
         </div>
       </section>

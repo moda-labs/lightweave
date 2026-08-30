@@ -374,6 +374,8 @@ inline uint8_t relayTargetCopies(uint8_t type) {
       return 4;
     case MSG_OTA_CHUNK:
       return 2;
+    case MSG_PROGRAM_INSTALL:
+      return 3;
     default:
       return 1;
   }
