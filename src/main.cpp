@@ -148,6 +148,11 @@ static uint8_t        g_ota_local_error = OTA_ERR_NONE;
 // copies 64-entry tables before printing so radio callbacks can keep updating.
 static Roster         g_state_roster_snapshot;
 static OtaStatusTable g_state_ota_status_snapshot;
+// Machine commands are parsed only by loopTask, so one reusable workspace is
+// sufficient. Keep it in static storage: placing this growing aggregate in
+// handleCommand() consumed most of loopTask's 8 KiB stack and made even `info`
+// trip FreeRTOS's stack guard.
+static SerialJsonCommand g_serial_json_command;
 
 // Performer return traffic is serialized because ESP-NOW delivery callbacks
 // identify only the destination MAC. REGISTER, power telemetry, and OTA status
@@ -3390,7 +3395,7 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
 
 static void handleCommand(char* line) {
   if (serialJsonLooksLike(line)) {
-    SerialJsonCommand cmd;
+    SerialJsonCommand& cmd = g_serial_json_command;
     const char* error = nullptr;
     if (serialJsonParse(line, cmd, error)) handleMachineCommand(cmd);
     else jsonError(cmd.id, error ? error : "bad json");
