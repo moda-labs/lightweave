@@ -31,6 +31,12 @@ let provisioning = null;
 let powerHistory = { hours: 24, samples: [], count: 0, loading: true, error: null, loadedAt: 0 };
 let powerHistoryRefreshPromise = null;
 let powerHistoryPollTimer = null;
+let audioState = null;
+let audioRefreshPromise = null;
+let audioPollTimer = null;
+let audioMutationGeneration = 0;
+let audioMutationPending = 0;
+let audioTrackListSignature = null;
 let fieldPreview = { nodes: [], frames: [], loading: true, error: null, loadedAt: 0 };
 let fieldPreviewRefreshPromise = null;
 let fieldPreviewPollTimer = null;
@@ -47,6 +53,7 @@ const TIMEZONE_STORAGE_KEY = "baskets.sleepTimezone";
 const GROUP_BRIGHTNESS_STORAGE_KEY = "baskets.groupBrightnessRestore";
 const POWER_DRAW_WINDOW_S = 15 * 60;
 const POWER_HISTORY_POLL_MS = 60 * 1000;
+const AUDIO_POLL_MS = 1000;
 const FIELD_PREVIEW_DURATION_MS = 6000;
 const FIELD_PREVIEW_FPS = 8;
 const FIELD_PREVIEW_POLL_MS = 5000;
@@ -419,6 +426,12 @@ function formatDuration(seconds) {
   return `${minutes}m ${remaining}s`;
 }
 
+function formatTrackTime(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds || 0)));
+  const minutes = Math.floor(total / 60);
+  return `${minutes}:${String(total % 60).padStart(2, "0")}`;
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -520,6 +533,7 @@ function overviewIssues(currentState) {
   const recovery = currentState.recovery || {};
   const firmware = currentState.summary?.firmware || {};
   const monitor = currentState.power_monitor || {};
+  const audio = currentState.audio || {};
   const missing = lanternItems.filter((item) => item.status === "missing" && item.position === "Set").length;
   const unpositioned = lanternItems.filter((item) => item.status === "alive" && item.position !== "Set").length;
 
@@ -538,6 +552,9 @@ function overviewIssues(currentState) {
   if (stale) issues.push({ severity: "warn", title: `${stale} stale power meter${stale === 1 ? "" : "s"}`, detail: "Stale readings are excluded from battery estimates." });
   if (implausible) issues.push({ severity: "warn", title: `${implausible} implausible power reading${implausible === 1 ? "" : "s"}`, detail: "Check meter voltage and shunt wiring." });
   if (monitor.history?.error) issues.push({ severity: "warn", title: "Power history is not recording", detail: String(monitor.history.error) });
+  if (audio.available === false) {
+    issues.push({ severity: "warn", title: "Soundtrack is unavailable", detail: audio.error || "Check the Pi audio player and MP3 files." });
+  }
   return issues;
 }
 
@@ -832,6 +849,7 @@ function startFieldPreviewPolling() {
 
 function renderOverview() {
   const monitor = state.power_monitor || {};
+  const audio = audioState || state.audio || {};
   const summary = state.summary || {};
   const conductor = state.conductor || {};
   const firmware = summary.firmware || {};
@@ -871,6 +889,14 @@ function renderOverview() {
       ? "error"
       : `${powerHistory.count} samples`;
   $("#overview-history-status").className = powerHistory.error ? "bad" : powerHistory.loading ? "sync" : "";
+  $("#overview-audio-track").textContent = audio.track?.name || "No soundtrack";
+  $("#overview-audio-position").textContent = audio.track ? formatTrackTime(audio.position_s) : "--:--";
+  $("#overview-audio-status").textContent = audio.playing
+    ? "Playing continuously · loop on"
+    : audio.paused
+      ? "Paused"
+      : audio.error || "Audio player unavailable";
+  $("#overview-audio-status").className = `soundtrack-status ${audio.playing ? "ok" : audio.paused ? "warn" : "bad"}`;
 
   const issueBox = $("#overview-issues");
   issueBox.innerHTML = issues.length
@@ -899,6 +925,105 @@ function renderOverview() {
   renderPowerHistoryChart();
 }
 
+function renderAudio() {
+  const audio = audioState || state?.audio || {};
+  const track = audio.track || null;
+  const status = $("#audio-status");
+  status.textContent = audio.playing ? "playing · loop on" : audio.paused ? "paused" : "unavailable";
+  status.className = `chip ${audio.playing ? "sync" : audio.paused ? "active" : "bad"}`;
+  $("#audio-track-name").textContent = track?.name || "No soundtrack selected";
+  $("#audio-position").textContent = track ? formatTrackTime(audio.position_s) : "--:--";
+  $("#audio-duration").textContent = track?.duration_s ? `/ ${formatTrackTime(track.duration_s)}` : "/ --:--";
+  const progress = track?.duration_s ? Math.min(100, Math.max(0, Number(audio.position_s || 0) / Number(track.duration_s) * 100)) : 0;
+  $("#audio-progress-bar").style.width = `${progress}%`;
+  const toggle = $('[data-action="toggle-audio"]');
+  toggle.textContent = audio.paused || !audio.playing ? "Play" : "Pause";
+  toggle.disabled = !audio.available && !audio.paused;
+  $('[data-action="restart-audio"]').disabled = !track || !audio.available;
+  const error = $("#audio-error");
+  error.hidden = !audio.error;
+  error.textContent = audio.error || "";
+  const tracks = Array.isArray(audio.tracks) ? audio.tracks : [];
+  const trackListSignature = JSON.stringify({
+    playing: audio.playing === true,
+    selected: audio.selected_track || null,
+    tracks: tracks.map((item) => [item.id, item.name, item.duration_s]),
+  });
+  if (trackListSignature !== audioTrackListSignature) {
+    const trackList = $("#audio-tracks");
+    const focusedTrack = document.activeElement?.dataset?.audioTrack || null;
+    audioTrackListSignature = trackListSignature;
+    trackList.innerHTML = tracks.length
+      ? tracks.map((item) => {
+          const selected = item.id === audio.selected_track;
+          return `<button type="button" class="audio-track ${selected ? "selected" : ""}" data-audio-track="${escapeHtml(item.id)}">
+            <div><strong>${escapeHtml(item.name)}</strong><span>${item.duration_s ? formatTrackTime(item.duration_s) : "Duration unavailable"} · loops continuously</span></div>
+            <span class="audio-track-state">${selected ? audio.playing ? "Playing" : "Selected" : "Play this"}</span>
+          </button>`;
+        }).join("")
+      : '<div class="empty-state">No MP3 files were found in the sound folder.</div>';
+    $$('[data-audio-track]').forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (button.dataset.audioTrack === audio.selected_track) return;
+        try {
+          const selectedAudio = await mutateAudio("/api/audio/select", {
+            method: "POST",
+            body: JSON.stringify({ track_id: button.dataset.audioTrack }),
+          });
+          acceptAudioState(selectedAudio);
+          renderAudio();
+          renderOverview();
+          const notice = audioActionNotice(
+            audioState,
+            audioState.paused ? "Soundtrack selected; player remains paused" : `Playing ${audioState.track?.name || "soundtrack"}`,
+          );
+          toast(notice.message, notice.error);
+        } catch (error) {
+          toast(error.message, true);
+        }
+      });
+    });
+    if (focusedTrack) {
+      [...$$('[data-audio-track]')]
+        .find((button) => button.dataset.audioTrack === focusedTrack)
+        ?.focus();
+    }
+  }
+}
+
+async function mutateAudio(path, options) {
+  audioMutationGeneration += 1;
+  audioMutationPending += 1;
+  try {
+    return await api(path, options);
+  } finally {
+    audioMutationPending -= 1;
+  }
+}
+
+function audioRevision(audio) {
+  const revision = Number(audio?.revision);
+  return Number.isFinite(revision) ? revision : -1;
+}
+
+function isCurrentAudioState(candidate, current) {
+  return Boolean(candidate) && (!current || audioRevision(candidate) >= audioRevision(current));
+}
+
+function acceptAudioState(candidate) {
+  const current = audioState || state?.audio || null;
+  if (!isCurrentAudioState(candidate, current)) return false;
+  audioState = candidate;
+  if (state) state.audio = candidate;
+  return true;
+}
+
+function audioActionNotice(audio, successMessage) {
+  return audio?.error
+    ? { message: audio.error, error: true }
+    : { message: successMessage, error: false };
+}
+
 function render() {
   if (!state) return;
   if (!selectedMac && lanterns().length) selectedMac = lanterns()[0].mac;
@@ -917,6 +1042,7 @@ function render() {
   $("#brightness-value").textContent = patternDraft.brightness;
 
   renderOverview();
+  renderAudio();
   renderPatternControls();
   renderSavedPatterns();
   renderMap();
@@ -2970,13 +3096,53 @@ async function refreshReleaseInfo() {
 }
 
 async function applyLiveState(liveState) {
+  const currentAudio = audioState || state?.audio || null;
   state = liveState;
+  if (isCurrentAudioState(liveState.audio, currentAudio)) {
+    audioState = liveState.audio;
+  } else if (currentAudio) {
+    audioState = currentAudio;
+    state.audio = currentAudio;
+  }
   render();
   try {
     await refreshReleaseInfo();
   } catch (_error) {
     // The live state is still useful if release metadata briefly fails to refresh.
   }
+}
+
+async function refreshAudio() {
+  if (audioRefreshPromise) return audioRefreshPromise;
+  if (audioMutationPending > 0) return audioState;
+  const generation = audioMutationGeneration;
+  audioRefreshPromise = (async () => {
+    try {
+      const refreshedAudio = await api("/api/audio");
+      if (generation === audioMutationGeneration) {
+        acceptAudioState(refreshedAudio);
+        renderAudio();
+        if (state) renderOverview();
+      }
+    } catch (_error) {
+      // A later state/WebSocket update or poll will retry without disturbing
+      // the rest of the control plane.
+    }
+    return audioState;
+  })();
+  try {
+    return await audioRefreshPromise;
+  } finally {
+    audioRefreshPromise = null;
+  }
+}
+
+function startAudioPolling() {
+  const poll = async () => {
+    await refreshAudio();
+    audioPollTimer = window.setTimeout(poll, AUDIO_POLL_MS);
+  };
+  if (audioPollTimer === null) poll();
 }
 
 async function refreshSavedPatterns() {
@@ -3126,6 +3292,31 @@ async function runAction(action) {
     if (action === "logout") {
       await api("/api/auth/logout", { method: "POST" });
       window.location.assign("/login");
+      return;
+    }
+    if (action === "toggle-audio") {
+      const currentAudio = audioState || state?.audio;
+      const updatedAudio = await mutateAudio(currentAudio?.playing ? "/api/audio/pause" : "/api/audio/play", { method: "POST" });
+      acceptAudioState(updatedAudio);
+      renderAudio();
+      renderOverview();
+      const notice = audioActionNotice(
+        audioState,
+        audioState.playing ? "Soundtrack playing" : "Soundtrack paused",
+      );
+      toast(notice.message, notice.error);
+      return;
+    }
+    if (action === "restart-audio") {
+      const updatedAudio = await mutateAudio("/api/audio/restart", { method: "POST" });
+      acceptAudioState(updatedAudio);
+      renderAudio();
+      renderOverview();
+      const notice = audioActionNotice(
+        audioState,
+        audioState.paused ? "Soundtrack reset to the beginning" : "Soundtrack restarted",
+      );
+      toast(notice.message, notice.error);
       return;
     }
     if (action === "details") {
@@ -3488,6 +3679,11 @@ function connectWebSocket() {
     if (data.provisioning) {
       provisioning = data.provisioning;
       renderProvisioning();
+    }
+    if (data.audio) {
+      acceptAudioState(data.audio);
+      renderAudio();
+      if (state) renderOverview();
     }
   });
   ws.addEventListener("close", (event) => {
@@ -3995,4 +4191,5 @@ refresh().then(() => {
   startOtaInstallPolling();
   startPowerHistoryPolling();
   startFieldPreviewPolling();
+  startAudioPolling();
 }).catch((error) => toast(error.message, true));

@@ -673,6 +673,9 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert 'if [ "$health_commit" != "$running_commit" ]' in installer
     assert "ReadOnlyPaths=-/var/lib/lightweave-gitops" in control_unit
     assert "ExecStart=/opt/lightweave/.venv/bin/python -m uvicorn" in control_unit
+    assert "ExecStartPre=/usr/bin/test -x /usr/bin/mpg123" in control_unit
+    assert "ExecStartPre=/opt/lightweave/.venv/bin/python -m control.audio_player check" in control_unit
+    assert "SupplementaryGroups=dialout audio" in control_unit
     assert "Wants=network-online.target lightweave-provisioner.service" in control_unit
     assert "PartOf=lightweave-control.service" in provisioner_unit
     assert "-m control.provisioner --socket /run/lightweave-provisioner/provisioner.sock" in provisioner_unit
@@ -682,6 +685,8 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert "sudo systemctl stop lightweave-provisioner 2>/dev/null || true" in runbook
     assert "sudo rm -f /etc/systemd/system/lightweave-provisioner.service" in runbook
     assert "sudo systemctl start lightweave-provisioner" in runbook
+    assert "git git-lfs mpg123" in runbook
+    assert "CONTROL_AUDIO_DIR=/opt/lightweave/sound" in runbook
     emergency_upgrade = runbook.split("The commands below are retained", 1)[1].split(
         "## 13. Emergency manual rollback", 1
     )[0]

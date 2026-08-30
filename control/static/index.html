@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Do Baskets Dream Control Plane</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css?v=8">
+  <link rel="stylesheet" href="/static/styles.css?v=9">
 </head>
 <body>
   <div class="app">
@@ -31,6 +31,7 @@
       <button data-view="map">Lantern Locations</button>
       <button data-view="table">Node List</button>
       <button data-view="show">Patterns</button>
+      <button data-view="sound">Sound</button>
       <button data-view="power">Power</button>
       <button data-view="ops">Operations</button>
       <button data-view="flash">Firmware</button>
@@ -139,6 +140,27 @@
                 <button type="button" data-overview-view="show">Open patterns</button>
               </div>
               <div class="overview-groups" id="overview-groups"></div>
+            </section>
+
+            <section class="overview-widget soundtrack-overview" aria-labelledby="soundtrack-overview-title">
+              <div class="section-head overview-widget-head">
+                <div>
+                  <h3 id="soundtrack-overview-title">Soundtrack</h3>
+                  <p>Looping from the control-plane audio output.</p>
+                </div>
+                <button type="button" data-overview-view="sound">Open sound</button>
+              </div>
+              <div class="soundtrack-now">
+                <div>
+                  <span class="label">Now playing</span>
+                  <strong id="overview-audio-track">--</strong>
+                </div>
+                <div>
+                  <span class="label">Position</span>
+                  <strong class="mono" id="overview-audio-position">--:--</strong>
+                </div>
+              </div>
+              <div class="soundtrack-status" id="overview-audio-status">Waiting for audio player</div>
             </section>
           </div>
         </div>
@@ -507,6 +529,41 @@
         </div>
       </section>
 
+      <section class="view" id="view-sound">
+        <div class="panel sound-panel">
+          <div class="power-heading">
+            <div>
+              <h2>Sound</h2>
+              <p>Music plays in a continuous loop through the control-plane computer's audio output.</p>
+            </div>
+            <div class="chip" id="audio-status">--</div>
+          </div>
+          <div class="sound-player-card">
+            <div class="sound-player-main">
+              <span class="label">Now playing</span>
+              <h3 id="audio-track-name">--</h3>
+              <div class="sound-player-time">
+                <strong class="mono" id="audio-position">--:--</strong>
+                <span class="mono" id="audio-duration">/ --:--</span>
+              </div>
+              <div class="sound-progress" aria-hidden="true"><div id="audio-progress-bar"></div></div>
+            </div>
+            <div class="button-row sound-actions">
+              <button class="primary" data-action="toggle-audio">Pause</button>
+              <button data-action="restart-audio">Restart track</button>
+            </div>
+            <p class="sound-error" id="audio-error" hidden></p>
+          </div>
+          <div class="ops-section">
+            <div class="section-head">
+              <h3>Tracks</h3>
+              <span class="label">Select a soundtrack</span>
+            </div>
+            <div class="audio-tracks" id="audio-tracks"></div>
+          </div>
+        </div>
+      </section>
+
       <section class="view" id="view-power">
         <div class="panel power-panel">
           <div class="power-heading">
@@ -687,6 +744,6 @@
     </section>
   </div>
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js?v=22"></script>
+  <script src="/static/app.js?v=23"></script>
 </body>
 </html>

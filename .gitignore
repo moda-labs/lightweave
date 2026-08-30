@@ -23,6 +23,7 @@ __pycache__/
 .control_ota/
 .control_patterns/
 .control_calibration/
+.control_audio/
 
 # OS / editor
 .DS_Store

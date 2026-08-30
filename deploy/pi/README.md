@@ -55,7 +55,8 @@ Apply OS updates and install the base packages:
 ```bash
 sudo apt-get update
 sudo apt-get full-upgrade
-sudo apt-get install ca-certificates curl git python3 python3-pip python3-venv
+sudo apt-get install ca-certificates curl git git-lfs mpg123 python3 python3-pip python3-venv
+sudo git lfs install --system
 python3 --version
 ```
 
@@ -71,15 +72,15 @@ Changing the Starlink connection is an on-site administrative operation.
 
 ## 2. Install the application
 
-Create a locked-down service account. Membership in `dialout` is its only
-supplementary privilege; do not give this account a password, login shell, or
-sudo grant.
+Create a locked-down service account. Membership in `dialout` permits conductor
+serial access and membership in `audio` permits soundtrack playback. Do not give
+this account a password, login shell, or sudo grant.
 
 ```bash
 id --user lightweave >/dev/null 2>&1 ||
   sudo useradd --system --user-group --home-dir /nonexistent \
     --shell /usr/sbin/nologin lightweave
-sudo usermod --append --groups dialout lightweave
+sudo usermod --append --groups dialout,audio lightweave
 ```
 
 Clone the repository, then check out an explicitly reviewed release tag or
@@ -89,6 +90,7 @@ commit. Replace `RELEASE_REF`; do not deploy a moving branch by accident.
 sudo git clone https://github.com/moda-labs/lightweave.git /opt/lightweave
 sudo git -C /opt/lightweave fetch --tags --prune
 sudo git -C /opt/lightweave checkout --detach RELEASE_REF
+sudo git -C /opt/lightweave lfs pull
 sudo python3 -m venv /opt/lightweave/.venv
 sudo /opt/lightweave/.venv/bin/python -m pip install --upgrade pip
 sudo /opt/lightweave/.venv/bin/python -m pip install \
@@ -163,10 +165,29 @@ HTTPS origin, with no path or trailing slash, for example
 CONTROL_REQUIRE_HTTPS=true
 CONTROL_ALLOW_NETWORK_CHANGES=false
 CONTROL_DATA_DIR=/var/lib/lightweave
+CONTROL_AUDIO_DIR=/opt/lightweave/sound
 CONTROL_SERIAL_RESET_ON_OPEN=0
 CONTROL_SERIAL_TIMEOUT_S=8.0
 CONTROL_SERIAL_STATE_TIMEOUT_S=30.0
 CONTROL_STATE_POLL_INTERVAL_S=15.0
+```
+
+The Sound tab uses `mpg123` to play the selected MP3 in a continuous loop. The
+default is `sound/baskets-soundscape-v4.mp3`, and playback starts with the
+control service unless it was explicitly paused. Selection and pause state live
+under `/var/lib/lightweave/audio/`. `mpg123` uses the system's default ALSA
+output; set `CONTROL_AUDIO_DEVICE` in `control.env` only when the jack or USB
+audio adapter is not the default device. Verify the output before a show:
+
+An already-installed Pi must receive `git-lfs` and `mpg123` before its first
+sound-enabled release. The control service preflight deliberately fails (and a
+GitOps deployment rolls back) when the decoder, default track, or real LFS
+payload is missing, or when `mpg123` cannot open the configured audio output.
+The output probe is muted, so restarting the service does not briefly override
+an operator's persisted pause state.
+
+```bash
+sudo -u lightweave mpg123 --quiet --loop 1 /opt/lightweave/sound/baskets-soundscape-v4.mp3
 ```
 
 Generate the scoped same-host provisioning credential without putting it in
