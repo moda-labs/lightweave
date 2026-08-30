@@ -96,6 +96,8 @@ pio test -e native
   Firmware UI shell
 - Animated expected-field preview and durable SQLite power history with
   1-hour through 7-day dashboard ranges
+- Optional SOLIX S2000 Overview telemetry from the probe's atomic status file;
+  stale, unavailable, and implausible readings remain explicit
 - Shared lantern detail sheet
 - Actions for locate, assign, forget, replace, pattern changes, and blackout,
   plus guarded Lantern Locations single-key shortcuts
