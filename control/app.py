@@ -81,6 +81,7 @@ from .releases import (
     stage_known_release_firmware,
 )
 from .serial_transport import PySerialTransport
+from .solix_status import SolixStatusStore
 
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -488,6 +489,7 @@ def create_app(
     group_store: GroupStore | None = None,
     power_monitor_store: PowerMonitorStore | None = None,
     power_history_store: PowerHistoryStore | None = None,
+    solix_status_store: SolixStatusStore | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_remote_settings(os.environ)
     resolved_auth = auth_manager
@@ -759,6 +761,14 @@ def create_app(
         else app.state.power_monitor_store.root
     )
     app.state.power_history_store = power_history_store or PowerHistoryStore(power_root)
+    solix_status_path = os.getenv("CONTROL_SOLIX_STATUS_FILE")
+    app.state.solix_status_store = solix_status_store or SolixStatusStore(
+        Path(solix_status_path).expanduser()
+        if solix_status_path
+        else data_dir / "power" / "solix-s2000.json"
+        if data_dir
+        else None
+    )
     app.state.power_history_error = None
     stored_power_monitor = app.state.power_monitor_store.load()
     app.state.power_monitor_config = {
@@ -1178,6 +1188,7 @@ def create_app(
         state["groups"] = groups
         state["lanterns"] = enrich_lantern_groups(state.get("lanterns") or [], groups)
         state["power_monitor"] = power_monitor_summary(state)
+        state["power_station"] = app.state.solix_status_store.load()
         state["recovery"] = recovery_summary(state)
         return state
 

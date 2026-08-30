@@ -4,6 +4,7 @@ import json
 import fcntl
 import os
 import pwd
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -661,6 +662,7 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     provisioner_unit = (SCRIPT.parent / "lightweave-provisioner.service").read_text(
         encoding="utf-8"
     )
+    solix_unit = (SCRIPT.parent / "lightweave-solix.service").read_text(encoding="utf-8")
     runbook = (SCRIPT.parent / "README.md").read_text(encoding="utf-8")
 
     assert "install -d -o root -g root -m 0700 /var/backups/lightweave" in installer
@@ -669,12 +671,18 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert "lightweave-gitops-recovery.service" in installer
     assert '"$repo/deploy/pi/lightweave-control.service"' in installer
     assert '"$repo/deploy/pi/lightweave-provisioner.service"' in installer
+    assert '"$repo/deploy/pi/lightweave-solix.service"' in installer
     assert "systemctl restart lightweave-control.service" in installer
     assert 'if [ "$health_commit" != "$running_commit" ]' in installer
     assert "ReadOnlyPaths=-/var/lib/lightweave-gitops" in control_unit
     assert "ExecStart=/opt/lightweave/.venv/bin/python -m uvicorn" in control_unit
     assert "Wants=network-online.target lightweave-provisioner.service" in control_unit
+    assert "lightweave-solix.service" not in control_unit
     assert "PartOf=lightweave-control.service" in provisioner_unit
+    assert "PartOf=lightweave-control.service" in solix_unit
+    assert "-m control.solix_probe" in solix_unit
+    assert "EnvironmentFile=-/etc/lightweave/solix.env" in solix_unit
+    assert "systemctl enable --now lightweave-solix.service" not in installer
     assert "-m control.provisioner --socket /run/lightweave-provisioner/provisioner.sock" in provisioner_unit
     assert "UnsetEnvironment=CONTROL_PASSWORD_HASH" in provisioner_unit
     assert "ReadWritePaths=/var/lib/lightweave/provisioner" in provisioner_unit
@@ -682,6 +690,8 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert "sudo systemctl stop lightweave-provisioner 2>/dev/null || true" in runbook
     assert "sudo rm -f /etc/systemd/system/lightweave-provisioner.service" in runbook
     assert "sudo systemctl start lightweave-provisioner" in runbook
+    assert "installer deploys `lightweave-solix.service`" in runbook
+    assert "sudo systemctl enable --now lightweave-solix.service" in runbook
     emergency_upgrade = runbook.split("The commands below are retained", 1)[1].split(
         "## 13. Emergency manual rollback", 1
     )[0]
@@ -695,6 +705,31 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert runbook.index("install-gitops.sh") < runbook.index(
         "enable --now lightweave-control.service"
     )
+
+
+def test_control_unit_install_adds_and_removes_optional_solix_unit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    unit_dir = repo / "deploy" / "pi"
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "lightweave-control.service").write_bytes(b"control")
+    (unit_dir / "lightweave-provisioner.service").write_bytes(b"provisioner")
+    solix_source = unit_dir / "lightweave-solix.service"
+    solix_source.write_bytes(b"solix")
+    configuration = replace(config(tmp_path), repo=repo)
+    reconciler = gitops.GitOpsReconciler(configuration)
+
+    reconciler._install_control_unit()
+
+    assert (configuration.systemd_dir / "lightweave-control.service").read_bytes() == b"control"
+    assert (configuration.systemd_dir / "lightweave-provisioner.service").read_bytes() == b"provisioner"
+    solix_target = configuration.systemd_dir / "lightweave-solix.service"
+    assert solix_target.read_bytes() == b"solix"
+    assert solix_target.stat().st_mode & 0o777 == 0o644
+
+    solix_source.unlink()
+    reconciler._install_control_unit()
+
+    assert not solix_target.exists()
 
 
 class EnvironmentBuildingReconciler(FakeReconciler):
@@ -820,6 +855,7 @@ def test_boot_recovery_restores_state_without_starting_control(tmp_path: Path) -
 
 def test_systemd_orders_boot_recovery_before_control_start() -> None:
     control_unit = (SCRIPT.parent / "lightweave-control.service").read_text(encoding="utf-8")
+    solix_unit = (SCRIPT.parent / "lightweave-solix.service").read_text(encoding="utf-8")
     gitops_unit = (SCRIPT.parent / "lightweave-gitops.service").read_text(encoding="utf-8")
     recovery_unit = (SCRIPT.parent / "lightweave-gitops-recovery.service").read_text(
         encoding="utf-8"
@@ -827,11 +863,13 @@ def test_systemd_orders_boot_recovery_before_control_start() -> None:
 
     assert "Requires=lightweave-gitops-recovery.service" in control_unit
     assert "After=network-online.target lightweave-gitops-recovery.service" in control_unit
+    assert "Requires=lightweave-gitops-recovery.service" in solix_unit
+    assert "After=bluetooth.service lightweave-gitops-recovery.service" in solix_unit
     assert "Requires=lightweave-gitops-recovery.service" in gitops_unit
     assert "After=network-online.target lightweave-gitops-recovery.service" in gitops_unit
     assert (
         "Before=lightweave-control.service lightweave-provisioner.service "
-        "lightweave-gitops.service"
+        "lightweave-solix.service lightweave-gitops.service"
     ) in recovery_unit
     assert "ExecStart=/usr/local/lib/lightweave/gitops_reconcile.py --recover-only" in recovery_unit
     assert "RemainAfterExit=yes" in recovery_unit

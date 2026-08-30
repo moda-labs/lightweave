@@ -159,13 +159,17 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=22"' in index_html
-    assert 'href="/static/styles.css?v=8"' in index_html
+    assert 'src="/static/app.js?v=23"' in index_html
+    assert 'href="/static/styles.css?v=9"' in index_html
     assert '<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">' in index_html
     assert '<button class="active" data-view="overview">Overview</button>' in index_html
     assert '<button data-view="map">Lantern Locations</button>' in index_html
     assert 'data-overview-view="map">Manage locations</button>' in index_html
     assert 'id="view-overview"' in index_html
+    assert 'id="overview-solix-output"' in index_html
+    assert 'id="overview-solix-note"' in index_html
+    assert "state.power_station || {}" in app_js
+    assert "S2000 probe unavailable" in app_js
     assert index_html.index('data-view="overview"') < index_html.index('data-view="map"')
     assert index_html.index('id="view-overview"') < index_html.index('id="view-map"')
     assert 'id="power-history-chart"' in index_html

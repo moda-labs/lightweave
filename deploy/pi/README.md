@@ -209,6 +209,34 @@ sudo ss -ltnp 'sport = :8000'
 Expected: the environment is `root:root 600`, the checkout is root-owned, and
 Uvicorn listens only on `127.0.0.1:8000`, never `0.0.0.0:8000`.
 
+### Optional SOLIX S2000 power probe
+
+The installer deploys `lightweave-solix.service` but deliberately leaves it
+disabled. The secure BLE handshake is confirmed, but the AS220 has not yet
+produced a power-status notification with the publicly documented subscription
+commands. Keeping the service opt-in prevents repeated probe attempts from
+blocking the station's single BLE connection and the official Anker app.
+
+After validating a compatible telemetry trace, optionally pin a station when
+more than one is nearby:
+
+```bash
+sudo install -o root -g root -m 0600 /dev/null /etc/lightweave/solix.env
+sudoedit /etc/lightweave/solix.env
+```
+
+Use `CONTROL_SOLIX_ADDRESS=AA:BB:CC:DD:EE:FF` in that file, or omit it to
+discover `SOLIX S2000` by name. Then enable the bounded polling service:
+
+```bash
+sudo systemctl enable --now lightweave-solix.service
+sudo journalctl -u lightweave-solix.service -f
+```
+
+Each attempt disconnects after one reading and waits two minutes before the
+next poll so other BLE clients have a connection window. Disable the probe if
+the log reports repeated `timed out waiting for S2000 0421 telemetry` errors.
+
 ### Verify the USB flashing station
 
 Use a powered USB hub and keep its numbered performer ports separate from the conductor's fixed port.

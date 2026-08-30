@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Do Baskets Dream Control Plane</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css?v=8">
+  <link rel="stylesheet" href="/static/styles.css?v=9">
 </head>
 <body>
   <div class="app">
@@ -67,6 +67,11 @@
               <div class="label">Battery estimate</div>
               <div class="overview-value" id="overview-battery">--</div>
               <div class="overview-note" id="overview-power-note">Waiting for meters</div>
+            </div>
+            <div class="overview-metric">
+              <div class="label">S2000 output</div>
+              <div class="overview-value" id="overview-solix-output">--</div>
+              <div class="overview-note" id="overview-solix-note">Waiting for power station</div>
             </div>
           </section>
 
@@ -687,6 +692,6 @@
     </section>
   </div>
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js?v=22"></script>
+  <script src="/static/app.js?v=23"></script>
 </body>
 </html>

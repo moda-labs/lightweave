@@ -520,6 +520,7 @@ function overviewIssues(currentState) {
   const recovery = currentState.recovery || {};
   const firmware = currentState.summary?.firmware || {};
   const monitor = currentState.power_monitor || {};
+  const station = currentState.power_station || {};
   const missing = lanternItems.filter((item) => item.status === "missing" && item.position === "Set").length;
   const unpositioned = lanternItems.filter((item) => item.status === "alive" && item.position !== "Set").length;
 
@@ -538,6 +539,13 @@ function overviewIssues(currentState) {
   if (stale) issues.push({ severity: "warn", title: `${stale} stale power meter${stale === 1 ? "" : "s"}`, detail: "Stale readings are excluded from battery estimates." });
   if (implausible) issues.push({ severity: "warn", title: `${implausible} implausible power reading${implausible === 1 ? "" : "s"}`, detail: "Check meter voltage and shunt wiring." });
   if (monitor.history?.error) issues.push({ severity: "warn", title: "Power history is not recording", detail: String(monitor.history.error) });
+  if (station.configured && !station.updated_at && station.error) {
+    issues.push({ severity: "warn", title: "S2000 probe unavailable", detail: "No power-station reading has been received yet; check the probe service and data source." });
+  } else if (station.configured && station.updated_at && station.stale) {
+    issues.push({ severity: "warn", title: "S2000 reading is stale", detail: "The Bluetooth probe is reconnecting; the displayed station reading is not current." });
+  } else if (station.configured && station.plausible === false) {
+    issues.push({ severity: "warn", title: "S2000 reading is implausible", detail: "The station's reported power totals are internally inconsistent." });
+  }
   return issues;
 }
 
@@ -832,6 +840,7 @@ function startFieldPreviewPolling() {
 
 function renderOverview() {
   const monitor = state.power_monitor || {};
+  const station = state.power_station || {};
   const summary = state.summary || {};
   const conductor = state.conductor || {};
   const firmware = summary.firmware || {};
@@ -863,6 +872,25 @@ function renderOverview() {
   $("#overview-power-note").textContent = Number(monitor.usable_sample_count || 0)
     ? `${monitor.usable_sample_count} usable meter${Number(monitor.usable_sample_count) === 1 ? "" : "s"}`
     : "No usable meter readings";
+  const stationReading = station.connected === true && station.stale !== true && station.plausible === true;
+  const stationOutput = station.output_w === null || station.output_w === undefined ? NaN : Number(station.output_w);
+  $("#overview-solix-output").textContent = stationReading && Number.isFinite(stationOutput) ? `${stationOutput.toFixed(0)} W` : "--";
+  $("#overview-solix-output").className = `overview-value ${stationReading ? "sync" : station.updated_at ? "warn" : ""}`;
+  if (stationReading) {
+    const stationInput = station.input_w === null || station.input_w === undefined ? NaN : Number(station.input_w);
+    const stationSoc = station.soc_percent === null || station.soc_percent === undefined ? NaN : Number(station.soc_percent);
+    const details = [];
+    if (Number.isFinite(stationInput)) details.push(`Input ${stationInput.toFixed(0)} W`);
+    if (Number.isFinite(stationSoc)) details.push(`${stationSoc.toFixed(0)}% SOC`);
+    $("#overview-solix-note").textContent = details.join(" · ") || "Live Bluetooth reading";
+  } else if (station.updated_at) {
+    const age = station.age_s === null || station.age_s === undefined ? NaN : Number(station.age_s);
+    $("#overview-solix-note").textContent = Number.isFinite(age) ? `Last reading ${formatDuration(age)} ago` : "Last reading is stale";
+  } else if (station.configured) {
+    $("#overview-solix-note").textContent = station.error ? "Bluetooth probe unavailable" : "Waiting for Bluetooth probe";
+  } else {
+    $("#overview-solix-note").textContent = "Probe not configured";
+  }
   $("#overview-power-draw").textContent = performerDraw === null || performerDraw === undefined ? "--" : `${Number(performerDraw).toFixed(2)} W`;
   $("#overview-meter-count").textContent = `${Number(monitor.usable_sample_count || 0)} / ${Number(monitor.sample_count || 0)}`;
   $("#overview-history-status").textContent = powerHistory.loading

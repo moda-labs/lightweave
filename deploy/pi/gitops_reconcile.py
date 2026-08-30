@@ -458,6 +458,12 @@ class GitOpsReconciler:
             _atomic_write(provisioner_target, provisioner_source.read_bytes(), mode=0o644)
         else:
             _durable_unlink(provisioner_target)
+        solix_source = self.config.repo / "deploy" / "pi" / "lightweave-solix.service"
+        solix_target = self.config.systemd_dir / "lightweave-solix.service"
+        if solix_source.is_file():
+            _atomic_write(solix_target, solix_source.read_bytes(), mode=0o644)
+        else:
+            _durable_unlink(solix_target)
 
     def _install_gitops_runtime(self) -> None:
         _atomic_write(
