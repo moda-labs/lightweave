@@ -127,7 +127,12 @@ PUBLIC_HTTP_ROUTES = {
 }
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OTA_CHUNK_RETRYABLE_ERRORS = {
+    "bad ota chunk",
     "bad ota chunk data",
+    "bad ota rebroadcast",
+    "bad ota rebroadcast data",
+    "bad ota repair",
+    "bad ota repair data",
     "ota chunk length mismatch",
     "ota chunk offset mismatch",
     "ota chunk exceeds image size",
@@ -3281,6 +3286,40 @@ def create_app(
                     detail=error,
                 )
 
+        async def wait_for_live_artifact_identity(
+            mac: str,
+        ) -> dict[str, Any] | None:
+            """Verify an activated performer after its OTA status row expires."""
+            for attempt in range(OTA_POST_REBOOT_ATTEMPTS):
+                if attempt:
+                    await asyncio.sleep(OTA_POST_REBOOT_POLL_S)
+                try:
+                    current = await call("snapshot")
+                except SerialProtocolError:
+                    continue
+                lantern = next(
+                    (
+                        item
+                        for item in current.get("lanterns") or []
+                        if str(item.get("mac") or "") == mac
+                    ),
+                    None,
+                )
+                if (
+                    lantern
+                    and lantern.get("status") == "alive"
+                    and already_installed(lantern)
+                ):
+                    return {
+                        "mac": mac,
+                        "phase": "complete",
+                        "error": "none",
+                        "offset": artifact.size,
+                        "crc32": artifact.crc32,
+                        "source": "post_reboot_state",
+                    }
+            return None
+
         async def dispatch_protocol_migration_activation(mac: str) -> None:
             """Dispatch once without accepting ambiguous status as proof.
 
@@ -3952,6 +3991,16 @@ def create_app(
                             )
                             if node and node.get("phase") == "complete":
                                 activated.add(mac)
+                                break
+                            verified = await wait_for_live_artifact_identity(mac)
+                            if verified is not None:
+                                activated.add(mac)
+                                nodes = [
+                                    item
+                                    for item in nodes
+                                    if str(item.get("mac") or "") != mac
+                                ]
+                                nodes.append(verified)
                                 break
                             await asyncio.sleep(OTA_ACTIVATION_POLL_S)
                         if mac not in activated:

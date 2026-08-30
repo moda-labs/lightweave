@@ -628,6 +628,32 @@ class ActivationStatusExpiresAfterEachNode(RecordingActivationConductor):
         return ack
 
 
+class ActivationStatusDisappearsAfterReboot(RecordingActivationConductor):
+    """Models a successful reboot whose short-lived OTA row is missed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.expired_once = False
+        self.restart_calls = 0
+
+    def ota_activate(self, mac: str | None = None) -> dict:
+        ack = super().ota_activate(mac)
+        if mac is not None and ack.get("ok") and not self.expired_once:
+            self.expired_once = True
+            self._ota_nodes[mac].update({
+                "phase": "idle",
+                "error": "none",
+                "offset": 0,
+                "crc32": 0,
+                "last_seen_s": 0,
+            })
+        return ack
+
+    def ota_restart(self, mac: str) -> dict:
+        self.restart_calls += 1
+        return super().ota_restart(mac)
+
+
 class OldConductorUntilActivated(RecordingActivationConductor):
     def __init__(self) -> None:
         super().__init__()
@@ -820,6 +846,18 @@ class LengthMismatchOtaChunkConductor(MockConductor):
             self.nacked = True
             return {"ok": False, "error": "ota chunk length mismatch"}
         return super().ota_chunk(offset, data)
+
+
+class NackingOtaRepairConductor(PerformerMissedChunkConductor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.nacked_repair = False
+
+    def ota_repair(self, mac: str, offset: int, data: bytes) -> dict:
+        if not self.nacked_repair:
+            self.nacked_repair = True
+            return {"ok": False, "error": "bad ota repair"}
+        return super().ota_repair(mac, offset, data)
 
 
 class AdvancedThenNackingOtaChunkConductor(MockConductor):
@@ -3453,6 +3491,29 @@ def test_ota_install_repairs_a_performer_that_missed_a_chunk_without_restarting_
     assert {node["phase"] for node in install["nodes"]} == {"complete"}
 
 
+def test_ota_install_retries_a_transient_repair_parser_error(
+    tmp_path, managed_client
+) -> None:
+    conductor = NackingOtaRepairConductor()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    firmware = b"\xe9" + bytes(range(255)) * 3
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin&protocol=11",
+        content=firmware,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.nacked_repair is True
+    assert conductor.repair_calls > 0
+    assert {node["phase"] for node in install["nodes"]} == {"complete"}
+
+
 def test_ota_install_rebroadcasts_one_shared_range_for_multiple_lagging_performers(
     tmp_path, managed_client
 ) -> None:
@@ -4107,6 +4168,29 @@ def test_ota_refreshes_staged_status_before_each_performer_activation(
     assert install["complete"] is True
     assert conductor.activation_order[-1] is None
     assert conductor.probe_count >= install["target_count"]
+
+
+def test_ota_activation_uses_live_identity_when_completion_status_is_missed(
+    tmp_path, managed_client
+) -> None:
+    conductor = ActivationStatusDisappearsAfterReboot()
+    for lantern in conductor._lanterns:
+        lantern.status = "alive"
+    client = managed_client(create_app(conductor, ota_store=OtaArtifactStore(tmp_path)))
+    client.put(
+        "/api/operations/ota-artifact?filename=firmware.bin&protocol=11",
+        content=b"\xe9" + bytes(range(255)) * 2,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert client.post("/api/operations/ota-install").status_code == 202
+    install = wait_for_ota_terminal(client)
+
+    assert install["complete"] is True
+    assert conductor.expired_once is True
+    assert conductor.restart_calls == 0
+    assert conductor.activation_order[:-1] == sorted(install["target_macs"])
+    assert conductor.activation_order[-1] is None
 
 
 def test_ota_activation_order_defaults_unknown_roles_to_performer() -> None:
