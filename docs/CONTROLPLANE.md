@@ -120,6 +120,28 @@ Snapshot shape:
     {"group_id": 1, "name": "Bikes", "label": "Group 2 · Bikes"}
   ],
   "blackout": {"restore_available": false},
+  "audio": {
+    "available": true,
+    "playing": true,
+    "paused": false,
+    "loop": true,
+    "revision": 1788105600000,
+    "selected_track": "baskets-soundscape-v4.mp3",
+    "track": {
+      "id": "baskets-soundscape-v4.mp3",
+      "name": "Baskets Soundscape V4",
+      "duration_s": 4996.0
+    },
+    "position_s": 83.2,
+    "error": null,
+    "tracks": [
+      {
+        "id": "baskets-soundscape-v4.mp3",
+        "name": "Baskets Soundscape V4",
+        "duration_s": 4996.0
+      }
+    ]
+  },
   "power": {
     "light_sleep_check_s": 4,
     "deep_sleep_check_min": 15,
@@ -273,6 +295,16 @@ The map renders only positioned lanterns.
 - `POST /api/show/blackout`
 - `POST /api/show/restore` -> restore all eight brightness values captured by
   the most recent blackout. Returns an error when no restore point is available.
+- `GET /api/audio` -> current soundtrack, play/pause state, loop position,
+  available tracks, and any decoder/output error.
+- `POST /api/audio/play` -> resume the selected track or retry playback after
+  an output failure.
+- `POST /api/audio/pause` -> pause playback and persist that choice across
+  control-service restarts.
+- `POST /api/audio/restart` -> restart the selected track from the beginning.
+- `POST /api/audio/select` with
+  `{"track_id":"baskets-final-boat.mp3"}` -> select a discovered track by its
+  filename and persist the selection. Playback continues unless paused.
 - `POST /api/operations/power-policy` with the runtime sleep/check policy.
 - `POST /api/operations/field-power` with `{"mode":"sleep"}`, `{"mode":"wake"}`,
   or `{"mode":"schedule"}`. Sleep refuses a still-running OTA job; the UI first
@@ -562,6 +594,22 @@ number while showing "Not seen".
   browser's remembered nonzero brightness, falling back to 48 and respecting
   the firmware ceiling of 192.
 - Reversible field-wide blackout and restore controls.
+
+### 3.1 Soundtrack
+
+- The Pi discovers valid MP3 payloads in `CONTROL_AUDIO_DIR` and uses
+  `baskets-soundscape-v4.mp3` by default.
+- `mpg123` plays the selected track through the system audio output in a
+  continuous loop. `CONTROL_AUDIO_DEVICE` optionally selects a non-default ALSA
+  device.
+- Playback starts with the control service unless the operator previously
+  paused it. The selected track and pause state persist under
+  `CONTROL_DATA_DIR/audio/`.
+- Overview reports the selected track and current minute. The Sound tab lists
+  tracks and provides play/pause, restart, and selection controls.
+- Audio mutations publish `{"type":"audio","audio":...}` WebSocket events.
+  Each snapshot includes a monotonically increasing `revision` so slower state
+  refreshes cannot overwrite a newer operator command.
 
 ### 4. Power & energy
 

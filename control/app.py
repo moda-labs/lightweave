@@ -32,6 +32,7 @@ from .adapters import (
     JsonLineSerialConductor,
     SerialProtocolError,
 )
+from .audio_player import AudioPlayer, AudioPlayerError
 from .auth import AuthManager, AuthStatus, canonicalize_client_ip
 from .calibration import CalibrationError, CalibrationStore, calibration_code_plan
 from .group_store import GROUP_NAME_MAX_LENGTH, GroupStore, GroupStoreError
@@ -360,6 +361,10 @@ class PowerMonitorUpdate(BaseModel):
     full_voltage: float = Field(gt=0, le=100)
 
 
+class AudioTrackSelection(BaseModel):
+    track_id: str = Field(min_length=1, max_length=255)
+
+
 class OtaModeUpdate(BaseModel):
     enabled: bool
 
@@ -507,6 +512,7 @@ def create_app(
     power_monitor_store: PowerMonitorStore | None = None,
     power_history_store: PowerHistoryStore | None = None,
     uploaded_pattern_store: UploadedPatternStore | None = None,
+    audio_player: AudioPlayer | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_remote_settings(os.environ)
     resolved_auth = auth_manager
@@ -521,6 +527,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        await asyncio.to_thread(app.state.audio_player.start)
+
         async def ticker() -> None:
             while True:
                 await asyncio.sleep(CONTROL_TICK_INTERVAL_S)
@@ -675,6 +683,7 @@ def create_app(
             revoked = set(app.state.auth_manager.revoke_all_sessions())
             if revoked:
                 await close_session_websockets(revoked)
+            await asyncio.to_thread(app.state.audio_player.shutdown)
             release_ota_operation_lock()
 
     app = FastAPI(title="Do Baskets Dream Control Plane", lifespan=lifespan)
@@ -781,6 +790,10 @@ def create_app(
         else app.state.power_monitor_store.root
     )
     app.state.power_history_store = power_history_store or PowerHistoryStore(power_root)
+    audio_dir = Path(os.getenv("CONTROL_AUDIO_DIR", str(REPO_ROOT / "sound"))).expanduser()
+    audio_state_path = data_dir / "audio" / "player.json" if data_dir else Path(".control_audio/player.json")
+    app.state.audio_player = audio_player or AudioPlayer(audio_dir, audio_state_path)
+    app.state.audio_command_lock = asyncio.Lock()
     app.state.power_history_error = None
     stored_power_monitor = app.state.power_monitor_store.load()
     app.state.power_monitor_config = {
@@ -1201,6 +1214,7 @@ def create_app(
         state["groups"] = groups
         state["lanterns"] = enrich_lantern_groups(state.get("lanterns") or [], groups)
         state["power_monitor"] = power_monitor_summary(state)
+        state["audio"] = app.state.audio_player.status()
         state["recovery"] = recovery_summary(state)
         return state
 
@@ -1720,6 +1734,37 @@ def create_app(
             return await conductor_call("snapshot")
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.get("/api/audio")
+    async def get_audio() -> dict[str, Any]:
+        return await asyncio.to_thread(app.state.audio_player.status)
+
+    async def audio_command(method: str, *args: Any) -> dict[str, Any]:
+        async with app.state.audio_command_lock:
+            try:
+                status = await asyncio.to_thread(
+                    getattr(app.state.audio_player, method), *args
+                )
+            except AudioPlayerError as error:
+                raise HTTPException(status_code=404, detail=str(error)) from error
+            await publish({"type": "audio", "audio": status})
+            return status
+
+    @app.post("/api/audio/play")
+    async def play_audio() -> dict[str, Any]:
+        return await audio_command("play")
+
+    @app.post("/api/audio/pause")
+    async def pause_audio() -> dict[str, Any]:
+        return await audio_command("pause")
+
+    @app.post("/api/audio/restart")
+    async def restart_audio() -> dict[str, Any]:
+        return await audio_command("restart")
+
+    @app.post("/api/audio/select")
+    async def select_audio(request: AudioTrackSelection) -> dict[str, Any]:
+        return await audio_command("select", request.track_id)
 
     @app.get("/api/provisioning/status")
     async def get_provisioning_status() -> dict[str, Any]:

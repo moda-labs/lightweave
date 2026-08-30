@@ -8,8 +8,8 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**229 pass**) is green; **516 control tests** are green; all three
-device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+(**231 pass**) and the full control suite are green; all three device envs
+(`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest in `feat/radial-ripple` (2026-08-30): `POND_RIPPLE` adds concentric,
 center-selectable outward waves
@@ -35,10 +35,16 @@ for a staged but inactive target ends after a 60-second verification window;
 active targets are repaired only when a node registers. Firmware and preview
 implementations share host/control regression coverage. The interpreter enforces
 a weighted execution budget in addition to its instruction and stack limits.
-The field build uses 73,472 B RAM (22.4%) and 903,793 B flash (69.0%), an
-exact-base delta of +5,968 B RAM and +17,736 B flash from deployed `a3e19cf`.
-Nothing from this worktree has been flashed, broadcast, or deployed; bench proof
-of distribution through a relay and frame timing is still owed before release.
+The current field build uses 74,816 B RAM (22.8%) and 905,605 B flash (69.1%).
+Bench nodes #56 (conductor), #57, and #58 ran firmware build `5c05ebe9`: mixed
+old/current fleets rejected both new-only patterns without changing the active
+show while legacy Glow and Ocean remained usable; the full 7,128-chunk OTA plus
+repeated state snapshots completed without a stack panic; Pond Ripple and Ocean
+rendered on the reconciled fleet; and uploaded program `e5d021f64150da90`
+reached the exact 2/2 readiness barrier. Performer #57 and the conductor were
+then reset independently and recovered their roles, positions, firmware, show
+state, and uploaded-program persistence. The control plane was restarted twice,
+and saved uploaded-pattern CRUD plus rebroadcast recovery remained healthy.
 
 Also present from v0.9.4: `WAVEFRONT` remains pattern 11, `FIRE2012` remains
 pattern 10, while new IDs are allocated after them (`POND_RIPPLE` 12 and
@@ -46,7 +52,18 @@ pattern 10, while new IDs are allocated after them (`POND_RIPPLE` 12 and
 USB-connected performers were last read back on protocol 11; no pattern ID from
 that release may be reused by later firmware.
 
-Latest in this feature branch (2026-08-10): the lantern locator is now one
+Also merged from `main` (2026-08-30): the control plane now owns a simple
+Pi-hosted soundtrack player. It discovers MP3s in `sound/`, autoplays
+`baskets-soundscape-v4.mp3` in a continuous loop, and preserves the selected
+track plus paused state across service restarts. Overview shows the soundtrack
+and current minute; the new Sound tab supports pause/resume, restart, and track
+selection. Playback uses `mpg123` through the system ALSA output, with an
+optional `CONTROL_AUDIO_DEVICE` override. The service has audio-group access,
+the Pi runbook installs `mpg123` and Git LFS, and MP3 assets are marked for LFS.
+Focused player/API tests and JavaScript/Python syntax checks are green; physical
+audio-jack playback on the production Pi remains to be verified.
+
+Also in this feature branch (2026-08-10): the lantern locator is now one
 temporary field-wide beacon override instead of a calibration pattern copied
 into all eight group slots. It takes precedence over group rendering while
 active, leaves every saved group pattern untouched, and starts/stops with one
@@ -429,7 +446,7 @@ anti-framing, HSTS, and field network-mutation rules are covered by tests.
 Field OTA now returns `202` after bounded preflight, runs as one server-owned
 task, exposes authoritative progress through GET, and returns immediate
 `423 Locked` for competing serial work instead of queuing it behind the
-transfer. Mutable OTA/pattern/calibration state is rooted by
+transfer. Mutable OTA/pattern/calibration/audio state is rooted by
 `CONTROL_DATA_DIR`. Pi Zero 2 W packaging and the complete Starlink +
 Cloudflare Tunnel runbook are under [`deploy/pi/`](../deploy/pi/README.md);
 stable architecture is in [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md). The next owner
@@ -746,7 +763,7 @@ revised cost roll-up.
   mode enter/exit, firmware artifact staging, and field-wide OTA install.
   Serial calls are serialized and run
   off the FastAPI event loop, so one serial timeout does not block unrelated
-  async work. The UI has Overview, Lantern Locations, Node List, Patterns,
+  async work. The UI has Overview, Lantern Locations, Node List, Patterns, Sound,
   Power, Operations, and Firmware views; location-map zoom/pan,
   drag-to-move/place, unpositioned tray, single bottom-sheet actions,
   per-pattern controls, field firmware consistency display, Recovery card, and

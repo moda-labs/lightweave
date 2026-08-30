@@ -9,8 +9,12 @@ The release-authoring and production-promotion procedure lives in
 
 ## Runtime boundary
 
-Remote administration is optional infrastructure, not part of the show runtime.
-The conductor remains authoritative for layout and show configuration, and performers continue rendering if the Pi, Starlink, Cloudflare, or an operator browser disappears.
+Remote administration is optional infrastructure, not part of the lantern-field
+runtime. The conductor remains authoritative for layout and show configuration,
+and performers continue rendering if the Pi, Starlink, Cloudflare, or an operator
+browser disappears. The soundtrack is intentionally Pi-hosted, so Pi or control
+service loss stops audio while loss of Starlink, Cloudflare, or the browser does
+not.
 
 ```text
 operator browser
@@ -104,10 +108,12 @@ Bench development enables network mutation only through explicit development con
 ## Service and data layout
 
 Application code and the Python virtual environment live under read-only `/opt/lightweave`.
-Mutable OTA, pattern, and calibration data live under `/var/lib/lightweave`;
+Mutable OTA, pattern, calibration, and soundtrack-player state live under
+`/var/lib/lightweave`;
 root-owned release records and staged release firmware live under
 `/var/lib/lightweave-gitops` and are only group-readable by the service.
-The FastAPI service runs as an unprivileged `lightweave` user with serial access and write access only to its state directory.
+The FastAPI service runs as an unprivileged `lightweave` user with serial and
+audio-device access and write access only to its state directory.
 
 `cloudflared` runs as a separate unprivileged service.
 Its tunnel token is stored outside the application environment in a restricted root-owned file.
@@ -140,6 +146,7 @@ CONTROL_SERIAL_TIMEOUT_S=8.0
 CONTROL_SERIAL_STATE_TIMEOUT_S=30.0
 CONTROL_STATE_POLL_INTERVAL_S=15.0
 CONTROL_DATA_DIR=/var/lib/lightweave
+CONTROL_AUDIO_DIR=/opt/lightweave/sound
 CONTROL_ALLOWED_ORIGINS=https://control.example.com
 CONTROL_REQUIRE_HTTPS=true
 CONTROL_ALLOW_NETWORK_CHANGES=false
@@ -148,8 +155,10 @@ CONTROL_PASSWORD_HASH=<generated-scrypt-hash>
 
 ## Failure and recovery
 
-Loss of Starlink or Cloudflare removes remote administration but does not affect the running show.
-A Pi or FastAPI restart invalidates browser sessions and reconnects to the conductor after service recovery.
+Loss of Starlink or Cloudflare removes remote administration but does not affect
+the lantern field or Pi-hosted soundtrack. A Pi or FastAPI restart stops audio,
+invalidates browser sessions, reconnects to the conductor after service recovery,
+and resumes the selected soundtrack unless it was persistently paused.
 A USB flap is handled by service restart and serial reconnection.
 
 Physical recovery uses a directly attached console or SSH from the Starlink LAN

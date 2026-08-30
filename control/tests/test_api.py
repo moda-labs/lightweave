@@ -12,6 +12,7 @@ import pytest
 
 import control.app as app_module
 from control.adapters import JsonLineSerialConductor, SerialProtocolError
+from control.audio_player import AudioPlayer
 from control.app import (
     create_app,
     ota_activation_order,
@@ -38,6 +39,31 @@ from control.preview import (
     _pond_ripple_intensity,
     _visible_hsv_color,
 )
+
+
+class ApiAudioBackend:
+    available = True
+    unavailable_reason = None
+
+    def __init__(self) -> None:
+        self.started = []
+
+    def start(self, path):
+        process = {"path": path, "running": True, "paused": False}
+        self.started.append(process)
+        return process
+
+    def pause(self, process) -> None:
+        process["paused"] = True
+
+    def resume(self, process) -> None:
+        process["paused"] = False
+
+    def stop(self, process) -> None:
+        process["running"] = False
+
+    def is_running(self, process) -> bool:
+        return process["running"]
 
 
 @pytest.fixture
@@ -197,6 +223,112 @@ def test_state_snapshot_has_its_own_long_timeout_budget() -> None:
     conductor.identify("00:00:00:00:00:01")
 
     assert transport.timeouts == pytest.approx([30.0, 5.0], abs=0.01)
+
+
+def test_audio_api_autoplays_default_and_controls_selected_track(
+    managed_client, tmp_path: Path
+) -> None:
+    tracks = tmp_path / "sound"
+    tracks.mkdir()
+    # Valid MPEG-1 Layer III / 320 kbps headers are enough for discovery and
+    # duration reporting; the injected backend does not decode the fixture.
+    for name in ("baskets-final-boat.mp3", "baskets-soundscape-v4.mp3"):
+        (tracks / name).write_bytes(bytes.fromhex("fffb e000") + b"\0" * 4092)
+    audio = AudioPlayer(
+        tracks,
+        tmp_path / "data" / "audio" / "player.json",
+        backend=ApiAudioBackend(),
+    )
+    client = managed_client(create_app(MockConductor(), audio_player=audio))
+
+    initial = client.get("/api/audio")
+    assert initial.status_code == 200
+    assert initial.json()["selected_track"] == "baskets-soundscape-v4.mp3"
+    assert initial.json()["playing"] is True
+    revision = initial.json()["revision"]
+    assert client.get("/api/state").json()["audio"]["playing"] is True
+    page = client.get("/").text
+    assert 'data-view="sound"' in page
+    assert 'id="overview-audio-position"' in page
+    assert 'id="audio-tracks"' in page
+
+    paused = client.post("/api/audio/pause")
+    assert paused.status_code == 200
+    assert paused.json()["paused"] is True
+    assert paused.json()["revision"] > revision
+    revision = paused.json()["revision"]
+
+    selected = client.post(
+        "/api/audio/select", json={"track_id": "baskets-final-boat.mp3"}
+    )
+    assert selected.status_code == 200
+    assert selected.json()["selected_track"] == "baskets-final-boat.mp3"
+    assert selected.json()["paused"] is True
+    assert selected.json()["revision"] > revision
+    revision = selected.json()["revision"]
+
+    playing = client.post("/api/audio/play")
+    assert playing.status_code == 200
+    assert playing.json()["playing"] is True
+    assert playing.json()["revision"] > revision
+    restarted = client.post("/api/audio/restart").json()
+    assert restarted["position_s"] < 0.1
+    assert restarted["revision"] > playing.json()["revision"]
+
+    rejected = client.post("/api/audio/select", json={"track_id": "../escape.mp3"})
+    assert rejected.status_code == 404
+
+
+def test_audio_commands_serialize_mutation_and_publication(managed_client) -> None:
+    class OrderedAudioPlayer:
+        def __init__(self) -> None:
+            self.pause_started = threading.Event()
+            self.release_pause = threading.Event()
+            self.order = []
+
+        def start(self) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+        def status(self) -> dict:
+            return {"available": True, "playing": True, "paused": False, "tracks": []}
+
+        def pause(self) -> dict:
+            self.order.append("pause-start")
+            self.pause_started.set()
+            assert self.release_pause.wait(timeout=2)
+            self.order.append("pause-end")
+            return {"available": True, "playing": False, "paused": True, "tracks": []}
+
+        def play(self) -> dict:
+            self.order.append("play")
+            return self.status()
+
+    audio = OrderedAudioPlayer()
+    client = managed_client(create_app(MockConductor(), audio_player=audio))
+    responses = {}
+
+    pause_thread = threading.Thread(
+        target=lambda: responses.setdefault("pause", client.post("/api/audio/pause"))
+    )
+    pause_thread.start()
+    assert audio.pause_started.wait(timeout=1)
+    play_thread = threading.Thread(
+        target=lambda: responses.setdefault("play", client.post("/api/audio/play"))
+    )
+    play_thread.start()
+    time.sleep(0.05)
+    assert audio.order == ["pause-start"]
+
+    audio.release_pause.set()
+    pause_thread.join(timeout=2)
+    play_thread.join(timeout=2)
+
+    assert audio.order == ["pause-start", "pause-end", "play"]
+    assert responses["pause"].status_code == 200
+    assert responses["play"].status_code == 200
 
 
 def test_default_serial_conductor_reads_distinct_state_timeout(
