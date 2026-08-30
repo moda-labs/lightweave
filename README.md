@@ -86,9 +86,10 @@ SK6812 RGBW rings
 ```
 
 The primary conductor is authoritative for permanent board identity, the field layout,
-and live show settings. The control server is an admin surface, not a runtime
-dependency: once settings are saved to the conductor, the field keeps running if
-the laptop or Pi is unplugged.
+and live show settings. The control server is not a runtime dependency for the
+lantern field: once settings are saved to the conductor, the lights keep running if
+the laptop or Pi is unplugged. The installation soundtrack is the exception because
+it plays from the Pi's audio output.
 
 ## Captive web UI
 

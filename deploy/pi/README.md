@@ -213,7 +213,8 @@ the root recovery gate that must run before control. The initial production
 channel is disabled, so this first invocation only enrolls the Pi and verifies
 the current release; it does not pull a different version. The control unit also
 requires `/etc/lightweave/control.env`; a missing file prevents startup.
-The control unit's `StateDirectory=lightweave` creates `/var/lib/lightweave` as mode 0700 for `ota/`, `patterns/`, and `calibration/`.
+The control unit's `StateDirectory=lightweave` creates `/var/lib/lightweave` as
+mode 0700 for `ota/`, `patterns/`, `calibration/`, and `audio/`.
 The USB daemon is separately confined to `StateDirectory=lightweave/provisioner`, which contains `station.json`, `jobs.json`, its verified artifact cache, and its local device safety registry.
 Combined with `ProtectSystem=strict`, neither service can write outside its declared state boundary.
 
@@ -364,7 +365,7 @@ From an operator browser outside the Starlink LAN:
 3. Log in, confirm live WebSocket updates, log out, and confirm the prior session
    no longer works.
 4. Confirm Wi-Fi and hotspot mutation controls are disabled.
-5. Confirm `/var/lib/lightweave/{ota,patterns,calibration}` contains mutable
+5. Confirm `/var/lib/lightweave/{ota,patterns,calibration,audio}` contains mutable
    state and `/opt/lightweave` remains unchanged.
 
 On the Pi:

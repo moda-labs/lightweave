@@ -428,7 +428,7 @@ anti-framing, HSTS, and field network-mutation rules are covered by tests.
 Field OTA now returns `202` after bounded preflight, runs as one server-owned
 task, exposes authoritative progress through GET, and returns immediate
 `423 Locked` for competing serial work instead of queuing it behind the
-transfer. Mutable OTA/pattern/calibration state is rooted by
+transfer. Mutable OTA/pattern/calibration/audio state is rooted by
 `CONTROL_DATA_DIR`. Pi Zero 2 W packaging and the complete Starlink +
 Cloudflare Tunnel runbook are under [`deploy/pi/`](../deploy/pi/README.md);
 stable architecture is in [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md). The next owner
@@ -738,7 +738,7 @@ revised cost roll-up.
   mode enter/exit, firmware artifact staging, and field-wide OTA install.
   Serial calls are serialized and run
   off the FastAPI event loop, so one serial timeout does not block unrelated
-  async work. The UI has Overview, Lantern Locations, Node List, Patterns,
+  async work. The UI has Overview, Lantern Locations, Node List, Patterns, Sound,
   Power, Operations, and Firmware views; location-map zoom/pan,
   drag-to-move/place, unpositioned tray, single bottom-sheet actions,
   per-pattern controls, field firmware consistency display, Recovery card, and

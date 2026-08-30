@@ -339,7 +339,9 @@ across browser sessions and polled on a relaxed cadence because their UART cost
 grows with fleet size; they are observability, not part of the command ACK path.
 
 **Not a runtime dependency:** unplug the admin host and the conductor + field
-continue on their stored table and program.
+continue on their stored table and program. This applies to lantern rendering;
+the Pi-hosted soundtrack described in §5.3 stops when the Pi or control service
+stops.
 
 **Deployment:** the admin host is a **Raspberry Pi** cabled to the conductor over
 USB. The reviewed remote shape makes the Pi a normal Starlink Wi-Fi client,
