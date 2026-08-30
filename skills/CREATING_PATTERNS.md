@@ -5,11 +5,12 @@ broadcast show patterns for Do Baskets Dream.
 
 This is a control-plane workflow for the current compiled pattern vocabulary:
 `Pulse`, `Glow`, `Sweep`, `Wavefront`, `Palette Drift`, `Firefly`, `Ocean Wave`,
-`Pond Ripple`, `Fire Flicker`, and `Fire2012`. The separate `Uploaded Pattern`
-option accepts bounded JSON
-expressions for new `f(x,y,pixel,t)` looks without another firmware update. It
-does not load native code or change compiled pattern functions; new C++ built-ins
-still belong in `include/pattern_math.h` with host tests.
+`Pond Ripple`, `Fire Flicker`, and `Fire2012`. The separate **Custom Pattern**
+option builds bounded expressions for new `f(x,y,pixel,t)` looks without another
+firmware update. It does not load native code or change compiled pattern
+functions; new C++ built-ins still belong in `include/pattern_math.h` with host
+tests. The stable firmware and API identifier remains `Uploaded Pattern`;
+operators should not need to see or enter that internal name.
 
 ## Preconditions
 
@@ -205,9 +206,14 @@ point. Its controls are positional on the live wire:
 Preview/review also accept `period`, `wavelength`, `center_x`, and `center_y`.
 Live broadcasts and saved candidates should use `p0..p3`.
 
-## Uploaded Pattern Programs
+## Custom Pattern Programs
 
-An uploaded program has four outputs: hue in cycles, saturation, perceptual
+The Patterns screen provides a guided builder for color, movement, cycle time,
+wave spacing/direction or ripple center, and dim/bright levels. It generates the
+program below; normal operators do not copy or edit JSON. **Advanced source** is
+an optional escape hatch for expressions the guided controls cannot create.
+
+A custom program has four outputs: hue in cycles, saturation, perceptual
 value, and intensity. Each output may be a finite number, an input (`x`, `y`,
 `time`, or normalized `pixel`), or an operation object. Firmware supports
 `add`, `sub`, `mul`, `div`, `min`, `max`, `pow`, `sin`, `cos`, `abs`, `fract`,
@@ -346,8 +352,11 @@ curl -sS http://127.0.0.1:8000/api/state
 
 Open `http://127.0.0.1:8000`, then use the Patterns tab.
 
-- Tune the draft controls.
+- Select **Custom Pattern**.
+- Choose movement, color, cycle time, spatial controls, and dim/bright levels.
+- Use **Preview pattern** to validate before saving or running it.
 - `Save draft` stores the current draft in the pattern library.
+- Open **Advanced source** only when the guided controls cannot express the look.
 - Saved pattern actions:
   - `Preview`: PNG still frame.
   - `Frames`: JSON frame sequence.

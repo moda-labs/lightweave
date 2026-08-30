@@ -53,6 +53,17 @@ flags, and recovery ready. The saved uploaded program then activated at 2/2
 readiness on the integrated image before the bench was restored to Ocean Wave at
 brightness 48 with params `[9000, 64612, 65069, 205]`.
 
+The operator UI now presents the VM-backed option as **Custom Pattern** and
+provides guided controls for traveling waves, center ripples, whole-field
+pulses, per-lantern shimmer, and steady glow. Color, timing, spacing, direction,
+ripple center, and dim/bright levels compile into the same bounded program
+format; JSON is retained only as a collapsed **Advanced source** escape hatch
+for existing or hand-authored programs. The stable firmware/API identifier
+remains `Uploaded Pattern`. Browser QA covered desktop and mobile layouts,
+guided save/reload/preview/activation, and lossless editing of a legacy JSON
+program. The generated center ripple reached the exact 2/2 bench readiness
+barrier before the bench was restored to the Ocean Wave state above.
+
 Also present from v0.9.4: `WAVEFRONT` remains pattern 11, `FIRE2012` remains
 pattern 10, while new IDs are allocated after them (`POND_RIPPLE` 12 and
 `UPLOADED` 13). Firefly retains its deterministic three-beat chorus. All ten

@@ -1317,7 +1317,7 @@ def create_app(
                 and int(uploaded.get("ready_count") or 0) == expected
             )
             detail = (
-                "Uploaded Pattern requires interpreter firmware and the exact program "
+                "Custom Pattern requires interpreter firmware and the exact program "
                 "on every placed lantern. Finish program distribution before activation."
             )
         if not ready:
@@ -1962,8 +1962,8 @@ def create_app(
         except UploadedPatternError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
         if not deleted:
-            raise HTTPException(status_code=404, detail="unknown uploaded pattern")
-        return {"ok": True, "message": "uploaded pattern deleted"}
+            raise HTTPException(status_code=404, detail="unknown custom pattern")
+        return {"ok": True, "message": "custom pattern deleted"}
 
     async def broadcast_uploaded_pattern_value(
         pattern: dict[str, Any], group_id: int | None
@@ -1989,7 +1989,7 @@ def create_app(
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Uploaded Pattern is blocked until every placed lantern is online "
+                    "Custom Pattern is blocked until every placed lantern is online "
                     "on interpreter-capable firmware. Existing patterns remain active."
                 ),
             )
@@ -2067,7 +2067,7 @@ def create_app(
         await publish_command_accepted("uploaded-pattern")
         return {
             "ok": True,
-            "message": "uploaded pattern verified and activated",
+            "message": "custom pattern verified and activated",
             "pattern": pattern,
             "compiled": compiled.as_dict(),
             "ack": activation,
@@ -2095,7 +2095,7 @@ def create_app(
         except UploadedPatternError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
         if not pattern:
-            raise HTTPException(status_code=404, detail="unknown uploaded pattern")
+            raise HTTPException(status_code=404, detail="unknown custom pattern")
         return await broadcast_uploaded_pattern_value(pattern, group_id)
 
     @app.get("/api/groups")
