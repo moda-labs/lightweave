@@ -36,15 +36,22 @@ active targets are repaired only when a node registers. Firmware and preview
 implementations share host/control regression coverage. The interpreter enforces
 a weighted execution budget in addition to its instruction and stack limits.
 The current field build uses 74,816 B RAM (22.8%) and 905,605 B flash (69.1%).
-Bench nodes #56 (conductor), #57, and #58 ran firmware build `5c05ebe9`: mixed
-old/current fleets rejected both new-only patterns without changing the active
-show while legacy Glow and Ocean remained usable; the full 7,128-chunk OTA plus
-repeated state snapshots completed without a stack panic; Pond Ripple and Ocean
-rendered on the reconciled fleet; and uploaded program `e5d021f64150da90`
-reached the exact 2/2 readiness barrier. Performer #57 and the conductor were
-then reset independently and recovered their roles, positions, firmware, show
-state, and uploaded-program persistence. The control plane was restarted twice,
-and saved uploaded-pattern CRUD plus rebroadcast recovery remained healthy.
+Bench nodes #56 (conductor), #57, and #58 run integrated firmware build
+`be36f8aa`. Mixed old/current fleets rejected both new-only patterns without
+changing the active show while legacy Glow and Ocean remained usable; the full
+7,128-chunk OTA plus repeated state snapshots completed without a stack panic;
+Pond Ripple and Ocean rendered on the reconciled fleet; and uploaded program
+`e5d021f64150da90` reached the exact 2/2 readiness barrier. Performer #57 and the
+conductor were reset independently and recovered their roles, positions,
+firmware, show state, and uploaded-program persistence. The control plane was
+restarted twice, and saved uploaded-pattern CRUD plus rebroadcast recovery
+remained healthy. A final selective OTA updated only stale performer #58 from
+`5c05ebe9` to `be36f8aa`: its full-image CRC matched, activation was verified
+from post-reboot firmware identity, and the operation completed with zero repair
+chunks. The resulting fleet reports 2/2 exact firmware matches, no attention
+flags, and recovery ready. The saved uploaded program then activated at 2/2
+readiness on the integrated image before the bench was restored to Ocean Wave at
+brightness 48 with params `[9000, 64612, 65069, 205]`.
 
 Also present from v0.9.4: `WAVEFRONT` remains pattern 11, `FIRE2012` remains
 pattern 10, while new IDs are allocated after them (`POND_RIPPLE` 12 and
