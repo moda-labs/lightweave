@@ -152,6 +152,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "await applyLiveState(data.state)" in app_js
     assert "function renderReleases()" in app_js
     index_html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (Path(__file__).parents[1] / "static" / "styles.css").read_text(encoding="utf-8")
     assert "Web control plane" in index_html
     assert "Field firmware" in index_html
     assert "field-release-pending-changes" in index_html
@@ -159,11 +160,17 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=22"' in index_html
-    assert 'href="/static/styles.css?v=8"' in index_html
+    assert 'src="/static/app.js?v=23"' in index_html
+    assert 'href="/static/styles.css?v=9"' in index_html
     assert '<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">' in index_html
     assert '<button class="active" data-view="overview">Overview</button>' in index_html
     assert '<button data-view="map">Lantern Locations</button>' in index_html
+    assert '<button data-view="sound">Sound</button>' in index_html
+    assert "grid-template-columns: repeat(8, 1fr)" in styles_css
+    assert "trackListSignature !== audioTrackListSignature" in app_js
+    assert "button.dataset.audioTrack === focusedTrack" in app_js
+    assert "generation === audioMutationGeneration" in app_js
+    assert "audioMutationPending > 0" in app_js
     assert 'data-overview-view="map">Manage locations</button>' in index_html
     assert 'id="view-overview"' in index_html
     assert index_html.index('data-view="overview"') < index_html.index('data-view="map"')
@@ -620,12 +627,104 @@ const issues = overviewIssues({{
   summary: {{firmware: {{consistent: false}}}},
   recovery: {{failed_ota: []}},
   power_monitor: {{stale_count: 1, implausible_count: 1, history: {{error: "disk full"}}}},
+  audio: {{available: false, error: "decoder unavailable"}},
 }});
 const titles = issues.map((issue) => issue.title).join("|");
 if (!titles.includes("placed lantern") || !titles.includes("needs a position")) process.exit(1);
 if (!titles.includes("Mixed field firmware") || !titles.includes("stale power meter")) process.exit(2);
 if (!titles.includes("implausible power reading") || !titles.includes("Power history is not recording")) process.exit(3);
 if (!issues.some((issue) => issue.severity === "bad")) process.exit(4);
+if (!titles.includes("Soundtrack is unavailable")) process.exit(5);
+if (!issues.some((issue) => issue.detail === "decoder unavailable")) process.exit(6);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_soundtrack_time_formatter_handles_boundaries_and_invalid_values() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function formatTrackTime(")
+    end = app_js.index("\n}\n\nfunction delay", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+{function_source}
+if (formatTrackTime(0) !== "0:00") process.exit(1);
+if (formatTrackTime(59.99) !== "0:59") process.exit(2);
+if (formatTrackTime(60) !== "1:00") process.exit(3);
+if (formatTrackTime(4996.8) !== "83:16") process.exit(4);
+if (formatTrackTime(-1) !== "0:00") process.exit(5);
+if (formatTrackTime(undefined) !== "0:00") process.exit(6);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_audio_poll_does_not_overwrite_a_newer_operator_action() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    helper_start = app_js.index("function audioRevision(")
+    helper_end = app_js.index("\n}\n\nfunction render", helper_start) + 2
+    helper_source = app_js[helper_start:helper_end]
+    start = app_js.index("async function refreshAudio()")
+    end = app_js.index("\n}\n\nfunction startAudioPolling", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+let audioRefreshPromise = null;
+let audioMutationGeneration = 0;
+let audioMutationPending = 0;
+let audioState = {{selected_track: "new.mp3"}};
+let state = {{audio: audioState}};
+let resolveRequest;
+function api() {{ return new Promise((resolve) => {{ resolveRequest = resolve; }}); }}
+function renderAudio() {{}}
+function renderOverview() {{}}
+{helper_source}
+{function_source}
+const pending = refreshAudio();
+audioMutationGeneration += 1;
+audioState = {{selected_track: "new.mp3"}};
+state.audio = audioState;
+resolveRequest({{selected_track: "stale.mp3"}});
+await pending;
+if (audioState.selected_track !== "new.mp3") process.exit(1);
+if (state.audio.selected_track !== "new.mp3") process.exit(2);
+if (audioRefreshPromise !== null) process.exit(3);
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_audio_action_notice_surfaces_backend_errors() -> None:
+    app_js = (Path(__file__).parents[1] / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_js.index("function audioActionNotice(")
+    end = app_js.index("\n}\n\nfunction render", start) + 2
+    function_source = app_js[start:end]
+    script = f"""
+{function_source}
+const success = audioActionNotice({{playing: true}}, "Soundtrack playing");
+if (success.message !== "Soundtrack playing" || success.error) process.exit(1);
+const failure = audioActionNotice({{error: "audio device busy"}}, "Soundtrack playing");
+if (failure.message !== "audio device busy" || !failure.error) process.exit(2);
 """
     completed = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -695,8 +794,11 @@ def test_live_state_refreshes_release_status_in_executed_javascript() -> None:
     refresh_end = app_js.index("\n}\n\nasync function applyLiveState", refresh_start) + 2
     apply_start = app_js.index("async function applyLiveState")
     apply_end = app_js.index("\n}\n\nasync function refreshSavedPatterns", apply_start) + 2
+    helper_start = app_js.index("function audioRevision(")
+    helper_end = app_js.index("\n}\n\nfunction render", helper_start) + 2
     script = f"""
-let state = null;
+let audioState = {{revision: 20, selected_track: "new.mp3"}};
+let state = {{audio: audioState}};
 let releaseInfo = null;
 let rendered = 0;
 let releaseRendered = 0;
@@ -706,11 +808,17 @@ async function api(path) {{
 }}
 function render() {{ rendered += 1; }}
 function renderReleases() {{ releaseRendered += 1; }}
+{app_js[helper_start:helper_end]}
 {app_js[refresh_start:refresh_end]}
 {app_js[apply_start:apply_end]}
-await applyLiveState({{conductor: {{firmware: {{version: "0.3.0"}}}}}});
+await applyLiveState({{
+  conductor: {{firmware: {{version: "0.3.0"}}}},
+  audio: {{revision: 19, selected_track: "stale.mp3"}},
+}});
 if (state === null || releaseInfo.control.version !== "0.4.0") process.exit(1);
 if (rendered !== 1 || releaseRendered !== 1) process.exit(2);
+if (audioState.selected_track !== "new.mp3") process.exit(3);
+if (state.audio.selected_track !== "new.mp3") process.exit(4);
 """
     completed = subprocess.run(
         ["node", "--input-type=module", "-e", script],

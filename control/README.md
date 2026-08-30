@@ -43,6 +43,7 @@ CONTROL_SERIAL_TIMEOUT_S=8.0 \
 CONTROL_SERIAL_STATE_TIMEOUT_S=30.0 \
 CONTROL_STATE_POLL_INTERVAL_S=15.0 \
 CONTROL_DATA_DIR=/tmp/lightweave-control \
+CONTROL_AUDIO_DIR="$PWD/sound" \
 CONTROL_ALLOWED_ORIGINS=https://control.example.com \
 CONTROL_REQUIRE_HTTPS=true \
 CONTROL_ALLOW_NETWORK_CHANGES=false \
@@ -92,8 +93,10 @@ pio test -e native
 
 - FastAPI app with HTTP + WebSocket state updates
 - Mock conductor adapter and pyserial-backed JSON-line conductor adapter
-- API-backed Overview/Lantern Locations/Node List/Patterns/Power/Operations/
-  Firmware UI shell
+- API-backed Overview/Lantern Locations/Node List/Patterns/Sound/Power/
+  Operations/Firmware UI shell
+- Pi-hosted looped MP3 playback with persistent track/pause selection, live
+  position reporting, and V4 soundscape autoplay
 - Animated expected-field preview and durable SQLite power history with
   1-hour through 7-day dashboard ranges
 - Shared lantern detail sheet

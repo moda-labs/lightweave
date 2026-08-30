@@ -27,7 +27,8 @@ drifts, and calm glows without pushing per-lantern frames or depending on a rout
   radio bandwidth.
 - **Offline operator UI.** A FastAPI control plane can run on a laptop or
   Raspberry Pi access point. Phones connect locally to place lanterns, change
-  patterns, inspect field health, manage sleep settings, and run field-wide OTA.
+  patterns, control the looping installation soundtrack, inspect field health,
+  manage sleep settings, and run field-wide OTA.
 - **Battery-conscious runtime.** The firmware supports radio duty cycling,
   light-sleep, daytime/deep-sleep scheduling, hard brightness caps, and optional
   INA228 power telemetry on reference nodes with UI-side battery SOC estimates.
@@ -85,9 +86,10 @@ SK6812 RGBW rings
 ```
 
 The primary conductor is authoritative for permanent board identity, the field layout,
-and live show settings. The control server is an admin surface, not a runtime
-dependency: once settings are saved to the conductor, the field keeps running if
-the laptop or Pi is unplugged.
+and live show settings. The control server is not a runtime dependency for the
+lantern field: once settings are saved to the conductor, the lights keep running if
+the laptop or Pi is unplugged. The installation soundtrack is the exception because
+it plays from the Pi's audio output.
 
 ## Captive web UI
 
@@ -186,7 +188,10 @@ batch notes.
 - Mock conductor for UI development without hardware.
 - Real serial adapter for a USB-attached conductor.
 - Overview dashboard with field health, effective group patterns, an animated
-  expected-field rendering, and durable power-over-time traces.
+  expected-field rendering, the active soundtrack and play position, and
+  durable power-over-time traces.
+- Sound tab for Pi-hosted looped MP3 playback, persistent pause/track selection,
+  and track switching; Soundscape V4 autoplays by default.
 - Lantern Locations view with placed lanterns, missing nodes, and unpositioned
   spares. Its detail actions support `L`ocate, `M`ove, `P`lace, `R`eplace,
   `D`etails, and `F`orget shortcuts when focus is outside a form control.

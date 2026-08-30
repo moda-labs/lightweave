@@ -339,7 +339,9 @@ across browser sessions and polled on a relaxed cadence because their UART cost
 grows with fleet size; they are observability, not part of the command ACK path.
 
 **Not a runtime dependency:** unplug the admin host and the conductor + field
-continue on their stored table and program.
+continue on their stored table and program. This applies to lantern rendering;
+the Pi-hosted soundtrack described in §5.3 stops when the Pi or control service
+stops.
 
 **Deployment:** the admin host is a **Raspberry Pi** cabled to the conductor over
 USB. The reviewed remote shape makes the Pi a normal Starlink Wi-Fi client,
@@ -405,6 +407,21 @@ required predecessor of control at boot and restores the prior filesystem state
 without creating a service-start dependency cycle. The no-op path likewise requires the
 checkout, environment link, commit marker, staged firmware, and live health
 response to agree.
+
+### 5.3 Control-plane soundtrack playback **[done; Pi audio-jack verification pending]**
+
+The Pi also owns installation audio. It discovers MP3s from the release's
+`sound/` directory, defaults to `baskets-soundscape-v4.mp3`, and starts it in an
+infinite loop when the control service starts. The operator can pause/resume,
+restart, or select another track from the Sound tab; the selected track and
+paused state persist under `CONTROL_DATA_DIR/audio/`. Losing the browser,
+Starlink, or Cloudflare does not interrupt playback because `mpg123` runs as a
+child of the control service on the Pi.
+
+The Overview dashboard reports the active soundtrack and current minute. MP3s
+are Git LFS assets, and production requires `git-lfs`, `mpg123`, and audio-device
+access for the `lightweave` service. The default ALSA output is used unless
+`CONTROL_AUDIO_DEVICE` selects a specific analog or USB device.
 
 ## 6. Auto-calibration — drone + computer vision **[planned]**
 

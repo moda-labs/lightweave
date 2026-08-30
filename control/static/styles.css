@@ -38,7 +38,7 @@ h1 { margin: 0; font-size: 19px; line-height: 1; font-weight: 650; }
 .ok { color: var(--live); } .warn { color: var(--amber); } .bad { color: var(--alert); } .sync { color: var(--sync); }
 .mono { font-family: "JetBrains Mono", "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
 
-.tabs { display: grid; grid-template-columns: repeat(7, 1fr); background: #0b0f0c; border-bottom: 1px solid var(--line); }
+.tabs { display: grid; grid-template-columns: repeat(8, 1fr); background: #0b0f0c; border-bottom: 1px solid var(--line); }
 .tabs button { min-height: 52px; border: 0; border-right: 1px solid rgba(38, 48, 42, .65); border-radius: 0; background: transparent; color: var(--muted); }
 .tabs button.active { color: var(--live); box-shadow: inset 0 -3px 0 var(--live); }
 
@@ -139,6 +139,11 @@ main { min-height: 0; overflow: hidden; background: #090c0a; }
 .overview-group-row { grid-template-columns: 10px minmax(0, 1fr) auto; }
 .overview-group-swatch { width: 8px; height: 26px; border-radius: 2px; background: var(--sync); }
 .overview-group-row > span { margin-top: 1px; white-space: nowrap; }
+.soundtrack-now { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; padding: 14px 2px 8px; border-top: 1px solid rgba(38, 48, 42, .72); }
+.soundtrack-now > div { min-width: 0; }
+.soundtrack-now strong { display: block; margin-top: 7px; overflow: hidden; color: var(--text); font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+.soundtrack-now > div:last-child { min-width: 78px; text-align: right; }
+.soundtrack-status { padding: 4px 2px 2px; color: var(--muted); font-size: 12px; }
 
 .map {
   position: relative;
@@ -295,6 +300,23 @@ tr.selected { background: rgba(240, 179, 90, .08); }
 .panel h2 { margin: 0 0 8px; font-size: 20px; }
 .panel p { margin: 0 0 16px; color: var(--muted); }
 .power-panel { max-width: 900px; }
+.sound-panel { max-width: 900px; }
+.sound-panel .power-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.sound-player-card { margin-bottom: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 16px; }
+.sound-player-main h3 { margin: 7px 0 10px; font-size: 23px; font-weight: 650; }
+.sound-player-time { display: flex; align-items: baseline; gap: 6px; }
+.sound-player-time strong { color: var(--sync); font-size: 21px; }
+.sound-player-time span { color: var(--muted); font-size: 13px; }
+.sound-progress { height: 7px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: rgba(38, 48, 42, .95); }
+.sound-progress > div { width: 0; height: 100%; border-radius: inherit; background: var(--sync); transition: width .25s linear; }
+.sound-actions { flex-wrap: wrap; }
+.sound-panel .sound-error { margin: 12px 0 0; color: var(--alert); font-size: 13px; }
+.audio-tracks { display: grid; gap: 8px; }
+.audio-track { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; width: 100%; min-height: 64px; text-align: left; }
+.audio-track strong, .audio-track span { display: block; }
+.audio-track span { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.audio-track.selected { color: var(--amber); border-color: rgba(240, 179, 90, .55); background: rgba(240, 179, 90, .08); }
+.audio-track .audio-track-state { margin: 0; color: var(--live); font-size: 11px; font-weight: 700; text-transform: uppercase; }
 .power-heading { margin-bottom: 16px; }
 .power-heading h2 { margin-bottom: 6px; }
 .power-heading p { margin-bottom: 0; }
@@ -762,6 +784,8 @@ input[type="number"], input[type="time"], input[type="text"], input[type="passwo
   .field-preview-widget,
   .power-history-widget { grid-column: auto; }
   .overview-widget-head { align-items: stretch; flex-direction: column; }
+  .soundtrack-now { grid-template-columns: 1fr; }
+  .soundtrack-now > div:last-child { text-align: left; }
   .field-preview-actions { justify-content: space-between; }
   .field-preview-stage { min-height: 270px; }
   .field-preview-footer { align-items: start; flex-direction: column; }

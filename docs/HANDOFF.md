@@ -8,7 +8,7 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**206 pass**) is green; **492 control tests** are green; all three
+(**206 pass**) is green; **512 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest in this feature branch (2026-08-10): **Wavefront, the Firefly chorus,
@@ -33,6 +33,17 @@ firmware-consistent `matching=10` / `seen=10` field with conductor build
 `b1e7d434`. Automatic OTA remains disabled and the prior interrupted OTA journal
 remains paused. No release has been cut: live appearance and parameter tuning on
 the ten rings is the next gate.
+
+Latest in this feature branch (2026-08-30): the control plane now owns a simple
+Pi-hosted soundtrack player. It discovers MP3s in `sound/`, autoplays
+`baskets-soundscape-v4.mp3` in a continuous loop, and preserves the selected
+track plus paused state across service restarts. Overview shows the soundtrack
+and current minute; the new Sound tab supports pause/resume, restart, and track
+selection. Playback uses `mpg123` through the system ALSA output, with an
+optional `CONTROL_AUDIO_DEVICE` override. The service has audio-group access,
+the Pi runbook installs `mpg123` and Git LFS, and MP3 assets are marked for LFS.
+Focused player/API tests and JavaScript/Python syntax checks are green; physical
+audio-jack playback on the production Pi remains to be verified.
 
 Also in this feature branch (2026-08-10): the lantern locator is now one
 temporary field-wide beacon override instead of a calibration pattern copied
@@ -417,7 +428,7 @@ anti-framing, HSTS, and field network-mutation rules are covered by tests.
 Field OTA now returns `202` after bounded preflight, runs as one server-owned
 task, exposes authoritative progress through GET, and returns immediate
 `423 Locked` for competing serial work instead of queuing it behind the
-transfer. Mutable OTA/pattern/calibration state is rooted by
+transfer. Mutable OTA/pattern/calibration/audio state is rooted by
 `CONTROL_DATA_DIR`. Pi Zero 2 W packaging and the complete Starlink +
 Cloudflare Tunnel runbook are under [`deploy/pi/`](../deploy/pi/README.md);
 stable architecture is in [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md). The next owner
@@ -727,7 +738,7 @@ revised cost roll-up.
   mode enter/exit, firmware artifact staging, and field-wide OTA install.
   Serial calls are serialized and run
   off the FastAPI event loop, so one serial timeout does not block unrelated
-  async work. The UI has Overview, Lantern Locations, Node List, Patterns,
+  async work. The UI has Overview, Lantern Locations, Node List, Patterns, Sound,
   Power, Operations, and Firmware views; location-map zoom/pan,
   drag-to-move/place, unpositioned tray, single bottom-sheet actions,
   per-pattern controls, field firmware consistency display, Recovery card, and
