@@ -58,7 +58,9 @@ the background. The Firmware tab's persistent Automatic updates switch can pause
 that behavior before a high-visibility show. The UI
 shows separate web-control and field-firmware versions and changelogs. See
 [docs/RELEASING.md](docs/RELEASING.md) for the release procedure and
-[docs/SSH_ACCESS.md](docs/SSH_ACCESS.md) for Raspberry Pi shell access.
+[docs/SSH_ACCESS.md](docs/SSH_ACCESS.md) for Raspberry Pi shell access. Use
+[docs/REMOTE_TESTING.md](docs/REMOTE_TESTING.md) to test an exact PR on the Pi
+through an isolated loopback service before merging.
 
 ## System overview
 
