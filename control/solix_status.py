@@ -8,8 +8,9 @@ from typing import Any
 
 
 SOLIX_STATUS_SCHEMA = 1
-SOLIX_STATUS_STALE_S = 180.0
+SOLIX_STATUS_STALE_S = 60.0
 SOLIX_MODEL = "SOLIX S2000"
+SOLIX_SOURCE_MQTT = "anker_mqtt"
 
 _READING_FIELDS = (
     "output_w",
@@ -95,8 +96,43 @@ def decode_as220_status(payload: bytes) -> dict[str, Any]:
     }
 
 
+def decode_as220_mqtt_values(values: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the AS220 fields decoded by anker-solix-api's MQTT map."""
+    output_w = _required_number(values, "output_power_total")
+    input_w = _required_number(values, "input_power_total")
+    ac_input_w = _required_number(values, "ac_input_power")
+    dc_input_w = _required_number(values, "dc_input_power_total")
+    soc_percent = _required_number(values, "battery_soc")
+    temperature_c = _required_number(values, "temperature")
+    ac_output_w = _finite_number(values.get("ac_output_power"))
+    usb_output_w = _finite_number(values.get("usb_power"))
+
+    relationships = [abs(input_w - (ac_input_w + dc_input_w)) <= 10]
+    if ac_output_w is not None and usb_output_w is not None:
+        relationships.append(ac_output_w + usb_output_w <= output_w + 10)
+    plausible = (
+        0 <= output_w <= 5_000
+        and 0 <= input_w <= 5_000
+        and 0 <= soc_percent <= 100
+        and -40 <= temperature_c <= 125
+        and all(relationships)
+    )
+    return {
+        "model": SOLIX_MODEL,
+        "output_w": output_w,
+        "input_w": input_w,
+        "ac_output_w": ac_output_w,
+        "usb_output_w": usb_output_w,
+        "ac_input_w": ac_input_w,
+        "dc_input_w": dc_input_w,
+        "soc_percent": soc_percent,
+        "temperature_c": temperature_c,
+        "plausible": plausible,
+    }
+
+
 class SolixStatusStore:
-    """Atomic handoff between the BLE probe and the web control process."""
+    """Atomic handoff between the telemetry probe and the web control process."""
 
     def __init__(
         self,
@@ -112,6 +148,7 @@ class SolixStatusStore:
         reading: dict[str, Any],
         *,
         address: str,
+        source: str = SOLIX_SOURCE_MQTT,
         updated_at: float | None = None,
     ) -> None:
         timestamp = time.time() if updated_at is None else float(updated_at)
@@ -119,6 +156,7 @@ class SolixStatusStore:
             "schema": SOLIX_STATUS_SCHEMA,
             "model": SOLIX_MODEL,
             "address": str(address),
+            "source": str(source),
             "connected": True,
             "updated_at": timestamp,
             "last_attempt_at": timestamp,
@@ -133,6 +171,7 @@ class SolixStatusStore:
         error: str,
         *,
         address: str,
+        source: str = SOLIX_SOURCE_MQTT,
         attempted_at: float | None = None,
     ) -> None:
         status = self._read_raw() or {
@@ -140,11 +179,14 @@ class SolixStatusStore:
             "model": SOLIX_MODEL,
             "address": str(address),
         }
+        effective_address = str(address or status.get("address") or "")
+        effective_source = str(source or status.get("source") or "")
         status.update(
             {
                 "schema": SOLIX_STATUS_SCHEMA,
                 "model": SOLIX_MODEL,
-                "address": str(address),
+                "address": effective_address,
+                "source": effective_source,
                 "connected": False,
                 "last_attempt_at": time.time() if attempted_at is None else float(attempted_at),
                 "error": str(error),
@@ -169,6 +211,7 @@ class SolixStatusStore:
             **_empty_status(configured=True),
             "model": str(raw.get("model") or SOLIX_MODEL),
             "address": str(raw.get("address") or ""),
+            "source": str(raw.get("source") or ""),
             "connected": raw.get("connected") is True and not stale,
             "stale": stale,
             "updated_at": updated_at,
@@ -207,6 +250,7 @@ def _empty_status(*, configured: bool) -> dict[str, Any]:
         "configured": configured,
         "model": SOLIX_MODEL,
         "address": "",
+        "source": "",
         "connected": False,
         "stale": True,
         "updated_at": None,
@@ -245,3 +289,10 @@ def _finite_number(value: Any) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _required_number(values: dict[str, Any], key: str) -> float:
+    number = _finite_number(values.get(key))
+    if number is None:
+        raise SolixStatusError(f"AS220 MQTT status is missing {key}")
+    return number

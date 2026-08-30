@@ -550,9 +550,9 @@ number while showing "Not seen".
 - An optional SOLIX S2000 card reads the probe's atomic status handoff and shows
   station output, input, and SOC only when the sample is fresh and internally
   plausible. Missing, stale, and implausible samples stay unavailable and add an
-  attention item instead of presenting old power as live. The BLE probe remains
-  opt-in because live AS220 status notifications are not yet verified; deployment
-  and troubleshooting are documented in `deploy/pi/README.md`.
+  attention item instead of presenting old power as live. The Anker cloud MQTT
+  probe remains opt-in because it requires owner credentials and internet access;
+  deployment and troubleshooting are documented in `deploy/pi/README.md`.
 - Its Expected field canvas animates the same current layout and effective
   pattern state without turning dashboard clicks into placement navigation.
 - The power chart derives a rolling 15-minute watt trace from cumulative Wh deltas

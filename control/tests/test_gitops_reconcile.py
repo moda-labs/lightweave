@@ -682,6 +682,8 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert "PartOf=lightweave-control.service" in solix_unit
     assert "-m control.solix_probe" in solix_unit
     assert "EnvironmentFile=-/etc/lightweave/solix.env" in solix_unit
+    assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in solix_unit
+    assert "AF_BLUETOOTH" not in solix_unit
     assert "systemctl enable --now lightweave-solix.service" not in installer
     assert "-m control.provisioner --socket /run/lightweave-provisioner/provisioner.sock" in provisioner_unit
     assert "UnsetEnvironment=CONTROL_PASSWORD_HASH" in provisioner_unit
@@ -864,7 +866,7 @@ def test_systemd_orders_boot_recovery_before_control_start() -> None:
     assert "Requires=lightweave-gitops-recovery.service" in control_unit
     assert "After=network-online.target lightweave-gitops-recovery.service" in control_unit
     assert "Requires=lightweave-gitops-recovery.service" in solix_unit
-    assert "After=bluetooth.service lightweave-gitops-recovery.service" in solix_unit
+    assert "After=network-online.target lightweave-gitops-recovery.service" in solix_unit
     assert "Requires=lightweave-gitops-recovery.service" in gitops_unit
     assert "After=network-online.target lightweave-gitops-recovery.service" in gitops_unit
     assert (

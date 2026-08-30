@@ -8,6 +8,7 @@ import pytest
 from control.solix_status import (
     SolixStatusError,
     SolixStatusStore,
+    decode_as220_mqtt_values,
     decode_as220_status,
     parse_solix_tlvs,
 )
@@ -73,6 +74,39 @@ def test_decode_as220_marks_broken_total_relationship_implausible() -> None:
 
     assert status["output_w"] == 300.0
     assert status["plausible"] is False
+
+
+def test_decode_as220_mqtt_power_fields() -> None:
+    status = decode_as220_mqtt_values(
+        {
+            "output_power_total": 384,
+            "input_power_total": 850,
+            "ac_output_power": 300,
+            "usb_power": 84,
+            "ac_input_power": 600,
+            "dc_input_power_total": 250,
+            "battery_soc": 73,
+            "temperature": 31,
+        }
+    )
+
+    assert status == {
+        "model": "SOLIX S2000",
+        "output_w": 384.0,
+        "input_w": 850.0,
+        "ac_output_w": 300.0,
+        "usb_output_w": 84.0,
+        "ac_input_w": 600.0,
+        "dc_input_w": 250.0,
+        "soc_percent": 73.0,
+        "temperature_c": 31.0,
+        "plausible": True,
+    }
+
+
+def test_decode_as220_mqtt_requires_complete_power_snapshot() -> None:
+    with pytest.raises(SolixStatusError, match="input_power_total"):
+        decode_as220_mqtt_values({"output_power_total": 1})
 
 
 def test_tlv_parser_rejects_truncated_payloads() -> None:

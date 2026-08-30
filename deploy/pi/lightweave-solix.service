@@ -1,16 +1,15 @@
 [Unit]
-Description=Lightweave SOLIX S2000 Bluetooth power probe
+Description=Lightweave SOLIX S2000 Anker cloud MQTT power probe
 Documentation=https://github.com/moda-labs/lightweave/tree/main/deploy/pi
-Wants=bluetooth.service
+Wants=network-online.target
 Requires=lightweave-gitops-recovery.service
-After=bluetooth.service lightweave-gitops-recovery.service
+After=network-online.target lightweave-gitops-recovery.service
 PartOf=lightweave-control.service
 
 [Service]
 Type=simple
 User=lightweave
 Group=lightweave
-SupplementaryGroups=bluetooth
 WorkingDirectory=/opt/lightweave
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
@@ -37,7 +36,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

@@ -187,7 +187,7 @@ batch notes.
 - Real serial adapter for a USB-attached conductor.
 - Overview dashboard with field health, effective group patterns, an animated
   expected-field rendering, durable power-over-time traces, and an optional
-  SOLIX S2000 input/output/SOC reading. The S2000 card stays unavailable for
+  SOLIX S2000 cloud-MQTT input/output/SOC reading. The S2000 card stays unavailable for
   stale or implausible probe data.
 - Lantern Locations view with placed lanterns, missing nodes, and unpositioned
   spares. Its detail actions support `L`ocate, `M`ove, `P`lace, `R`eplace,

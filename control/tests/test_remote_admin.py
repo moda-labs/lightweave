@@ -159,7 +159,7 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=23"' in index_html
+    assert 'src="/static/app.js?v=24"' in index_html
     assert 'href="/static/styles.css?v=9"' in index_html
     assert '<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">' in index_html
     assert '<button class="active" data-view="overview">Overview</button>' in index_html

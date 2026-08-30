@@ -1010,6 +1010,7 @@ def test_state_endpoint_includes_fresh_solix_power_station_reading(tmp_path: Pat
     assert station["configured"] is True
     assert station["connected"] is True
     assert station["stale"] is False
+    assert station["source"] == "anker_mqtt"
     assert station["output_w"] == 384
     assert station["input_w"] == 850
     assert station["soc_percent"] == 73

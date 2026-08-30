@@ -8,8 +8,24 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**206 pass**) is green; **492 control tests** are green; all three
+(**206 pass**) is green; **529 control tests** are green; all three
 device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+
+Latest in this feature branch (2026-08-30): **SOLIX S2000 Overview telemetry now
+uses Anker's cloud MQTT stream instead of the incomplete local BLE subscription.**
+The optional Pi service authenticates with a root-only owner account, discovers
+exactly one owned AS220 (or a configured serial), subscribes only to its device
+topic, and sends the read-only status request every 15 seconds. Complete 0421/0900
+snapshots flow through the existing plausibility/staleness handoff into the
+Overview card; partial messages, wrong devices, timeouts, and unexpected cloud
+errors fail unavailable without exposing credentials. The unofficial upstream
+library is pinned by immutable commit and archive hash, and its runtime
+dependencies are pinned. The service no longer requests Bluetooth access
+and is confined to internet socket families. Hash-locked installation and import
+were verified on Python 3.12 and 3.13; all control and native tests are green.
+Live account/device proof remains: create `/etc/lightweave/solix.env` from the
+owner account as documented in `deploy/pi/README.md`, run the probe once, and
+confirm a real wattage reaches Overview before moving the PR out of draft.
 
 Latest in this feature branch (2026-08-10): **Wavefront, the Firefly chorus,
 and Fire2012 are ready for live pattern tuning.** `WAVEFRONT` (`pattern 11`)
