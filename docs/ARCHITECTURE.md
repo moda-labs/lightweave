@@ -179,7 +179,7 @@ independent of coordinates, survives clearing a position, and is cached in the
 performer's NVS beside position. Each group has its own persisted
 `PatternConfig`, so changing Group 3 does not disturb any other group.
 
-All eight configs travel in the existing 4 Hz beacon (136 B total, under the
+All eight configs travel in the existing 4 Hz beacon (149 B total, under the
 250 B ESP-NOW limit), rather than multiplying radio packets by the number of
 groups. This preserves constant beacon cadence, radio duty-cycle behavior, and
 free-running through packet loss. A performer reports its cached group in
@@ -803,10 +803,13 @@ make this sequence resumable across a control-service restart.
 Resolved:
 - **Master table & show program: conductor-authoritative, stored in conductor
   NVS.** Field runs laptop-free; the laptop is a transient editor only (§5, §5.2).
+- **2-D pattern parameters use the existing four slots.** Wavefront packs width,
+  color, and angle; Pond Ripple uses period, wavelength, and normalized center.
+- **The admin interface is the local FastAPI web UI.** The human CLI remains a
+  bench/recovery surface, while the structured JSON serial API drives normal
+  control-plane operations (§5.2).
 
 Open:
-- 2-D pattern parameter encoding (how to pack angle/center into `params[4]`).
 - Pattern transitions/crossfades, and the show-program time base (uptime vs.
   dusk-relative vs. wall-clock) (§4.2).
-- Admin UI form: local web UI (current lean) vs. CLI-first.
 - Temporal-coded calibration as a later speed upgrade (§6).

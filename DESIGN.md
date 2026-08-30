@@ -236,7 +236,8 @@ Controls should be tactile and direct:
 
 - Pattern picker as segmented control.
 - Brightness as a slider with numeric value.
-- Hue as swatches plus slider when needed.
+- Hue as named swatches plus a keyboard- and pointer-accessible color wheel;
+  retain the native system color picker as a compact fallback.
 - Pattern params use human labels: `sweep period`, `wavelength`, `spatial hue`,
   `saturation`.
 - `SOLID` is hidden behind bench mode.

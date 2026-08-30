@@ -609,10 +609,15 @@ full-repo adversarial self-review with all 5 correctness findings fixed, the
 production BOM, and the **pilot-batch order placed 2026-07-03** (most parts
 arrive Mon Jul 6, batteries Jul 10 — see "Pilot batch: ORDERED" below).
 
-## ▶ Next session: pick up here (updated 2026-08-10)
+## ▶ Next session: pick up here (updated 2026-08-30)
 
 Priority order:
-1. **Live-tune the new patterns on the ten-board line:** start with Wavefront at
+1. **Hardware-verify and live-tune the new patterns on the ten-board line:**
+   first distribute one uploaded expression through a relay, confirm every
+   placed node acknowledges the exact program and firmware identity, and measure
+   frame timing with the VM active. Then run Pond Ripple from the center and an
+   off-center point, including a mixed-firmware negative check that leaves the
+   current built-in show untouched. Continue with Wavefront at
    angle 0 and confirm the band travels left-to-right in physical board order.
    Then evaluate Firefly's irregular solo behavior and three-beat chorus, and
    Fire2012's speed/cooling/sparking against the actual ring orientation and
