@@ -60,7 +60,7 @@ ripple center, and dim/bright levels compile into the same bounded program
 format; JSON is retained only as a collapsed **Advanced source** escape hatch
 for existing or hand-authored programs. The stable firmware/API identifier
 remains `Uploaded Pattern`. Browser QA covered desktop and mobile layouts,
-guided save/reload/preview/activation, and lossless editing of a legacy JSON
+guided save/reload/validation/activation, and lossless editing of a legacy JSON
 program. The generated center ripple reached the exact 2/2 bench readiness
 barrier before the bench was restored to the Ocean Wave state above.
 

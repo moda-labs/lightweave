@@ -1683,7 +1683,7 @@ function syncCustomProgramFromBuilder({ resetStatus = false } = {}) {
     null,
     2,
   );
-  if (resetStatus) $("#uploaded-pattern-status").textContent = "Ready to preview";
+  if (resetStatus) $("#uploaded-pattern-status").textContent = "Ready to validate";
 }
 
 function setCustomBuilderForm(settings) {
@@ -4492,14 +4492,14 @@ $("#pattern-color-wheel").addEventListener("keydown", (event) => {
 ].forEach((selector) => {
   $(selector).addEventListener("input", () => {
     setCustomPatternSourceMode("guided");
-    $("#uploaded-pattern-status").textContent = "Ready to preview";
+    $("#uploaded-pattern-status").textContent = "Ready to validate";
     renderPatternControls();
   });
 });
 
 $("#uploaded-pattern-json").addEventListener("input", () => {
   setCustomPatternSourceMode("advanced");
-  $("#uploaded-pattern-status").textContent = "Advanced source changed · preview before running";
+  $("#uploaded-pattern-status").textContent = "Advanced source changed · validate before running";
 });
 
 $("#pattern-period").addEventListener("input", (event) => {

@@ -354,7 +354,7 @@ Open `http://127.0.0.1:8000`, then use the Patterns tab.
 
 - Select **Custom Pattern**.
 - Choose movement, color, cycle time, spatial controls, and dim/bright levels.
-- Use **Preview pattern** to validate before saving or running it.
+- Use **Validate pattern** to compile and check the pattern before saving or running it.
 - `Save draft` stores the current draft in the pattern library.
 - Open **Advanced source** only when the guided controls cannot express the look.
 - Saved pattern actions:
