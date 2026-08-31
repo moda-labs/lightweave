@@ -2,6 +2,21 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.5",
+      "date": "2026-08-30",
+      "title": "Custom field patterns",
+      "control_changes": [
+        "Added a guided Custom Pattern builder for traveling waves, center ripples, whole-field pulses, lantern shimmer, and steady glow, with advanced source available for hand-authored expressions.",
+        "Added a color wheel and direct controls for color, timing, spacing, direction, ripple center, and dim-to-bright range while preserving every existing built-in pattern.",
+        "Made new-pattern activation wait for every placed lantern to confirm the exact compatible firmware and program, with safe cancellation, recovery, and group-aware repair when conditions change."
+      ],
+      "firmware_changes": [
+        "Added a bounded, loop-free expression engine so compatible lanterns can receive new Custom Patterns without another firmware update.",
+        "Added a center-selectable Pond Ripple that travels radially outward and kept Ocean Wave visibly lit at its dimmest point.",
+        "Kept radio protocol v11 and existing pattern identifiers stable, so mixed deployments continue running established patterns while new-only patterns remain blocked until every placed lantern is compatible."
+      ]
+    },
+    {
       "version": "0.9.4",
       "date": "2026-08-10",
       "title": "Spatial fire and firefly choruses",
