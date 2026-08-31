@@ -102,6 +102,9 @@ pio test -e native
 - Shared lantern detail sheet
 - Actions for locate, assign, forget, replace, pattern changes, and blackout,
   plus guarded Lantern Locations single-key shortcuts
+- Existing compiled pattern choices plus bounded uploaded expression programs,
+  with local preview, exact-firmware fleet preflight, verified distribution, and
+  guarded activation
 - Desired-state acknowledgements that return after conductor persistence while
   performer convergence is observed by later fleet snapshots
 - Reversible per-group Off/On controls and safe field sleep that pauses active

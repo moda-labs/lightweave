@@ -44,6 +44,13 @@ from .ota_store import (
     PersistentOtaInstall,
 )
 from .pattern_store import PatternStore, PatternStoreError
+from .uploaded_patterns import (
+    VM_VERSION,
+    UploadedPatternError,
+    UploadedPatternStore,
+    compile_uploaded_pattern,
+    run_uploaded_pattern,
+)
 from .power_monitor import (
     DEFAULT_DRAW_WINDOW_S,
     PowerDraw,
@@ -121,7 +128,12 @@ PUBLIC_HTTP_ROUTES = {
 }
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 OTA_CHUNK_RETRYABLE_ERRORS = {
+    "bad ota chunk",
     "bad ota chunk data",
+    "bad ota rebroadcast",
+    "bad ota rebroadcast data",
+    "bad ota repair",
+    "bad ota repair data",
     "ota chunk length mismatch",
     "ota chunk offset mismatch",
     "ota chunk exceeds image size",
@@ -298,6 +310,12 @@ class PatternLibraryEntry(BaseModel):
     pattern: str = Field(min_length=1)
     brightness: int = Field(ge=0, le=192)
     params: dict[str, int | float | str] = Field(default_factory=dict)
+
+
+class UploadedPatternEntry(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    brightness: int = Field(ge=0, le=192)
+    program: dict[str, Any]
 
 
 class AssignRequest(BaseModel):
@@ -493,6 +511,7 @@ def create_app(
     group_store: GroupStore | None = None,
     power_monitor_store: PowerMonitorStore | None = None,
     power_history_store: PowerHistoryStore | None = None,
+    uploaded_pattern_store: UploadedPatternStore | None = None,
     audio_player: AudioPlayer | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_remote_settings(os.environ)
@@ -720,6 +739,9 @@ def create_app(
     app.state.latest_snapshot_at = 0.0
     stage_deployment_firmware(app.state.ota_store, app.state.deployment_record)
     app.state.pattern_store = pattern_store or PatternStore(data_dir / "patterns" if data_dir else ".control_patterns")
+    app.state.uploaded_pattern_store = uploaded_pattern_store or UploadedPatternStore(
+        data_dir / "uploaded-patterns" if data_dir else ".control_uploaded_patterns"
+    )
     app.state.group_store = group_store or GroupStore(data_dir / "groups" if data_dir else ".control_groups")
     app.state.calibration_store = calibration_store or CalibrationStore(
         data_dir / "calibration" if data_dir else ".control_calibration"
@@ -790,6 +812,7 @@ def create_app(
     except PowerHistoryError as error:
         app.state.power_history_error = str(error)
     app.state.conductor_lock = asyncio.Lock()
+    app.state.show_generation = 0
     app.state.ws_clients: dict[WebSocket, str] = {}
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -1231,14 +1254,82 @@ def create_app(
             return enriched
         return result
 
+    async def show_mutation_call(method: str, *args: Any) -> Any:
+        """Serialize a show change and invalidate older staged activations."""
+        async with app.state.conductor_lock:
+            app.state.show_generation += 1
+            return await asyncio.to_thread(
+                getattr(app.state.conductor, method), *args
+            )
+
+    async def begin_uploaded_show_operation() -> int:
+        async with app.state.conductor_lock:
+            app.state.show_generation += 1
+            return int(app.state.show_generation)
+
     def cached_snapshot(max_age_s: float = CONTROL_TICK_INTERVAL_S) -> dict[str, Any] | None:
         snapshot = app.state.latest_snapshot
         if snapshot is None or time.monotonic() - app.state.latest_snapshot_at > max_age_s:
             return None
         return snapshot
 
+    async def require_pattern_firmware_ready(pattern: str, brightness: int) -> None:
+        if brightness == 0:
+            return
+        normalized = re.sub(r"[^a-z0-9]", "", pattern.lower())
+        if normalized.isdigit():
+            normalized = normalized.lstrip("0") or "0"
+        if normalized not in {
+            "12", "13", "pondripple", "ripple", "uploaded", "uploadedpattern"
+        }:
+            return
+        # A new pattern ID is safe on the stable v11 transport, but older
+        # renderers intentionally fall back to Pulse. Require a fresh, complete
+        # fleet view so an API caller cannot bypass the UI and split the show.
+        try:
+            state = await conductor_call("snapshot")
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        firmware = (state.get("summary") or {}).get("firmware") or {}
+        conductor_firmware = (state.get("conductor") or {}).get("firmware") or {}
+        features = conductor_firmware.get("features") or []
+        expected = int(firmware.get("expected") or 0)
+        matching = int(firmware.get("matching") or 0)
+        seen = int(firmware.get("seen") or 0)
+        firmware_ready = (
+            expected > 0
+            and firmware.get("consistent") is True
+            and matching == expected
+            and seen == expected
+        )
+        if normalized in {"12", "pondripple", "ripple"}:
+            ready = firmware_ready and "pond_ripple" in features
+            detail = (
+                "Pond Ripple requires ripple-capable firmware on every placed lantern. "
+                "Finish firmware reconciliation before broadcasting it."
+            )
+        else:
+            uploaded = state.get("uploaded_program") or {}
+            ready = (
+                firmware_ready
+                and "uploaded_patterns_v1" in features
+                and uploaded.get("ready") is True
+                and int(uploaded.get("ready_count") or 0) == expected
+            )
+            detail = (
+                "Custom Pattern requires interpreter firmware and the exact program "
+                "on every placed lantern. Finish program distribution before activation."
+            )
+        if not ready:
+            raise HTTPException(status_code=409, detail=detail)
+
     async def pattern_store_call(method: str, *args: Any) -> Any:
         return await asyncio.to_thread(getattr(app.state.pattern_store, method), *args)
+
+    async def uploaded_pattern_store_call(method: str, *args: Any) -> Any:
+        return await asyncio.to_thread(
+            getattr(app.state.uploaded_pattern_store, method), *args
+        )
 
     async def group_store_call(method: str, *args: Any) -> Any:
         return await asyncio.to_thread(getattr(app.state.group_store, method), *args)
@@ -1809,6 +1900,204 @@ def create_app(
         except PatternStoreError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
 
+    @app.get("/api/uploaded-patterns")
+    async def list_uploaded_patterns() -> dict[str, Any]:
+        try:
+            return {"patterns": await uploaded_pattern_store_call("list")}
+        except UploadedPatternError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    @app.post("/api/uploaded-patterns")
+    async def create_uploaded_pattern(
+        request: UploadedPatternEntry,
+    ) -> dict[str, Any]:
+        try:
+            pattern = await uploaded_pattern_store_call(
+                "create", request.name, request.brightness, request.program
+            )
+        except UploadedPatternError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "pattern": pattern}
+
+    @app.post("/api/uploaded-patterns/preview")
+    async def preview_uploaded_pattern(
+        request: UploadedPatternEntry,
+    ) -> dict[str, Any]:
+        try:
+            compiled = compile_uploaded_pattern(request.program)
+        except UploadedPatternError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        try:
+            state = await conductor_call("snapshot")
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        nodes = [
+            item for item in state.get("lanterns") or []
+            if isinstance(item.get("x"), (int, float))
+            and isinstance(item.get("y"), (int, float))
+        ]
+        samples = []
+        for time_s in (0.0, 1.0, 2.0, 4.0):
+            samples.append({
+                "time_s": time_s,
+                "nodes": [
+                    {
+                        "mac": item.get("mac"),
+                        **run_uploaded_pattern(
+                            compiled,
+                            time_s=time_s,
+                            x=float(item["x"]),
+                            y=float(item["y"]),
+                        ),
+                    }
+                    for item in nodes
+                ],
+            })
+        return {"ok": True, "compiled": compiled.as_dict(), "samples": samples}
+
+    @app.delete("/api/uploaded-patterns/{pattern_id}")
+    async def delete_uploaded_pattern(pattern_id: str) -> dict[str, Any]:
+        try:
+            deleted = await uploaded_pattern_store_call("delete", pattern_id)
+        except UploadedPatternError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+        if not deleted:
+            raise HTTPException(status_code=404, detail="unknown custom pattern")
+        return {"ok": True, "message": "custom pattern deleted"}
+
+    async def broadcast_uploaded_pattern_value(
+        pattern: dict[str, Any], group_id: int | None
+    ) -> dict[str, Any]:
+        # Preflight the complete placed inventory before distributing anything.
+        # This is intentionally stricter than ordinary eventual convergence:
+        # interpreter activation must never split a mixed-version field.
+        try:
+            state = await conductor_call("snapshot")
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        firmware = (state.get("summary") or {}).get("firmware") or {}
+        features = ((state.get("conductor") or {}).get("firmware") or {}).get("features") or []
+        expected = int(firmware.get("expected") or 0)
+        firmware_ready = (
+            expected > 0
+            and firmware.get("consistent") is True
+            and int(firmware.get("matching") or 0) == expected
+            and int(firmware.get("seen") or 0) == expected
+            and "uploaded_patterns_v1" in features
+        )
+        if not firmware_ready:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Custom Pattern is blocked until every placed lantern is online "
+                    "on interpreter-capable firmware. Existing patterns remain active."
+                ),
+            )
+
+        try:
+            compiled = compile_uploaded_pattern(pattern["program"])
+        except UploadedPatternError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        operation_generation = await begin_uploaded_show_operation()
+        try:
+            ack = await conductor_call(
+                "install_uploaded_program",
+                compiled.program_id,
+                VM_VERSION,
+                compiled.bytecode,
+            )
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        if not ack.get("ok"):
+            raise HTTPException(status_code=400, detail=ack.get("error", "program install failed"))
+
+        deadline = time.monotonic() + 45.0
+        while time.monotonic() < deadline:
+            try:
+                distributed = await conductor_call("uploaded_program_progress")
+            except SerialProtocolError as error:
+                raise HTTPException(status_code=503, detail=str(error)) from error
+            distributed_id = int(distributed.get("target_id") or 0) | (
+                int(distributed.get("target_tag") or 0) << 32
+            )
+            if (
+                distributed_id == compiled.program_id
+                and distributed.get("ready") is True
+                and int(distributed.get("ready_count") or 0) == expected
+            ):
+                break
+            await asyncio.sleep(1.0)
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Program was staged but not activated because every placed lantern "
+                    "did not verify the exact program within 45 seconds."
+                ),
+            )
+
+        params = {
+            "p0": compiled.program_id & 0xFFFF,
+            "p1": (compiled.program_id >> 16) & 0xFFFF,
+            "p2": (compiled.program_id >> 32) & 0xFFFF,
+            "p3": (compiled.program_id >> 48) & 0xFFFF,
+        }
+        args: tuple[Any, ...] = (
+            "Uploaded Pattern", int(pattern["brightness"]), params
+        )
+        if group_id is not None:
+            args += (group_id,)
+        try:
+            async with app.state.conductor_lock:
+                if app.state.show_generation != operation_generation:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Program was staged but not activated because a newer "
+                            "show command took priority."
+                        ),
+                    )
+                activation = await asyncio.to_thread(
+                    app.state.conductor.update_pattern, *args
+                )
+        except SerialProtocolError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        if not activation.get("ok"):
+            raise HTTPException(status_code=409, detail=activation.get("error", "activation refused"))
+        await publish_command_accepted("uploaded-pattern")
+        return {
+            "ok": True,
+            "message": "custom pattern verified and activated",
+            "pattern": pattern,
+            "compiled": compiled.as_dict(),
+            "ack": activation,
+        }
+
+    @app.post("/api/uploaded-patterns/broadcast")
+    async def broadcast_uploaded_pattern_draft(
+        request: UploadedPatternEntry,
+        group_id: int | None = Query(default=None, ge=0, lt=GROUP_COUNT),
+    ) -> dict[str, Any]:
+        pattern = {
+            "name": request.name,
+            "brightness": request.brightness,
+            "program": request.program,
+        }
+        return await broadcast_uploaded_pattern_value(pattern, group_id)
+
+    @app.post("/api/uploaded-patterns/{pattern_id}/broadcast")
+    async def broadcast_uploaded_pattern(
+        pattern_id: str,
+        group_id: int | None = Query(default=None, ge=0, lt=GROUP_COUNT),
+    ) -> dict[str, Any]:
+        try:
+            pattern = await uploaded_pattern_store_call("get", pattern_id)
+        except UploadedPatternError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+        if not pattern:
+            raise HTTPException(status_code=404, detail="unknown custom pattern")
+        return await broadcast_uploaded_pattern_value(pattern, group_id)
+
     @app.get("/api/groups")
     async def list_groups() -> dict[str, Any]:
         try:
@@ -1890,12 +2179,15 @@ def create_app(
         if not pattern:
             raise HTTPException(status_code=404, detail="unknown pattern")
         try:
+            await require_pattern_firmware_ready(
+                pattern["pattern"], int(pattern["brightness"])
+            )
             args: tuple[Any, ...] = (
                 pattern["pattern"], pattern["brightness"], pattern["params"]
             )
             if group_id is not None:
                 args += (group_id,)
-            ack = await conductor_call("update_pattern", *args)
+            ack = await show_mutation_call("update_pattern", *args)
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
@@ -2116,6 +2408,8 @@ def create_app(
         sparking: int | None = None,
         front_width: int | None = None,
         chorus: int | None = None,
+        center_x: int | None = Query(default=None, ge=0, le=1000),
+        center_y: int | None = Query(default=None, ge=0, le=1000),
     ) -> Response:
         try:
             state = await conductor_call("snapshot")
@@ -2131,6 +2425,8 @@ def create_app(
                 "sparking": sparking,
                 "front_width": front_width,
                 "chorus": chorus,
+                "center_x": center_x,
+                "center_y": center_y,
             })
             png = await asyncio.to_thread(
                 render_preview_png,
@@ -2165,6 +2461,8 @@ def create_app(
         sparking: int | None = None,
         front_width: int | None = None,
         chorus: int | None = None,
+        center_x: int | None = Query(default=None, ge=0, le=1000),
+        center_y: int | None = Query(default=None, ge=0, le=1000),
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -2180,6 +2478,8 @@ def create_app(
                 "sparking": sparking,
                 "front_width": front_width,
                 "chorus": chorus,
+                "center_x": center_x,
+                "center_y": center_y,
             })
             return await asyncio.to_thread(render_preview_data, state, pattern, brightness, decoded_params, t)
         except SerialProtocolError as error:
@@ -2205,6 +2505,8 @@ def create_app(
         sparking: int | None = None,
         front_width: int | None = None,
         chorus: int | None = None,
+        center_x: int | None = Query(default=None, ge=0, le=1000),
+        center_y: int | None = Query(default=None, ge=0, le=1000),
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -2220,6 +2522,8 @@ def create_app(
                 "sparking": sparking,
                 "front_width": front_width,
                 "chorus": chorus,
+                "center_x": center_x,
+                "center_y": center_y,
             })
             return await asyncio.to_thread(
                 render_preview_frames,
@@ -2253,6 +2557,8 @@ def create_app(
         sparking: int | None = None,
         front_width: int | None = None,
         chorus: int | None = None,
+        center_x: int | None = Query(default=None, ge=0, le=1000),
+        center_y: int | None = Query(default=None, ge=0, le=1000),
     ) -> dict[str, Any]:
         try:
             state = await conductor_call("snapshot")
@@ -2268,6 +2574,8 @@ def create_app(
                 "sparking": sparking,
                 "front_width": front_width,
                 "chorus": chorus,
+                "center_x": center_x,
+                "center_y": center_y,
             })
             return await asyncio.to_thread(
                 review_preview,
@@ -2469,12 +2777,13 @@ def create_app(
     @app.post("/api/show/pattern")
     async def update_pattern(request: PatternUpdate) -> dict[str, Any]:
         try:
+            await require_pattern_firmware_ready(request.pattern, request.brightness)
             args: tuple[Any, ...] = (
                 request.pattern, request.brightness, request.params
             )
             if request.group_id is not None:
                 args += (request.group_id,)
-            ack = await conductor_call("update_pattern", *args)
+            ack = await show_mutation_call("update_pattern", *args)
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
@@ -2485,7 +2794,7 @@ def create_app(
     @app.post("/api/show/blackout")
     async def blackout() -> dict[str, Any]:
         try:
-            ack = await conductor_call("blackout")
+            ack = await show_mutation_call("blackout")
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         await publish_command_accepted("blackout")
@@ -2494,7 +2803,7 @@ def create_app(
     @app.post("/api/show/restore")
     async def restore_blackout() -> dict[str, Any]:
         try:
-            ack = await conductor_call("restore_blackout")
+            ack = await show_mutation_call("restore_blackout")
         except SerialProtocolError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         if not ack["ok"]:
@@ -3021,6 +3330,40 @@ def create_app(
                     status_code=503 if error in OTA_CHUNK_RETRYABLE_ERRORS else 400,
                     detail=error,
                 )
+
+        async def wait_for_live_artifact_identity(
+            mac: str,
+        ) -> dict[str, Any] | None:
+            """Verify an activated performer after its OTA status row expires."""
+            for attempt in range(OTA_POST_REBOOT_ATTEMPTS):
+                if attempt:
+                    await asyncio.sleep(OTA_POST_REBOOT_POLL_S)
+                try:
+                    current = await call("snapshot")
+                except SerialProtocolError:
+                    continue
+                lantern = next(
+                    (
+                        item
+                        for item in current.get("lanterns") or []
+                        if str(item.get("mac") or "") == mac
+                    ),
+                    None,
+                )
+                if (
+                    lantern
+                    and lantern.get("status") == "alive"
+                    and already_installed(lantern)
+                ):
+                    return {
+                        "mac": mac,
+                        "phase": "complete",
+                        "error": "none",
+                        "offset": artifact.size,
+                        "crc32": artifact.crc32,
+                        "source": "post_reboot_state",
+                    }
+            return None
 
         async def dispatch_protocol_migration_activation(mac: str) -> None:
             """Dispatch once without accepting ambiguous status as proof.
@@ -3693,6 +4036,16 @@ def create_app(
                             )
                             if node and node.get("phase") == "complete":
                                 activated.add(mac)
+                                break
+                            verified = await wait_for_live_artifact_identity(mac)
+                            if verified is not None:
+                                activated.add(mac)
+                                nodes = [
+                                    item
+                                    for item in nodes
+                                    if str(item.get("mac") or "") != mac
+                                ]
+                                nodes.append(verified)
                                 break
                             await asyncio.sleep(OTA_ACTIVATION_POLL_S)
                         if mac not in activated:

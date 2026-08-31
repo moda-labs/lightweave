@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Do Baskets Dream Control Plane</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/styles.css?v=9">
+  <link rel="stylesheet" href="/static/styles.css?v=10">
 </head>
 <body>
   <div class="app">
@@ -304,6 +304,8 @@
             <button data-pattern="Fire Flicker">Fire</button>
             <button data-pattern="Fire2012">Fire2012</button>
             <button data-pattern="Ocean Wave">Ocean</button>
+            <button data-pattern="Pond Ripple">Ripple</button>
+            <button data-pattern="Uploaded Pattern">Custom Pattern</button>
             <button data-pattern="White">White</button>
             <button data-pattern="Solid">Solid</button>
           </div>
@@ -321,14 +323,32 @@
             <button type="button" data-hex="006125"><span class="preset-sw" style="background:#006125"></span>Lotus lantern</button>
             <button type="button" data-hex="00711D"><span class="preset-sw" style="background:#00711D"></span>Green lantern</button>
           </div>
-          <div class="pattern-param" id="hex-color-row">
-            <label class="control-label" for="pattern-hex">Custom color (hex)</label>
-            <div class="hex-input-group">
-              <div class="color-swatch" id="color-swatch" aria-hidden="true"></div>
-              <input id="pattern-hex" type="text" inputmode="text" placeholder="#ff8800" maxlength="7" autocomplete="off" spellcheck="false">
-              <input id="pattern-color-picker" type="color" value="#ff8800" aria-label="Pick a color">
+          <div class="pattern-param" id="color-wheel-row">
+            <span class="control-label" id="color-wheel-label">Custom color</span>
+            <div class="color-wheel-layout">
+              <div
+                class="color-wheel"
+                id="pattern-color-wheel"
+                role="slider"
+                tabindex="0"
+                aria-labelledby="color-wheel-label"
+                aria-describedby="color-wheel-help"
+                aria-valuemin="0"
+                aria-valuemax="359"
+              >
+                <span class="color-wheel-thumb" id="color-wheel-thumb" aria-hidden="true"></span>
+              </div>
+              <div class="color-wheel-readout">
+                <label class="selected-color" for="pattern-color-picker">
+                  <input id="pattern-color-picker" type="color" value="#ff8800">
+                  <span>
+                    <strong>Selected color</strong>
+                    <output id="color-wheel-value">Hue 32° · Saturation 100%</output>
+                  </span>
+                </label>
+                <p id="color-wheel-help">Drag around the wheel, or use arrow keys. Click the swatch for the system color picker.</p>
+              </div>
             </div>
-            <div class="hex-error" id="hex-error" hidden></div>
           </div>
           <div class="pattern-param" data-param-group="period">
             <label class="control-label" for="pattern-period">Period <span id="period-value">4.0</span>s</label>
@@ -374,6 +394,71 @@
             <label class="control-label" for="pattern-angle">Wave direction <span id="angle-value">45</span>°</label>
             <input id="pattern-angle" type="range" min="0" max="355" step="5" value="45">
           </div>
+          <div class="pattern-param" data-param-group="ripple-center">
+            <label class="control-label" for="pattern-center-x">Ripple center X <span id="center-x-value">0.50</span></label>
+            <input id="pattern-center-x" type="range" min="0" max="1000" step="25" value="500">
+            <label class="control-label" for="pattern-center-y">Ripple center Y <span id="center-y-value">0.50</span></label>
+            <input id="pattern-center-y" type="range" min="0" max="1000" step="25" value="500">
+          </div>
+          <div class="pattern-param uploaded-pattern-editor" id="uploaded-pattern-editor" hidden>
+            <div class="custom-pattern-heading">
+              <div>
+                <h3>Custom pattern builder</h3>
+                <p>Choose how the light moves. The control plane builds the lantern program for you.</p>
+              </div>
+              <span class="chip sync" id="custom-pattern-source-mode">Guided controls</span>
+            </div>
+            <label class="control-label" for="uploaded-pattern-name">Pattern name</label>
+            <input id="uploaded-pattern-name" type="text" maxlength="80" value="Blue traveling wave" autocomplete="off">
+            <div class="custom-pattern-grid">
+              <label class="control-label" for="custom-pattern-motion">Movement
+                <select id="custom-pattern-motion">
+                  <option value="traveling-wave">Traveling wave</option>
+                  <option value="center-ripple">Center ripple</option>
+                  <option value="whole-field-pulse">Whole-field pulse</option>
+                  <option value="lantern-shimmer">Lantern shimmer</option>
+                  <option value="steady-glow">Steady glow</option>
+                </select>
+              </label>
+              <div data-custom-param="period">
+                <label class="control-label" for="custom-pattern-period">Cycle time <span id="custom-pattern-period-value">8.0</span>s</label>
+                <input id="custom-pattern-period" type="range" min="2000" max="30000" step="500" value="8000">
+              </div>
+              <div data-custom-param="wavelength">
+                <label class="control-label" for="custom-pattern-wavelength">Wave spacing <span id="custom-pattern-wavelength-value">1.00</span></label>
+                <input id="custom-pattern-wavelength" type="range" min="25" max="200" step="5" value="100">
+              </div>
+              <div data-custom-param="direction">
+                <label class="control-label" for="custom-pattern-direction">Travel direction <span id="custom-pattern-direction-value">45</span>°</label>
+                <input id="custom-pattern-direction" type="range" min="0" max="355" step="5" value="45">
+              </div>
+              <div data-custom-param="center" hidden>
+                <label class="control-label" for="custom-pattern-center-x">Ripple center, left to right <span id="custom-pattern-center-x-value">0.50</span></label>
+                <input id="custom-pattern-center-x" type="range" min="0" max="100" step="5" value="50">
+                <label class="control-label" for="custom-pattern-center-y">Ripple center, top to bottom <span id="custom-pattern-center-y-value">0.50</span></label>
+                <input id="custom-pattern-center-y" type="range" min="0" max="100" step="5" value="50">
+              </div>
+              <div data-custom-param="min-value">
+                <label class="control-label" for="custom-pattern-min-value">Dim level <span id="custom-pattern-min-value-label">20</span>%</label>
+                <input id="custom-pattern-min-value" type="range" min="0" max="80" step="5" value="20">
+              </div>
+              <div>
+                <label class="control-label" for="custom-pattern-max-value">Bright level <span id="custom-pattern-max-value-label">100</span>%</label>
+                <input id="custom-pattern-max-value" type="range" min="20" max="100" step="5" value="100">
+              </div>
+            </div>
+            <details class="custom-pattern-advanced" id="custom-pattern-advanced">
+              <summary>Advanced source</summary>
+              <p>Use this only for expressions the guided controls cannot create.</p>
+              <label class="control-label" for="uploaded-pattern-json">Pattern program</label>
+              <textarea id="uploaded-pattern-json" rows="16" spellcheck="false"></textarea>
+            </details>
+            <div class="custom-pattern-check">
+              <button type="button" data-action="preview-uploaded">Validate pattern</button>
+              <span class="muted-inline" id="uploaded-pattern-status">Ready to validate</span>
+            </div>
+          </div>
+          <p class="pattern-warning" id="pattern-firmware-warning" hidden>Pattern broadcast is paused until every placed lantern is online and running compatible firmware. Finish reconciliation in Firmware first.</p>
           <div class="button-row">
             <button class="primary" data-action="broadcast" disabled>Change pattern</button>
             <button data-action="save-pattern">Save draft</button>
@@ -387,6 +472,14 @@
               <div class="chip" id="saved-pattern-count">0 saved</div>
             </div>
             <div class="saved-pattern-list" id="saved-pattern-list"></div>
+          </div>
+          <div class="saved-patterns">
+            <div class="section-head">
+              <h3>Custom patterns</h3>
+              <div class="chip" id="uploaded-pattern-count">0 saved</div>
+            </div>
+            <p>Each custom pattern is verified on every placed lantern before it starts.</p>
+            <div class="saved-pattern-list" id="uploaded-pattern-list"></div>
           </div>
         </div>
       </section>
@@ -744,6 +837,6 @@
     </section>
   </div>
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js?v=23"></script>
+  <script src="/static/app.js?v=24"></script>
 </body>
 </html>

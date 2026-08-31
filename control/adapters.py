@@ -46,6 +46,8 @@ class ConductorAdapter(Protocol):
     def replace(self, old_mac: str, new_mac: str) -> dict[str, Any]: ...
     def reserve_id(self, mac: str, reported_id: int = 0) -> dict[str, Any]: ...
     def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str], group_id: int | None = None) -> dict[str, Any]: ...
+    def install_uploaded_program(self, program_id: int, vm_version: int, data: bytes) -> dict[str, Any]: ...
+    def uploaded_program_progress(self) -> dict[str, Any]: ...
     def set_locator(self, enabled: bool, *, brightness: int = 96, slot_ms: int = 1000, bit_count: int = 1, min_hamming_distance: int = 3) -> dict[str, Any]: ...
     def blackout(self) -> dict[str, Any]: ...
     def restore_blackout(self) -> dict[str, Any]: ...
@@ -133,6 +135,26 @@ class JsonLineSerialConductor:
         if group_id is not None:
             payload["group_id"] = group_id
         return self._request("pattern", **payload)
+
+    def install_uploaded_program(
+        self, program_id: int, vm_version: int, data: bytes
+    ) -> dict[str, Any]:
+        return self._request(
+            "program_install",
+            program_id=program_id & 0xFFFFFFFF,
+            program_tag=program_id >> 32,
+            vm_version=vm_version,
+            data=data.hex(),
+        )
+
+    def uploaded_program_progress(self) -> dict[str, Any]:
+        response = self._request("program_progress")
+        progress = response.get("uploaded_program")
+        if not isinstance(progress, dict):
+            raise SerialProtocolError(
+                "program progress response missing uploaded_program object"
+            )
+        return progress
 
     def set_locator(
         self,

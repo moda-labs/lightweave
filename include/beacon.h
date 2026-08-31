@@ -22,6 +22,7 @@
 #include "pattern_ids.h"
 #include "power_policy.h"
 #include "powermon.h"  // PowerSample — MSG_POWER's payload IS the logic struct
+#include "uploaded_pattern.h"
 
 // Application protocol generation. This is reported in REGISTER so the
 // conductor can spot a straggler and coordinate a field upgrade. It MUST NOT be
@@ -81,6 +82,9 @@ enum MsgType : uint8_t {
   MSG_OTA_QUERY = 10, // conductor -> performers: report current OTA checkpoint
   MSG_OTA_ACTIVATE = 11, // conductor -> performer: reboot staged image
   MSG_OTA_FRAME_ACK = 12, // relay -> primary: tokened targeted-frame receipt
+  MSG_PROGRAM_INSTALL = 13, // conductor -> performer: complete validated VM program
+  MSG_PROGRAM_QUERY = 14,   // conductor -> performer: report VM/program capability
+  MSG_PROGRAM_STATUS = 15,  // performer -> conductor: exact requested program status
 };
 
 typedef struct __attribute__((packed)) {
@@ -293,6 +297,49 @@ typedef struct __attribute__((packed)) {
   uint8_t     mac[6];  // sender's MAC (also in recv-info; kept for the log)
   PowerSample s;       // energy_j / charge_c / bus_v / current_ma / elapsed_s
 } PowerMsg;
+
+// Uploaded patterns are deliberately small enough for one ESP-NOW frame. This
+// avoids a second chunk/reassembly protocol and makes every persisted program an
+// atomic, content-addressed value. The conductor retries a targeted install after a
+// performer's REGISTER until MSG_PROGRAM_STATUS proves NVS persistence.
+typedef struct __attribute__((packed)) {
+  MsgHeader hdr;
+  uint64_t program_id;
+  uint8_t  vm_version;
+  uint8_t  length;
+  uint8_t  data[UPLOADED_PROGRAM_MAX_BYTES];
+} ProgramInstallMsg;
+
+static_assert(sizeof(ProgramInstallMsg) <= 250,
+              "ProgramInstallMsg exceeds ESP-NOW payload cap");
+
+inline bool programInstallMsgLenPlausible(int len) {
+  return len >= (int)offsetof(ProgramInstallMsg, data) + 1 &&
+         len <= (int)sizeof(ProgramInstallMsg);
+}
+
+inline bool programInstallMsgLenValid(int len, uint8_t program_length) {
+  return program_length > 0 &&
+         program_length <= UPLOADED_PROGRAM_MAX_BYTES &&
+         len == (int)(offsetof(ProgramInstallMsg, data) + program_length);
+}
+
+typedef struct __attribute__((packed)) {
+  MsgHeader hdr;
+  uint64_t requested_id;  // zero is a capability-only query
+} ProgramQueryMsg;
+
+typedef struct __attribute__((packed)) {
+  MsgHeader hdr;
+  uint8_t  mac[6];
+  uint8_t  vm_version;
+  uint8_t  available;
+  uint64_t requested_id;
+  uint8_t  fw;
+  uint32_t build;
+  uint8_t  dirty;
+  char     version[FIRMWARE_VERSION_MAX];
+} ProgramStatusMsg;
 
 typedef struct __attribute__((packed)) {
   MsgHeader hdr;

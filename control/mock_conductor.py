@@ -19,6 +19,7 @@ FIELD_FIRMWARE = {
     "build_id": 0x44D028FD,
     "build_label": "44d028fd",
     "dirty": False,
+    "features": ["pond_ripple", "uploaded_patterns_v1"],
 }
 
 DEFAULT_POWER_POLICY = {
@@ -151,6 +152,7 @@ class MockConductor:
         }
     )
     group_patterns: list[dict[str, Any]] = field(default_factory=list)
+    uploaded_program_id: int = 0
     locator: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
@@ -211,6 +213,7 @@ class MockConductor:
         alive = sum(1 for item in lanterns if item["status"] == "alive" and item["position"] == "Set")
         attention = sum(1 for item in lanterns if item["attention"] != "None")
         firmware = self._firmware_summary(lanterns, table_rows)
+        uploaded_program = self._uploaded_program_summary(lanterns, table_rows)
         ota = self._ota_summary(lanterns, table_rows, now, firmware)
         effective_pattern = self._effective_pattern()
         return {
@@ -234,6 +237,7 @@ class MockConductor:
                 {"group_id": group_id, "config": deepcopy(config)}
                 for group_id, config in enumerate(self.group_patterns)
             ],
+            "uploaded_program": uploaded_program,
             "locator": deepcopy(self.locator),
             "blackout": {"restore_available": self._blackout_brightness is not None},
             "power": deepcopy(self.power),
@@ -380,6 +384,20 @@ class MockConductor:
         }
 
     def update_pattern(self, pattern: str, brightness: int, params: dict[str, int | float | str], group_id: int | None = None) -> dict[str, Any]:
+        if brightness != 0 and pattern.strip().lower().replace("_", " ").replace("-", " ") in {
+            "uploaded", "uploaded pattern"
+        }:
+            summary = self._uploaded_program_summary(self.lanterns(), sum(
+                1 for item in self.lanterns() if item["position"] == "Set"
+            ))
+            requested = (
+                int(params.get("p0", 0))
+                | (int(params.get("p1", 0)) << 16)
+                | (int(params.get("p2", 0)) << 32)
+                | (int(params.get("p3", 0)) << 48)
+            )
+            if not summary["ready"] or requested != self.uploaded_program_id:
+                return {"ok": False, "error": "uploaded program is not verified on every placed lantern"}
         updated = {"pattern": pattern, "brightness": brightness, "params": dict(params)}
         targets = range(GROUP_COUNT) if group_id is None else [group_id]
         if group_id is not None and (group_id < 0 or group_id >= GROUP_COUNT):
@@ -390,6 +408,21 @@ class MockConductor:
         scope = "all groups" if group_id is None else f"Group {group_id + 1}"
         self._event(f"pattern={pattern} bri={brightness} scope={scope}")
         return {"ok": True, "message": f"pattern changed to {pattern} for {scope}", "pattern": deepcopy(updated)}
+
+    def install_uploaded_program(
+        self, program_id: int, vm_version: int, data: bytes
+    ) -> dict[str, Any]:
+        if vm_version != 1 or not data or len(data) > 192:
+            return {"ok": False, "error": "invalid uploaded program"}
+        self.uploaded_program_id = int(program_id)
+        self._event(f"uploaded program staged id={program_id:08x}")
+        return {"ok": True, "message": "uploaded program staged; waiting for fleet verification"}
+
+    def uploaded_program_progress(self) -> dict[str, Any]:
+        return self._uploaded_program_summary(
+            self.lanterns(),
+            sum(1 for item in self.lanterns() if item["position"] == "Set"),
+        )
 
     def set_locator(
         self,
@@ -736,6 +769,43 @@ class MockConductor:
             "version": FIELD_FIRMWARE["version"],
             "build_label": FIELD_FIRMWARE["build_label"],
             "dirty": FIELD_FIRMWARE["dirty"],
+        }
+
+    def _uploaded_program_summary(
+        self, lanterns: list[dict[str, Any]], table_rows: int
+    ) -> dict[str, Any]:
+        positioned = [
+            item for item in lanterns
+            if item["position"] == "Set" and item["status"] == "alive"
+        ]
+        ready_count = sum(
+            1 for item in positioned
+            if _firmware_matches(FIELD_FIRMWARE, item.get("firmware"))
+            and "uploaded_patterns_v1" in ((item.get("firmware") or {}).get("features") or [])
+        )
+        active_identity = 0
+        for config in self.group_patterns:
+            if config.get("pattern") != "Uploaded Pattern":
+                continue
+            params = config.get("params") or {}
+            active_identity = (
+                int(params.get("p0", 0))
+                | (int(params.get("p1", 0)) << 16)
+                | (int(params.get("p2", 0)) << 32)
+                | (int(params.get("p3", 0)) << 48)
+            )
+            break
+        return {
+            "vm_version": 1,
+            "target_id": self.uploaded_program_id & 0xFFFFFFFF,
+            "target_tag": self.uploaded_program_id >> 32,
+            "target_label": f"{self.uploaded_program_id:016x}",
+            "active_id": active_identity & 0xFFFFFFFF,
+            "active_tag": active_identity >> 32,
+            "ready": self.uploaded_program_id != 0 and ready_count == table_rows and len(positioned) == table_rows,
+            "ready_count": ready_count if self.uploaded_program_id else 0,
+            "seen": ready_count,
+            "expected": table_rows,
         }
 
     def _ota_summary(

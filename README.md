@@ -169,8 +169,9 @@ batch notes.
 - Eight independent lantern-group pattern configs in each beacon, with
   `pattern_id`, brightness, palette/params, and sequence tracking.
 - Patterns: Pulse, Palette Drift, Sweep, single-band Wavefront, Glow, Firefly
-  with periodic three-beat chorus, Ocean Wave, White, ring-addressable Fire
-  Flicker, deterministic heat-cell Fire2012, and Solid test mode.
+  with periodic three-beat chorus, Ocean Wave, Pond Ripple, White,
+  ring-addressable Fire Flicker, deterministic heat-cell Fire2012, bounded
+  uploaded expression programs, and Solid test mode.
 - MAC-keyed roster with conductor-authoritative permanent board IDs, optional
   layout positions, and group membership.
 - Persistent role, position, group, group patterns, brightness, and power policy

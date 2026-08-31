@@ -17,6 +17,7 @@
 #include "led_profile.h"
 #include "ota_update.h"
 #include "pattern_ids.h"
+#include "uploaded_pattern.h"
 
 // Worst-case targeted begin is 64 quoted MACs (20 bytes each including comma)
 // plus bounded uint32 fields and JSON keys. Keep the UART accumulator large
@@ -37,6 +38,8 @@ enum SerialJsonKind {
   SJ_REPLACE,
   SJ_RESERVE_ID,
   SJ_PATTERN,
+  SJ_PROGRAM_INSTALL,
+  SJ_PROGRAM_PROGRESS,
   SJ_LOCATOR,
   SJ_BLACKOUT,
   SJ_RESTORE_BLACKOUT,
@@ -72,6 +75,8 @@ struct SerialJsonCommand {
   bool has_brightness = false;
   bool has_params[4] = {false, false, false, false};
   uint16_t params[4] = {0, 0, 0, 0};
+  UploadedProgram uploaded_program = {};
+  char uploaded_data_hex[UPLOADED_PROGRAM_MAX_BYTES * 2 + 1] = {0};
   bool locator_enabled = false;
   uint16_t locator_slot_ms = 1000;
   uint8_t locator_bit_count = 1;
@@ -200,6 +205,8 @@ inline bool serialJsonPatternId(const char* value, uint16_t& out) {
   else if (!strcmp(norm, "fireflicker")) out = patterns::FIRE_FLICKER;
   else if (!strcmp(norm, "fire2012")) out = patterns::FIRE2012;
   else if (!strcmp(norm, "wavefront")) out = patterns::WAVEFRONT;
+  else if (!strcmp(norm, "pondripple") || !strcmp(norm, "ripple")) out = patterns::POND_RIPPLE;
+  else if (!strcmp(norm, "uploaded") || !strcmp(norm, "uploadedpattern")) out = patterns::UPLOADED;
   else if (!strcmp(norm, "white")) out = patterns::WHITE;
   else if (!strcmp(norm, "calibration")) out = patterns::CALIBRATION;
   else {
@@ -271,6 +278,8 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
 
   if (!strcmp(norm, "state")) {
     cmd.kind = SJ_STATE;
+  } else if (!strcmp(norm, "programprogress")) {
+    cmd.kind = SJ_PROGRAM_PROGRESS;
   } else if (!strcmp(norm, "identify")) {
     cmd.kind = SJ_IDENTIFY;
     if (!sjMac(json, "mac", cmd.mac)) {
@@ -385,6 +394,39 @@ inline bool serialJsonParse(const char* json, SerialJsonCommand& cmd,
     if (sjUint(json, "p3", v)) {
       cmd.has_params[3] = true;
       cmd.params[3] = (uint16_t)(v > 65535 ? 65535 : v);
+    }
+  } else if (!strcmp(norm, "programinstall")) {
+    cmd.kind = SJ_PROGRAM_INSTALL;
+    uint32_t program_id = 0;
+    uint32_t program_tag = 0;
+    uint32_t vm_version = 0;
+    if (!sjUint(json, "program_id", program_id) ||
+        !sjUint(json, "program_tag", program_tag) ||
+        !sjUint(json, "vm_version", vm_version) ||
+        vm_version != UPLOADED_VM_VERSION ||
+        !sjString(json, "data", cmd.uploaded_data_hex,
+                  sizeof(cmd.uploaded_data_hex))) {
+      error = "bad uploaded program";
+      return false;
+    }
+    size_t decoded = 0;
+    if (!otaHexDecode(cmd.uploaded_data_hex, cmd.uploaded_program.data,
+                      sizeof(cmd.uploaded_program.data), decoded) ||
+        decoded == 0 || decoded > UPLOADED_PROGRAM_MAX_BYTES) {
+      error = "bad uploaded program data";
+      return false;
+    }
+    cmd.uploaded_program.id =
+        (uint64_t)program_id | ((uint64_t)program_tag << 32);
+    if (cmd.uploaded_program.id == 0) {
+      error = "bad uploaded program";
+      return false;
+    }
+    cmd.uploaded_program.version = (uint8_t)vm_version;
+    cmd.uploaded_program.length = (uint8_t)decoded;
+    if (!uploadedProgramValid(cmd.uploaded_program)) {
+      error = "invalid uploaded program";
+      return false;
     }
   } else if (!strcmp(norm, "locator")) {
     cmd.kind = SJ_LOCATOR;

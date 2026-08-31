@@ -21,6 +21,8 @@ let otaInstall = null;
 let otaInstallRefreshPromise = null;
 let otaInstallPollTimer = null;
 let savedPatterns = [];
+let uploadedPatterns = [];
+let customPatternSourceMode = "guided";
 let calibrationFrames = [];
 let calibrationProposal = null;
 let calibrationCodePlan = null;
@@ -70,7 +72,148 @@ const PATTERN_DEFAULTS = {
   "Fire Flicker": { hue: 24, saturation: 95, value: 255, period: 1200, wavelength: 300, spatial: 0, scatter: 100, texture: 85, angle: 45 },
   Fire2012: { hue: 24, saturation: 100, value: 255, period: 1200, wavelength: 300, spatial: 0, scatter: 100, texture: 85, angle: 45, speed: 30, cooling: 55, sparking: 120 },
   "Ocean Wave": { hue: 205, saturation: 100, value: 255, period: 9000, wavelength: 100, spatial: 0, scatter: 100, angle: 45 },
+  "Pond Ripple": { hue: 195, saturation: 80, value: 255, period: 6000, wavelength: 50, spatial: 0, scatter: 100, angle: 45, centerX: 500, centerY: 500 },
+  "Uploaded Pattern": { hue: 202, saturation: 90, value: 255, period: 8000, wavelength: 100, spatial: 0, scatter: 100, angle: 45 },
 };
+
+const CUSTOM_BUILDER_DEFAULTS = Object.freeze({
+  motion: "traveling-wave",
+  hue: 202,
+  saturation: 90,
+  periodMs: 8000,
+  wavelength: 1,
+  direction: 45,
+  centerX: 0.5,
+  centerY: 0.5,
+  minValue: 20,
+  maxValue: 100,
+});
+const CUSTOM_BUILDER_MOTIONS = new Set([
+  "traveling-wave",
+  "center-ripple",
+  "whole-field-pulse",
+  "lantern-shimmer",
+  "steady-glow",
+]);
+
+function clampCustomSetting(value, minimum, maximum, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
+}
+
+function displayPatternName(pattern) {
+  return pattern === "Uploaded Pattern" ? "Custom Pattern" : pattern;
+}
+
+function customBuilderProgram(settings = {}) {
+  const motion = CUSTOM_BUILDER_MOTIONS.has(settings.motion)
+    ? settings.motion
+    : CUSTOM_BUILDER_DEFAULTS.motion;
+  const hue = clampCustomSetting(settings.hue, 0, 359, CUSTOM_BUILDER_DEFAULTS.hue);
+  const saturation = clampCustomSetting(settings.saturation, 0, 100, CUSTOM_BUILDER_DEFAULTS.saturation);
+  const periodMs = clampCustomSetting(settings.periodMs, 2000, 30000, CUSTOM_BUILDER_DEFAULTS.periodMs);
+  const wavelength = clampCustomSetting(settings.wavelength, 0.25, 2, CUSTOM_BUILDER_DEFAULTS.wavelength);
+  const direction = clampCustomSetting(settings.direction, 0, 355, CUSTOM_BUILDER_DEFAULTS.direction);
+  const centerX = clampCustomSetting(settings.centerX, 0, 1, CUSTOM_BUILDER_DEFAULTS.centerX);
+  const centerY = clampCustomSetting(settings.centerY, 0, 1, CUSTOM_BUILDER_DEFAULTS.centerY);
+  const minValue = clampCustomSetting(settings.minValue, 0, 80, CUSTOM_BUILDER_DEFAULTS.minValue);
+  const requestedMax = clampCustomSetting(settings.maxValue, 20, 100, CUSTOM_BUILDER_DEFAULTS.maxValue);
+  const maxValue = Math.max(minValue, requestedMax);
+  const radians = direction * Math.PI / 180;
+  const timePhase = { op: "mul", args: ["time", 2 * Math.PI / (periodMs / 1000)] };
+  let phase = timePhase;
+
+  if (motion === "traveling-wave") {
+    const spatialScale = 2 * Math.PI / wavelength;
+    const spatialPhase = {
+      op: "add",
+      args: [
+        { op: "mul", args: ["x", Math.cos(radians) * spatialScale] },
+        { op: "mul", args: ["y", Math.sin(radians) * spatialScale] },
+      ],
+    };
+    phase = { op: "add", args: [spatialPhase, timePhase] };
+  } else if (motion === "center-ripple") {
+    phase = {
+      op: "sub",
+      args: [
+        {
+          op: "mul",
+          args: [
+            { op: "distance", args: ["x", "y", centerX, centerY] },
+            2 * Math.PI / wavelength,
+          ],
+        },
+        timePhase,
+      ],
+    };
+  } else if (motion === "lantern-shimmer") {
+    const lanternPhase = {
+      op: "mul",
+      args: [
+        {
+          op: "hash",
+          args: [{
+            op: "add",
+            args: [
+              { op: "mul", args: ["x", 31] },
+              { op: "mul", args: ["y", 17] },
+            ],
+          }],
+        },
+        2 * Math.PI,
+      ],
+    };
+    phase = { op: "add", args: [timePhase, lanternPhase] };
+  }
+
+  const value = motion === "steady-glow"
+    ? maxValue / 100
+    : {
+        op: "mix",
+        args: [
+          minValue / 100,
+          maxValue / 100,
+          { op: "wave", args: [phase] },
+        ],
+      };
+  return {
+    hue: hue / 360,
+    saturation: saturation / 100,
+    value,
+    intensity: 1,
+    _builder: {
+      version: 1,
+      motion,
+      period_ms: periodMs,
+      wavelength,
+      direction_deg: direction,
+      center_x: centerX,
+      center_y: centerY,
+      min_value: minValue,
+      max_value: maxValue,
+    },
+  };
+}
+
+function customBuilderSettingsFromProgram(program) {
+  const metadata = program?._builder;
+  if (!metadata || Number(metadata.version) !== 1 || !CUSTOM_BUILDER_MOTIONS.has(metadata.motion)) return null;
+  return {
+    motion: metadata.motion,
+    hue: clampCustomSetting(Number(program.hue) * 360, 0, 359, CUSTOM_BUILDER_DEFAULTS.hue),
+    saturation: clampCustomSetting(Number(program.saturation) * 100, 0, 100, CUSTOM_BUILDER_DEFAULTS.saturation),
+    periodMs: clampCustomSetting(metadata.period_ms, 2000, 30000, CUSTOM_BUILDER_DEFAULTS.periodMs),
+    wavelength: clampCustomSetting(metadata.wavelength, 0.25, 2, CUSTOM_BUILDER_DEFAULTS.wavelength),
+    direction: clampCustomSetting(metadata.direction_deg, 0, 355, CUSTOM_BUILDER_DEFAULTS.direction),
+    centerX: clampCustomSetting(metadata.center_x, 0, 1, CUSTOM_BUILDER_DEFAULTS.centerX),
+    centerY: clampCustomSetting(metadata.center_y, 0, 1, CUSTOM_BUILDER_DEFAULTS.centerY),
+    minValue: clampCustomSetting(metadata.min_value, 0, 80, CUSTOM_BUILDER_DEFAULTS.minValue),
+    maxValue: clampCustomSetting(metadata.max_value, 20, 100, CUSTOM_BUILDER_DEFAULTS.maxValue),
+  };
+}
+
+const DEFAULT_UPLOADED_PROGRAM = customBuilderProgram(CUSTOM_BUILDER_DEFAULTS);
 
 const COLOR_VALUE_MARKER = 0x8000;
 const FIREFLY_SCATTER_MASK = 0x007f;
@@ -140,6 +283,30 @@ function hueSaturationValueToHex(hue, saturation, value) {
   const m = v - c;
   const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function colorWheelPosition(hue, saturation) {
+  const angle = (((Number(hue) % 360) + 360) % 360) * Math.PI / 180;
+  const radius = Math.min(100, Math.max(0, Number(saturation))) * 0.46;
+  return {
+    left: 50 + Math.cos(angle) * radius,
+    top: 50 + Math.sin(angle) * radius,
+  };
+}
+
+function colorWheelSelection(rect, clientX, clientY, fallbackHue = 0) {
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  const dx = Number(clientX) - centerX;
+  const dy = Number(clientY) - centerY;
+  const maxRadius = Math.max(1, Math.min(rect.width, rect.height) * 0.46);
+  const distance = Math.hypot(dx, dy);
+  return {
+    hue: distance < 1
+      ? ((Math.round(Number(fallbackHue)) % 360) + 360) % 360
+      : Math.round((Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360) % 360,
+    saturation: Math.round(Math.min(1, distance / maxRadius) * 100),
+  };
 }
 
 function colorValuePack(value) {
@@ -913,7 +1080,7 @@ function renderOverview() {
         const groupId = Number(group.group_id);
         const config = patternForGroup(groupId);
         const members = counts[groupId];
-        const playing = Number(config.brightness || 0) > 0 ? config.pattern : "Off";
+        const playing = Number(config.brightness || 0) > 0 ? displayPatternName(config.pattern) : "Off";
         return `<div class="overview-group-row">
           <i class="overview-group-swatch" aria-hidden="true"></i>
           <div><strong>${escapeHtml(group.label || groupLabel(groupId))}</strong><span>${escapeHtml(playing)} · brightness ${Number(config.brightness || 0)} / 192</span></div>
@@ -1034,7 +1201,7 @@ function render() {
   $("#field-count").textContent = `${state.summary.alive} / ${state.summary.total}`;
   const activePattern = activePatternState();
   renderGroupControls();
-  $("#show-name").textContent = `${groupLabel(selectedGroup)}: ${activePattern.pattern}`;
+  $("#show-name").textContent = `${groupLabel(selectedGroup)}: ${displayPatternName(activePattern.pattern)}`;
   $("#attention-count").textContent = `${state.summary.attention} lights`;
   $("#sync-status").textContent = `sync ${state.conductor.sync}`;
   $("#table-sync-status").textContent = `sync ${state.conductor.sync}`;
@@ -1045,6 +1212,7 @@ function render() {
   renderAudio();
   renderPatternControls();
   renderSavedPatterns();
+  renderUploadedPatterns();
   renderMap();
   renderUnpositionedTray();
   renderRows();
@@ -1217,7 +1385,7 @@ function patternPeriodFromState() {
   const live = activePatternState();
   const params = live.params || {};
   if (params.period !== undefined) return Number(params.period);
-  if ((live.pattern === "Sweep" || live.pattern === "Wavefront" || live.pattern === "Palette Drift" || live.pattern === "Firefly" || live.pattern === "Fire Flicker" || live.pattern === "Ocean Wave") && params.p0 !== undefined) {
+  if ((live.pattern === "Sweep" || live.pattern === "Wavefront" || live.pattern === "Palette Drift" || live.pattern === "Firefly" || live.pattern === "Fire Flicker" || live.pattern === "Ocean Wave" || live.pattern === "Pond Ripple") && params.p0 !== undefined) {
     return Number(params.p0);
   }
   return PATTERN_DEFAULTS[live.pattern]?.period || 4000;
@@ -1286,11 +1454,23 @@ function patternFrontWidthFromState() {
   return PATTERN_DEFAULTS.Wavefront.frontWidth;
 }
 
+function patternCenterFromState(axis) {
+  const live = activePatternState();
+  const params = live.params || {};
+  if (live.pattern === "Pond Ripple") {
+    const key = axis === "x" ? "p2" : "p3";
+    if (params[key] !== undefined) return Number(params[key]);
+  }
+  return axis === "x"
+    ? PATTERN_DEFAULTS["Pond Ripple"].centerX
+    : PATTERN_DEFAULTS["Pond Ripple"].centerY;
+}
+
 function patternWavelengthFromState() {
   const live = activePatternState();
   const params = live.params || {};
   if (params.wavelength !== undefined) return Number(params.wavelength);
-  if ((live.pattern === "Sweep" || live.pattern === "Ocean Wave") && params.p1 !== undefined) {
+  if ((live.pattern === "Sweep" || live.pattern === "Ocean Wave" || live.pattern === "Pond Ripple") && params.p1 !== undefined) {
     if (live.pattern === "Ocean Wave" && colorValuePresent(params.p2)) {
       return Number(params.p1) & OCEAN_WAVELENGTH_MASK;
     }
@@ -1327,6 +1507,8 @@ function patternDraftFromState() {
     speed: patternFire2012ControlFromState("speed", 0),
     cooling: patternFire2012ControlFromState("cooling", 1),
     sparking: patternFire2012ControlFromState("sparking", 2),
+    centerX: patternCenterFromState("x"),
+    centerY: patternCenterFromState("y"),
   };
 }
 
@@ -1349,6 +1531,8 @@ function patternDraftForSelection(pattern) {
     speed: Number(defaults.speed ?? PATTERN_DEFAULTS.Fire2012.speed),
     cooling: Number(defaults.cooling ?? PATTERN_DEFAULTS.Fire2012.cooling),
     sparking: Number(defaults.sparking ?? PATTERN_DEFAULTS.Fire2012.sparking),
+    centerX: Number(defaults.centerX ?? PATTERN_DEFAULTS["Pond Ripple"].centerX),
+    centerY: Number(defaults.centerY ?? PATTERN_DEFAULTS["Pond Ripple"].centerY),
   };
 }
 
@@ -1411,6 +1595,14 @@ function patternParams(draft) {
       p3: Number(draft.hue),
     };
   }
+  if (draft.pattern === "Pond Ripple") {
+    return {
+      p0: Number(draft.period),
+      p1: Number(draft.wavelength),
+      p2: Number(draft.centerX),
+      p3: Number(draft.centerY),
+    };
+  }
   return {};
 }
 
@@ -1426,6 +1618,7 @@ function patternStateParams(draft) {
 }
 
 function relevantPatternFields(pattern) {
+  if (pattern === "Uploaded Pattern") return ["pattern", "brightness", "hue", "saturation", "value"];
   if (pattern === "Pulse" || pattern === "Glow") return ["pattern", "brightness", "hue", "saturation", "value"];
   if (pattern === "Sweep") return ["pattern", "brightness", "period", "wavelength"];
   if (pattern === "Palette Drift") return ["pattern", "brightness", "period", "spatial"];
@@ -1434,16 +1627,132 @@ function relevantPatternFields(pattern) {
   if (pattern === "Fire2012") return ["pattern", "brightness", "speed", "cooling", "sparking"];
   if (pattern === "Ocean Wave") return ["pattern", "brightness", "period", "wavelength", "angle", "hue", "saturation", "value"];
   if (pattern === "Wavefront") return ["pattern", "brightness", "period", "frontWidth", "angle", "hue", "saturation", "value"];
+  if (pattern === "Pond Ripple") return ["pattern", "brightness", "period", "wavelength", "centerX", "centerY"];
   return ["pattern", "brightness"];
+}
+
+function patternFirmwareReady(pattern) {
+  if (pattern !== "Pond Ripple" && pattern !== "Uploaded Pattern") return true;
+  const features = state?.conductor?.firmware?.features;
+  const firmware = state?.summary?.firmware;
+  return Number(firmware?.expected) > 0
+    && firmware?.consistent === true
+    && Number(firmware?.matching) === Number(firmware?.expected)
+    && Number(firmware?.seen) === Number(firmware?.expected)
+    && Array.isArray(features)
+    && features.includes(pattern === "Pond Ripple" ? "pond_ripple" : "uploaded_patterns_v1");
 }
 
 function isPatternDirty() {
   if (!state || !patternDraft) return false;
+  if (patternDraft.pattern === "Uploaded Pattern") return true;
   const live = patternDraftFromState();
   return relevantPatternFields(patternDraft.pattern).some((field) => {
     if (field === "pattern") return patternDraft.pattern !== live.pattern;
     return Number(patternDraft[field]) !== Number(live[field]);
   });
+}
+
+function customBuilderSettingsFromForm() {
+  return {
+    motion: $("#custom-pattern-motion").value,
+    hue: Number(patternDraft?.hue ?? CUSTOM_BUILDER_DEFAULTS.hue),
+    saturation: Number(patternDraft?.saturation ?? CUSTOM_BUILDER_DEFAULTS.saturation),
+    periodMs: Number($("#custom-pattern-period").value),
+    wavelength: Number($("#custom-pattern-wavelength").value) / 100,
+    direction: Number($("#custom-pattern-direction").value),
+    centerX: Number($("#custom-pattern-center-x").value) / 100,
+    centerY: Number($("#custom-pattern-center-y").value) / 100,
+    minValue: Number($("#custom-pattern-min-value").value),
+    maxValue: Number($("#custom-pattern-max-value").value),
+  };
+}
+
+function setCustomPatternSourceMode(mode) {
+  customPatternSourceMode = mode === "advanced" ? "advanced" : "guided";
+  const chip = $("#custom-pattern-source-mode");
+  chip.textContent = customPatternSourceMode === "advanced" ? "Advanced source" : "Guided controls";
+  chip.className = `chip ${customPatternSourceMode === "advanced" ? "active" : "sync"}`;
+}
+
+function syncCustomProgramFromBuilder({ resetStatus = false } = {}) {
+  if (patternDraft?.pattern !== "Uploaded Pattern") return;
+  setCustomPatternSourceMode("guided");
+  $("#uploaded-pattern-json").value = JSON.stringify(
+    customBuilderProgram(customBuilderSettingsFromForm()),
+    null,
+    2,
+  );
+  if (resetStatus) $("#uploaded-pattern-status").textContent = "Ready to validate";
+}
+
+function setCustomBuilderForm(settings) {
+  $("#custom-pattern-motion").value = settings.motion;
+  $("#custom-pattern-period").value = String(settings.periodMs);
+  $("#custom-pattern-wavelength").value = String(Math.round(settings.wavelength * 100));
+  $("#custom-pattern-direction").value = String(settings.direction);
+  $("#custom-pattern-center-x").value = String(Math.round(settings.centerX * 100));
+  $("#custom-pattern-center-y").value = String(Math.round(settings.centerY * 100));
+  $("#custom-pattern-min-value").value = String(settings.minValue);
+  $("#custom-pattern-max-value").value = String(settings.maxValue);
+  if (patternDraft) {
+    patternDraft.hue = settings.hue;
+    patternDraft.saturation = settings.saturation;
+    patternDraft.value = 255;
+  }
+}
+
+function resetCustomPatternBuilder() {
+  setCustomBuilderForm(CUSTOM_BUILDER_DEFAULTS);
+  $("#uploaded-pattern-name").value = "Blue traveling wave";
+  $("#custom-pattern-advanced").open = false;
+  syncCustomProgramFromBuilder({ resetStatus: true });
+}
+
+function renderCustomPatternBuilder() {
+  const motion = $("#custom-pattern-motion").value;
+  const periodMs = Number($("#custom-pattern-period").value);
+  const wavelength = Number($("#custom-pattern-wavelength").value);
+  const direction = Number($("#custom-pattern-direction").value);
+  const centerX = Number($("#custom-pattern-center-x").value);
+  const centerY = Number($("#custom-pattern-center-y").value);
+  const minValue = Number($("#custom-pattern-min-value").value);
+  const maxValue = Math.max(minValue, Number($("#custom-pattern-max-value").value));
+  $("#custom-pattern-max-value").value = String(maxValue);
+  $("#custom-pattern-period-value").textContent = (periodMs / 1000).toFixed(1);
+  $("#custom-pattern-wavelength-value").textContent = (wavelength / 100).toFixed(2);
+  $("#custom-pattern-direction-value").textContent = String(direction);
+  $("#custom-pattern-center-x-value").textContent = (centerX / 100).toFixed(2);
+  $("#custom-pattern-center-y-value").textContent = (centerY / 100).toFixed(2);
+  $("#custom-pattern-min-value-label").textContent = String(minValue);
+  $("#custom-pattern-max-value-label").textContent = String(maxValue);
+  $('[data-custom-param="period"]').hidden = motion === "steady-glow";
+  $('[data-custom-param="wavelength"]').hidden = !(motion === "traveling-wave" || motion === "center-ripple");
+  $('[data-custom-param="direction"]').hidden = motion !== "traveling-wave";
+  $('[data-custom-param="center"]').hidden = motion !== "center-ripple";
+  $('[data-custom-param="min-value"]').hidden = motion === "steady-glow";
+  if (customPatternSourceMode === "guided") syncCustomProgramFromBuilder();
+}
+
+function loadCustomPatternEditor(item) {
+  patternDraft = patternDraftForSelection("Uploaded Pattern");
+  patternDraft.brightness = Number(item.brightness);
+  $("#uploaded-pattern-name").value = item.name;
+  const settings = customBuilderSettingsFromProgram(item.program);
+  if (settings) {
+    setCustomBuilderForm(settings);
+    $("#custom-pattern-advanced").open = false;
+    setCustomPatternSourceMode("guided");
+    syncCustomProgramFromBuilder();
+  } else {
+    if (typeof item.program?.hue === "number") patternDraft.hue = (item.program.hue * 360 + 360) % 360;
+    if (typeof item.program?.saturation === "number") patternDraft.saturation = item.program.saturation * 100;
+    $("#uploaded-pattern-json").value = JSON.stringify(item.program, null, 2);
+    $("#custom-pattern-advanced").open = true;
+    setCustomPatternSourceMode("advanced");
+  }
+  $("#uploaded-pattern-status").textContent = `${item.compiled.instructions} instructions · ${item.compiled.bytes} bytes`;
+  renderPatternControls();
 }
 
 function renderPatternControls() {
@@ -1472,6 +1781,10 @@ function renderPatternControls() {
   $("#cooling-value").textContent = String(Number(patternDraft.cooling ?? 55));
   $("#pattern-sparking").value = patternDraft.sparking ?? 120;
   $("#sparking-value").textContent = String(Number(patternDraft.sparking ?? 120));
+  $("#pattern-center-x").value = patternDraft.centerX ?? 500;
+  $("#center-x-value").textContent = (Number(patternDraft.centerX ?? 500) / 1000).toFixed(2);
+  $("#pattern-center-y").value = patternDraft.centerY ?? 500;
+  $("#center-y-value").textContent = (Number(patternDraft.centerY ?? 500) / 1000).toFixed(2);
   const draftHex = hueSaturationValueToHex(
     patternDraft.hue,
     patternDraft.saturation ?? 100,
@@ -1480,23 +1793,28 @@ function renderPatternControls() {
   $$("#color-presets button").forEach((button) => {
     button.classList.toggle("active", hexApproxEqual(button.dataset.hex, draftHex));
   });
-  const isColorPattern = patternDraft.pattern === "Pulse" || patternDraft.pattern === "Glow" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Fire Flicker" || patternDraft.pattern === "Ocean Wave" || patternDraft.pattern === "Wavefront";
+  const isColorPattern = patternDraft.pattern === "Pulse" || patternDraft.pattern === "Glow" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Fire Flicker" || patternDraft.pattern === "Ocean Wave" || patternDraft.pattern === "Wavefront" || patternDraft.pattern === "Uploaded Pattern";
   $("#color-presets").hidden = !isColorPattern;
-  $("#hex-color-row").hidden = !isColorPattern;
+  $("#color-wheel-row").hidden = !isColorPattern;
   if (isColorPattern) {
     const hex = hueSaturationValueToHex(
       patternDraft.hue,
       patternDraft.saturation ?? 100,
       patternDraft.value ?? 255,
     );
-    if (document.activeElement !== $("#pattern-hex")) $("#pattern-hex").value = hex;
-    $("#pattern-hex").classList.remove("invalid");
     $("#pattern-color-picker").value = hex;
-    $("#color-swatch").style.backgroundColor = hex;
-    $("#hex-error").hidden = true;
+    const wheelPosition = colorWheelPosition(patternDraft.hue, patternDraft.saturation ?? 100);
+    const wheel = $("#pattern-color-wheel");
+    const thumb = $("#color-wheel-thumb");
+    thumb.style.left = `${wheelPosition.left}%`;
+    thumb.style.top = `${wheelPosition.top}%`;
+    thumb.style.setProperty("--selected-color", hex);
+    wheel.setAttribute("aria-valuenow", String(Math.round(Number(patternDraft.hue))));
+    wheel.setAttribute("aria-valuetext", `Hue ${Math.round(Number(patternDraft.hue))} degrees, saturation ${Math.round(Number(patternDraft.saturation ?? 100))} percent`);
+    $("#color-wheel-value").textContent = `Hue ${Math.round(Number(patternDraft.hue))}° · Saturation ${Math.round(Number(patternDraft.saturation ?? 100))}%`;
   }
-  $('[data-param-group="period"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Wavefront" || patternDraft.pattern === "Palette Drift" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Fire Flicker" || patternDraft.pattern === "Ocean Wave");
-  $('[data-param-group="wavelength"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Ocean Wave");
+  $('[data-param-group="period"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Wavefront" || patternDraft.pattern === "Palette Drift" || patternDraft.pattern === "Firefly" || patternDraft.pattern === "Fire Flicker" || patternDraft.pattern === "Ocean Wave" || patternDraft.pattern === "Pond Ripple");
+  $('[data-param-group="wavelength"]').hidden = !(patternDraft.pattern === "Sweep" || patternDraft.pattern === "Ocean Wave" || patternDraft.pattern === "Pond Ripple");
   $('[data-param-group="spatial"]').hidden = patternDraft.pattern !== "Palette Drift";
   $('[data-param-group="scatter"]').hidden = patternDraft.pattern !== "Firefly";
   $('[data-param-group="chorus"]').hidden = patternDraft.pattern !== "Firefly";
@@ -1506,8 +1824,21 @@ function renderPatternControls() {
   $('[data-param-group="fire-speed"]').hidden = patternDraft.pattern !== "Fire2012";
   $('[data-param-group="cooling"]').hidden = patternDraft.pattern !== "Fire2012";
   $('[data-param-group="sparking"]').hidden = patternDraft.pattern !== "Fire2012";
+  $('[data-param-group="ripple-center"]').hidden = patternDraft.pattern !== "Pond Ripple";
+  const uploaded = patternDraft.pattern === "Uploaded Pattern";
+  $("#uploaded-pattern-editor").hidden = !uploaded;
+  if (uploaded && !$("#uploaded-pattern-json").value.trim()) {
+    $("#uploaded-pattern-json").value = JSON.stringify(DEFAULT_UPLOADED_PROGRAM, null, 2);
+  }
+  if (uploaded) renderCustomPatternBuilder();
+  const firmwareReady = patternFirmwareReady(patternDraft.pattern);
+  $("#pattern-firmware-warning").textContent = patternDraft.pattern === "Uploaded Pattern"
+    ? "Custom Pattern is paused until every placed lantern is online and running compatible firmware. Existing patterns will remain active."
+    : "Ripple broadcast is paused until every placed lantern is online and running ripple-capable firmware. Finish reconciliation in Firmware first.";
+  $("#pattern-firmware-warning").hidden = firmwareReady;
   const changeButton = $('[data-action="broadcast"]');
-  changeButton.disabled = !isPatternDirty();
+  changeButton.disabled = !isPatternDirty() || !firmwareReady;
+  changeButton.textContent = uploaded ? "Verify & run custom pattern" : "Change pattern";
   changeButton.ariaDisabled = String(changeButton.disabled);
   const groupOffButton = $('[data-action="turn-off-group"]');
   const selectedGroupIsOff = Number(activePatternState()?.brightness || 0) === 0;
@@ -1517,6 +1848,45 @@ function renderPatternControls() {
   const restoreButton = $('[data-action="restore-blackout"]');
   restoreButton.disabled = state?.blackout?.restore_available !== true;
   restoreButton.ariaDisabled = String(restoreButton.disabled);
+}
+
+function renderUploadedPatterns() {
+  const list = $("#uploaded-pattern-list");
+  const count = $("#uploaded-pattern-count");
+  if (!list || !count) return;
+  count.textContent = `${uploadedPatterns.length} saved`;
+  if (!uploadedPatterns.length) {
+    list.innerHTML = '<div class="empty-state">No custom patterns yet.</div>';
+    return;
+  }
+  const firmwareReady = patternFirmwareReady("Uploaded Pattern");
+  list.innerHTML = uploadedPatterns.map((item) => `
+    <div class="saved-pattern-row uploaded-pattern-row">
+      <div>
+        <strong>${escapeHtml(item.name)}</strong>
+        <span>Custom Pattern · brightness ${escapeHtml(String(item.brightness))}</span>
+        <small>${escapeHtml(item.compiled?.program_label || "uncompiled")} · ${escapeHtml(String(item.compiled?.instructions || 0))} instructions</small>
+      </div>
+      <button data-uploaded-action="load" data-pattern-id="${escapeHtml(item.id)}">Edit</button>
+      <button class="primary" data-uploaded-action="broadcast" data-pattern-id="${escapeHtml(item.id)}" ${firmwareReady ? "" : "disabled"}>Verify &amp; run</button>
+      <button class="danger" data-uploaded-action="delete" data-pattern-id="${escapeHtml(item.id)}">Delete</button>
+    </div>
+  `).join("");
+}
+
+function uploadedDraftPayload() {
+  if (customPatternSourceMode === "guided") syncCustomProgramFromBuilder();
+  let program;
+  try {
+    program = JSON.parse($("#uploaded-pattern-json").value);
+  } catch (_error) {
+    throw new Error("Custom pattern source is not valid JSON");
+  }
+  return {
+    name: $("#uploaded-pattern-name").value.trim() || "Custom pattern",
+    brightness: Number(patternDraft?.brightness ?? 48),
+    program,
+  };
 }
 
 function renderSavedPatterns() {
@@ -1529,11 +1899,12 @@ function renderSavedPatterns() {
     return;
   }
   list.innerHTML = savedPatterns.map((item) => {
-    const details = `${escapeHtml(item.pattern)} · bri ${escapeHtml(String(item.brightness))}`;
+    const details = `${escapeHtml(displayPatternName(item.pattern))} · bri ${escapeHtml(String(item.brightness))}`;
     const params = Object.entries(item.params || {})
       .map(([key, value]) => `${key}=${value}`)
       .join(" ");
     const id = escapeHtml(item.id);
+    const broadcastDisabled = !patternFirmwareReady(item.pattern);
     return `
       <div class="saved-pattern-row">
         <div>
@@ -1544,7 +1915,7 @@ function renderSavedPatterns() {
         <a class="button-link" href="/api/patterns/${encodeURIComponent(item.id)}/preview" target="_blank" rel="noopener noreferrer">Preview</a>
         <a class="button-link" href="/api/patterns/${encodeURIComponent(item.id)}/preview/frames.json" target="_blank" rel="noopener noreferrer">Frames</a>
         <a class="button-link" href="/api/patterns/${encodeURIComponent(item.id)}/review" target="_blank" rel="noopener noreferrer">Review</a>
-        <button class="primary" data-pattern-action="broadcast-saved" data-pattern-id="${id}">Broadcast</button>
+        <button class="primary" data-pattern-action="broadcast-saved" data-pattern-id="${id}" ${broadcastDisabled ? 'disabled title="Finish firmware reconciliation before broadcasting Ripple"' : ""}>Broadcast</button>
         <button class="danger" data-pattern-action="delete-saved" data-pattern-id="${id}">Delete</button>
       </div>
     `;
@@ -1738,7 +2109,7 @@ function renderDetail() {
   $("#detail-tech").innerHTML = [
     `MAC ${escapeHtml(lantern.mac)} · x=${fmt(lantern.x)} y=${fmt(lantern.y)} · status=${escapeHtml(statusText(lantern))}`,
     `firmware=${firmwareHtml(lantern.firmware)}`,
-    `group=${escapeHtml(groupLabel(groupId))} · leds=${ledCount} · pattern=${escapeHtml(groupPattern.pattern)} bri=${groupPattern.brightness} · seq=${state.conductor.seq}`,
+    `group=${escapeHtml(groupLabel(groupId))} · leds=${ledCount} · pattern=${escapeHtml(displayPatternName(groupPattern.pattern))} bri=${groupPattern.brightness} · seq=${state.conductor.seq}`,
     `power E=${fmt(lantern.power.wh)}Wh avg=${fmt(lantern.power.avg_w)}W · last report=${escapeHtml(lantern.power.last_report_label || "none")}`,
   ].join("<br>");
   $$('[data-action="move"]').forEach((button) => {
@@ -3072,6 +3443,7 @@ async function refresh() {
     throw error;
   }
   savedPatterns = (await api("/api/patterns")).patterns;
+  uploadedPatterns = (await api("/api/uploaded-patterns")).patterns;
   await refreshReleaseInfo();
   otaArtifact = (await api("/api/operations/ota-artifact")).artifact;
   calibrationFrames = (await api("/api/calibration/frames")).frames || [];
@@ -3148,6 +3520,11 @@ function startAudioPolling() {
 async function refreshSavedPatterns() {
   savedPatterns = (await api("/api/patterns")).patterns;
   renderSavedPatterns();
+}
+
+async function refreshUploadedPatterns() {
+  uploadedPatterns = (await api("/api/uploaded-patterns")).patterns;
+  renderUploadedPatterns();
 }
 
 async function refreshPowerHistory({ incremental = false } = {}) {
@@ -3350,6 +3727,29 @@ async function runAction(action) {
     if (action === "broadcast") {
       if (!state || !patternDraft) return;
       if (!isPatternDirty()) return;
+      if (patternDraft.pattern === "Uploaded Pattern") {
+        const payload = uploadedDraftPayload();
+        const ack = await api(`/api/uploaded-patterns/broadcast?group_id=${selectedGroup}`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        const programId = Number(ack.compiled.program_id);
+        const programTag = Number(ack.compiled.program_tag);
+        applyOptimisticPattern(selectedGroup, {
+          pattern: "Uploaded Pattern",
+          brightness: Number(payload.brightness),
+          params: {
+            p0: programId & 0xffff,
+            p1: (programId >>> 16) & 0xffff,
+            p2: programTag & 0xffff,
+            p3: (programTag >>> 16) & 0xffff,
+          },
+        });
+        patternDraft = null;
+        render();
+        toast(ack.message);
+        return;
+      }
       const pattern = patternDraft.pattern;
       const brightness = Number(patternDraft.brightness);
       const params = patternParams(patternDraft);
@@ -3369,6 +3769,17 @@ async function runAction(action) {
     }
     if (action === "save-pattern") {
       if (!state || !patternDraft) return;
+      if (patternDraft.pattern === "Uploaded Pattern") {
+        const ack = await api("/api/uploaded-patterns", {
+          method: "POST",
+          body: JSON.stringify(uploadedDraftPayload()),
+        });
+        uploadedPatterns = [...uploadedPatterns, ack.pattern]
+          .sort((a, b) => a.name.localeCompare(b.name));
+        renderUploadedPatterns();
+        toast(`saved ${ack.pattern.name}`);
+        return;
+      }
       const fallback = `${patternDraft.pattern} ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
       const name = prompt("Pattern name", fallback);
       if (!name) return;
@@ -3384,6 +3795,16 @@ async function runAction(action) {
       savedPatterns = [...savedPatterns, ack.pattern].sort((a, b) => a.name.localeCompare(b.name));
       renderSavedPatterns();
       toast(`saved ${ack.pattern.name}`);
+      return;
+    }
+    if (action === "preview-uploaded") {
+      const preview = await api("/api/uploaded-patterns/preview", {
+        method: "POST",
+        body: JSON.stringify(uploadedDraftPayload()),
+      });
+      const compiled = preview.compiled;
+      $("#uploaded-pattern-status").textContent = `${compiled.instructions} instructions · ${compiled.bytes} bytes · ${compiled.static ? "static" : "animated"}`;
+      toast(`custom pattern ${compiled.program_label} is ready`);
       return;
     }
     if (action === "save-group-name") {
@@ -3809,6 +4230,51 @@ document.addEventListener("click", (event) => {
   }
 });
 
+document.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-uploaded-action]");
+  if (!target) return;
+  const id = target.dataset.patternId;
+  const item = uploadedPatterns.find((pattern) => pattern.id === id);
+  if (!item) return;
+  const action = target.dataset.uploadedAction;
+  if (action === "load") {
+    loadCustomPatternEditor(item);
+    $("#uploaded-pattern-editor").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+  if (action === "broadcast") {
+    target.disabled = true;
+    api(`/api/uploaded-patterns/${encodeURIComponent(id)}/broadcast?group_id=${selectedGroup}`, { method: "POST" })
+      .then((ack) => {
+        const programId = Number(ack.compiled.program_id);
+        const programTag = Number(ack.compiled.program_tag);
+        applyOptimisticPattern(selectedGroup, {
+          pattern: "Uploaded Pattern",
+          brightness: Number(item.brightness),
+          params: {
+            p0: programId & 0xffff,
+            p1: (programId >>> 16) & 0xffff,
+            p2: programTag & 0xffff,
+            p3: (programTag >>> 16) & 0xffff,
+          },
+        });
+        patternDraft = null;
+        render();
+        toast(ack.message);
+      })
+      .catch((error) => toast(error.message, true))
+      .finally(() => { target.disabled = false; });
+  }
+  if (action === "delete") {
+    if (!confirm(`Delete ${item.name}?`)) return;
+    api(`/api/uploaded-patterns/${encodeURIComponent(id)}`, { method: "DELETE" })
+      .then(async () => {
+        await refreshUploadedPatterns();
+        toast("custom pattern deleted");
+      })
+      .catch((error) => toast(error.message, true));
+  }
+});
+
 document.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-provision-action]");
   if (!target) return;
@@ -3918,9 +4384,13 @@ $("#lantern-led-count").addEventListener("change", async (event) => {
 
 $("#pattern-picker").addEventListener("click", (event) => {
   if (event.target.dataset.pattern) {
+    const previousPattern = patternDraft?.pattern;
     if (!patternDraft && state) patternDraft = patternDraftFromState();
     if (patternDraft) {
       patternDraft = patternDraftForSelection(event.target.dataset.pattern);
+      if (patternDraft.pattern === "Uploaded Pattern" && previousPattern !== "Uploaded Pattern") {
+        resetCustomPatternBuilder();
+      }
       renderPatternControls();
     }
   }
@@ -3935,27 +4405,101 @@ $("#color-presets").addEventListener("click", (event) => {
 
 function applyHexColor(hex) {
   const rgb = parseHexColor(hex);
-  if (!rgb) {
-    $("#pattern-hex").classList.add("invalid");
-    $("#hex-error").textContent = "Enter a hex color like #ff8800 or #f80.";
-    $("#hex-error").hidden = false;
-    return;
-  }
+  if (!rgb) return;
   if (!patternDraft && state) patternDraft = patternDraftFromState();
   if (!patternDraft) return;
   const { hue, saturation, value } = rgbToHueSaturationValue(rgb.r, rgb.g, rgb.b);
   patternDraft.hue = hue;
   patternDraft.saturation = saturation;
   patternDraft.value = value;
+  if (patternDraft.pattern === "Uploaded Pattern") setCustomPatternSourceMode("guided");
   renderPatternControls();
 }
 
-$("#pattern-hex").addEventListener("input", (event) => {
+$("#pattern-color-picker").addEventListener("input", (event) => {
   applyHexColor(event.target.value);
 });
 
-$("#pattern-color-picker").addEventListener("input", (event) => {
-  applyHexColor(event.target.value);
+let colorWheelDragging = false;
+
+function applyColorWheelPoint(clientX, clientY) {
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (!patternDraft) return;
+  const wheel = $("#pattern-color-wheel");
+  const selected = colorWheelSelection(
+    wheel.getBoundingClientRect(),
+    clientX,
+    clientY,
+    patternDraft.hue,
+  );
+  patternDraft.hue = selected.hue;
+  patternDraft.saturation = selected.saturation;
+  patternDraft.value = 255;
+  if (patternDraft.pattern === "Uploaded Pattern") setCustomPatternSourceMode("guided");
+  renderPatternControls();
+}
+
+$("#pattern-color-wheel").addEventListener("pointerdown", (event) => {
+  colorWheelDragging = true;
+  event.currentTarget.focus({ preventScroll: true });
+  event.currentTarget.setPointerCapture(event.pointerId);
+  applyColorWheelPoint(event.clientX, event.clientY);
+  event.preventDefault();
+});
+
+$("#pattern-color-wheel").addEventListener("pointermove", (event) => {
+  if (!colorWheelDragging) return;
+  applyColorWheelPoint(event.clientX, event.clientY);
+});
+
+$("#pattern-color-wheel").addEventListener("pointerup", (event) => {
+  colorWheelDragging = false;
+  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+});
+
+$("#pattern-color-wheel").addEventListener("pointercancel", () => {
+  colorWheelDragging = false;
+});
+
+$("#pattern-color-wheel").addEventListener("keydown", (event) => {
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (!patternDraft) return;
+  const step = event.shiftKey ? 10 : 2;
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    patternDraft.hue = (Number(patternDraft.hue) + (event.key === "ArrowRight" ? step : -step) + 360) % 360;
+  } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    patternDraft.saturation = Math.min(100, Math.max(0, Number(patternDraft.saturation ?? 100) + (event.key === "ArrowUp" ? step : -step)));
+  } else {
+    return;
+  }
+  patternDraft.value = 255;
+  if (patternDraft.pattern === "Uploaded Pattern") setCustomPatternSourceMode("guided");
+  renderPatternControls();
+  event.preventDefault();
+});
+
+[
+  "#custom-pattern-motion",
+  "#custom-pattern-period",
+  "#custom-pattern-wavelength",
+  "#custom-pattern-direction",
+  "#custom-pattern-center-x",
+  "#custom-pattern-center-y",
+  "#custom-pattern-min-value",
+  "#custom-pattern-max-value",
+].forEach((selector) => {
+  $(selector).addEventListener("input", () => {
+    setCustomPatternSourceMode("guided");
+    $("#uploaded-pattern-status").textContent = "Ready to validate";
+    renderPatternControls();
+  });
+});
+
+$("#uploaded-pattern-json").addEventListener("input", () => {
+  setCustomPatternSourceMode("advanced");
+  $("#uploaded-pattern-status").textContent = "Advanced source changed · validate before running";
 });
 
 $("#pattern-period").addEventListener("input", (event) => {
@@ -4027,6 +4571,22 @@ $("#pattern-angle").addEventListener("input", (event) => {
       }
     });
   });
+
+$("#pattern-center-x").addEventListener("input", (event) => {
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (patternDraft) {
+    patternDraft.centerX = Number(event.target.value);
+    renderPatternControls();
+  }
+});
+
+$("#pattern-center-y").addEventListener("input", (event) => {
+  if (!patternDraft && state) patternDraft = patternDraftFromState();
+  if (patternDraft) {
+    patternDraft.centerY = Number(event.target.value);
+    renderPatternControls();
+  }
+});
 
 ["#led-on-start", "#led-on-end", "#schedule-timezone", "#light-check", "#deep-check"].forEach((selector) => {
   const input = $(selector);

@@ -278,6 +278,16 @@ The map renders only positioned lanterns.
 - `POST /api/patterns/{id}/broadcast?group_id=2` -> broadcast that saved pattern
   config to Group 3 and publish a desired-state acceptance event. Omit
   `group_id` only for the legacy all-groups behavior.
+- `GET /api/uploaded-patterns` and `POST /api/uploaded-patterns` -> list and
+  save bounded expression-program drafts; `DELETE /api/uploaded-patterns/{id}`
+  removes one.
+- `POST /api/uploaded-patterns/preview` -> compile and sample an unsaved draft
+  against the positioned inventory without changing the field.
+- `POST /api/uploaded-patterns/broadcast?group_id=2` -> compile, distribute,
+  verify, and activate an unsaved draft without persisting it.
+- `POST /api/uploaded-patterns/{id}/broadcast?group_id=2` -> do the same for a
+  saved uploaded pattern. Activation occurs only after the complete placed
+  fleet confirms the exact 64-bit program identity.
 - `POST /api/show/pattern` with
   `{"pattern":"Sweep","brightness":64,"params":{"period":8000,"spatial":300},"group_id":2}`
   -> change only Group 3. Omitting `group_id` updates all eight groups for
@@ -436,6 +446,9 @@ only treat a pattern change as saved after a successful ack.
 Pattern library CRUD is server-side control-plane state, persisted under
 `.control_patterns/patterns.json`; broadcasting a saved pattern is still a
 separate `POST /api/show/pattern` operation.
+Uploaded pattern drafts are persisted separately under
+`.control_uploaded_patterns/patterns.json`; broadcasting an editor draft does
+not implicitly save it.
 
 ## Adapter contract
 
@@ -456,6 +469,8 @@ forget(mac) -> ack
 replace(old_mac, new_mac) -> ack
 reserve_id(mac, reported_id=0) -> ack
 update_pattern(pattern, brightness, params, group_id=None) -> ack
+install_uploaded_program(program_id, vm_version, data) -> ack
+uploaded_program_progress() -> dict
 blackout() -> ack
 update_power_policy(policy) -> ack
 set_ota_mode(enabled) -> ack
@@ -492,6 +507,8 @@ Requests are one compact JSON object per line:
 {"id":8,"cmd":"blackout"}
 {"id":9,"cmd":"restore_blackout"}
 {"id":10,"cmd":"reserve_id","mac":"8C:94:DF:57:7F:14","reported_id":0}
+{"id":11,"cmd":"program_install","program_id":1672088068,"program_tag":3310738355,"vm_version":1,"data":"0100000000010000000001000000000100000000"}
+{"id":12,"cmd":"program_progress"}
 ```
 
 Responses echo the request id:
@@ -553,15 +570,20 @@ number while showing "Not seen".
 - Group selector targets one of eight independent live pattern slots; each
   lantern renders only the slot named by its cached table membership.
 - Pattern picker includes field-space patterns, including the single-band 2-D
-  `WAVEFRONT`, plus the ring-addressable `FIRE_FLICKER` and `FIRE2012`; SOLID
-  remains a bench-only power pattern.
+  `WAVEFRONT` and center-selectable `POND_RIPPLE`, plus the ring-addressable
+  `FIRE_FLICKER` and `FIRE2012`. `UPLOADED` adds bounded expression programs
+  that are distributed and verified before activation; SOLID remains a
+  bench-only power pattern.
 - Brightness slider + per-pattern param controls with human labels:
   Pulse/Glow expose hue, Sweep exposes period + wavelength, Wavefront exposes
   period + band width + travel angle + color, Palette Drift exposes period +
   spatial spread, Firefly exposes irregularity/scatter + chorus recurrence,
-  Fire Flicker exposes speed, color, and per-pixel texture depth, and Fire2012
-  exposes simulation speed, cooling, and sparking. The Change Pattern button is disabled until the
-  visible draft differs from the live conductor state.
+  Fire Flicker exposes speed, color, and per-pixel texture depth, Fire2012
+  exposes simulation speed, cooling, and sparking, and Pond Ripple exposes
+  period, wavelength, and center. The Change Pattern button is disabled until
+  the visible draft differs from the live conductor state; new-only patterns
+  are also disabled until the complete placed fleet reports matching capable
+  firmware.
 - Pattern preview: the browser renders `f(x,y,t)` live on the map *before*
   broadcasting (JS port of the pure `pattern_math.h`). Cheap because the
   math is pure and host-tested; turns knob-tuning into instant feedback.
@@ -771,9 +793,8 @@ number while showing "Not seen".
 
 ### Cross-cutting
 
-- **Phone-first, dark theme** — night use with dark-adapted eyes; big
-  touch targets; possibly a red-shifted night mode. (Visual design session
-  pending — see Open items.)
+- **Phone-first, dark theme** — night use with dark-adapted eyes and large touch
+  targets, following the implemented design system in [`DESIGN.md`](../DESIGN.md).
 - Fully offline (principle 5).
 - Honest write semantics (principle 4).
 
@@ -812,12 +833,19 @@ pattern design, layout-aware compilation, previews, and agent-assisted iteration
 The performer should spend as little CPU as practical: maintain synced time, replay
 compact local instructions, interpolate colors, and drive the LEDs.
 
-There are three pattern-delivery tiers:
+There are four pattern-delivery tiers:
 
 1. **Built-in patterns (current firmware):** conductor broadcasts `pattern_id` +
    params; performers evaluate known C++ patterns locally. Tiny, live-tunable,
    resilient, and still the right path for simple primitives like GLOW/SWEEP.
-2. **Precomputed per-node clips (target creative layer):** the Pi/brain knows
+2. **Uploaded expression programs (implemented):** the control plane compiles a
+   bounded JSON expression into a versioned, loop-free stack program. It verifies
+   the complete placed fleet is on the exact interpreter-capable firmware,
+   distributes one 64-bit BLAKE2s-addressed program to every lantern, waits for
+   exact acknowledgements, and only then activates the `UPLOADED` pattern option.
+   The program persists locally and free-runs from synced time if the Pi or radio
+   disappears. Existing built-ins remain separate and unchanged.
+3. **Precomputed per-node clips (future creative layer):** the Pi/brain knows
    `MAC -> (x,y)`, evaluates a desired `f(x,y,t)` offline, then sends each node a
    compact replayable artifact: start epoch, loop duration, keyframes/curve samples,
    interpolation mode, brightness cap, and hash/version. A clip may target the
@@ -835,9 +863,10 @@ There are three pattern-delivery tiers:
    node as one virtual emitter for simplicity, as long as the clip/protocol can later
    expand from `node -> 1 color` to `node -> N emitter colors` without redesigning
    the authoring model.
-3. **Firmware OTA:** used only when the replay engine, protocol, or built-in
+4. **Firmware OTA:** used only when the interpreter/replay engine, protocol, or built-in
    primitives need to change. A new artistic look should not require reflashing if
-   it can compile down to a replayable clip.
+   it fits the uploaded-expression vocabulary or can compile down to a replayable
+   clip.
 
 Important boundary: avoid live frame streaming. Once a clip is loaded and acked,
 the field should keep running if the Pi disappears, and performers should free-run
@@ -858,11 +887,15 @@ Open engineering questions for the precomputed-clip layer:
 - preview conformance: the browser preview and performer clip player need shared
   golden vectors
 
-Until that layer exists, new patterns are still compiled firmware
-(`pattern_math.h` stays the single home of `f(x,y,t)`), but the control plane is
-what makes authoring fast and lets an agent do most of it:
+New looks that fit the uploaded expression vocabulary do not require a firmware
+update. Author and validate their JSON through the API-only workflow in
+[`skills/CREATING_PATTERNS.md`](../skills/CREATING_PATTERNS.md), preview against
+the real layout, and broadcast only after approval. A new compiled primitive,
+unsupported operation, or interpreter capability still belongs in
+`pattern_math.h`/`uploaded_pattern.h` with host tests and requires a coordinated
+firmware rollout:
 
-1. **Author:** write the new `f(x,y,t)` or ring-aware `f(x,y,pixel,t)` in
+1. **Author a built-in:** write the new `f(x,y,t)` or ring-aware `f(x,y,pixel,t)` in
    `pattern_math.h` (pure,
    dependency-free — an agent can iterate here freely) + host tests.
 2. **Visualize before any flash:** the browser preview (§3) renders the
@@ -885,27 +918,26 @@ consumes the same file. (If drift still bites, `pattern_math.h` is
 dependency-free and could compile to WASM for a single-source preview —
 deferred until needed.)
 
-**Reality check:** until the precomputed-clip layer exists, a new built-in
-pattern still means a firmware rollout — now possible via manual maintenance
-OTA, but still heavier than a normal show edit. The pattern *vocabulary* wants
-to be locked pre-event, while the **pattern space (pattern × brightness ×
-params) is the live authoring surface** on the playa. That's the division of
-labor: agents + preview expand the vocabulary before the event; the UI tunes
-patterns during it.
+**Reality check:** a new built-in or VM opcode still means a firmware rollout,
+while ordinary uploaded expressions and built-in parameter changes are normal
+show edits. Lock interpreter capabilities and compiled primitives pre-event;
+use uploaded programs and the live pattern controls for artistic iteration on
+the playa.
 
 ## Deliberately out of scope
 
 - Individual operator identities, roles, per-person audit attribution, and
   Cloudflare Access. The field deployment uses one shared application password.
 - Multi-conductor support.
-- On-device pattern interpretation (a bytecode/expression VM for patterns
-  on the ESP32) — patterns stay compiled C++; the authoring workflow above
-  covers the need without the complexity.
+- Unbounded uploaded/native code, loops, dynamic allocation, or hardware access
+  from pattern programs. The implemented expression VM is straight-line,
+  size/stack/execution-budget bounded, and produces only HSV plus intensity.
 
 ## Open items
 
-- Visual design session (aesthetic, layout, dark/night theming) — next.
-- Serial protocol schema — designed against this feature list, after the
-  design session.
-- Stack confirmation: Python + FastAPI + pyserial (recommended; pyserial
-  already proven in this repo), UI framework TBD in the design session.
+- Hardware-verify uploaded-program distribution through a relay and measure
+  performer frame timing with the VM active.
+- Decide whether the future precomputed-clip layer is still needed after field
+  experience with uploaded expressions.
+- Add shared golden-vector conformance coverage for the C++ and browser preview
+  implementations where pattern math is duplicated.

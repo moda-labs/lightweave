@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 from pathlib import Path
 import subprocess
 import threading
@@ -18,6 +19,7 @@ from control.app import (
 )
 from control.mock_conductor import MockConductor
 from control.remote_config import RemoteSettings
+from control.uploaded_patterns import compile_uploaded_pattern
 
 
 VALID_HASH = (
@@ -160,8 +162,8 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "Performers online" in index_html
     assert 'id="online-performer-count"' in index_html
     assert "Placed lights" in index_html
-    assert 'src="/static/app.js?v=23"' in index_html
-    assert 'href="/static/styles.css?v=9"' in index_html
+    assert 'src="/static/app.js?v=24"' in index_html
+    assert 'href="/static/styles.css?v=10"' in index_html
     assert '<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">' in index_html
     assert '<button class="active" data-view="overview">Overview</button>' in index_html
     assert '<button data-view="map">Lantern Locations</button>' in index_html
@@ -258,6 +260,60 @@ def test_browser_assets_follow_detached_ota_and_auth_contract() -> None:
     assert "event.code === 4401" in app_js
     assert 'await api("/api/auth/logout", { method: "POST" })' in app_js
     assert "JSON.stringify({password: passwordInput.value})" in login_js
+
+
+def test_custom_pattern_builder_generates_compilable_programs_and_hides_json_by_default() -> None:
+    static_root = Path(__file__).parents[1] / "static"
+    app_js = (static_root / "app.js").read_text(encoding="utf-8")
+    index_html = (static_root / "index.html").read_text(encoding="utf-8")
+    helper_start = app_js.index("const CUSTOM_BUILDER_DEFAULTS")
+    helper_end = app_js.index("\n\nconst COLOR_VALUE_MARKER", helper_start)
+    helper_source = app_js[helper_start:helper_end]
+    script = f"""
+{helper_source}
+const motions = [...CUSTOM_BUILDER_MOTIONS];
+const programs = motions.map((motion) => customBuilderProgram({{
+  ...CUSTOM_BUILDER_DEFAULTS,
+  motion,
+  hue: 320,
+  saturation: 72,
+  periodMs: 6500,
+  wavelength: 0.75,
+  direction: 135,
+  centerX: 0.25,
+  centerY: 0.7,
+  minValue: 25,
+  maxValue: 85,
+}}));
+for (let index = 0; index < programs.length; index += 1) {{
+  const restored = customBuilderSettingsFromProgram(programs[index]);
+  if (!restored || restored.motion !== motions[index]) process.exit(index + 1);
+  if (restored.hue !== 320 || restored.saturation !== 72) process.exit(index + 10);
+}}
+if (customBuilderSettingsFromProgram({{hue: 0.5}}) !== null) process.exit(30);
+if (displayPatternName("Uploaded Pattern") !== "Custom Pattern") process.exit(31);
+console.log(JSON.stringify(programs));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    programs = json.loads(completed.stdout)
+    assert len(programs) == 5
+    for program in programs:
+        compiled = compile_uploaded_pattern(program)
+        assert compiled.instruction_count <= 64
+        assert len(compiled.bytecode) <= 192
+        assert program["_builder"]["version"] == 1
+
+    assert '<button data-pattern="Uploaded Pattern">Custom Pattern</button>' in index_html
+    assert "Custom pattern builder" in index_html
+    assert "Advanced source" in index_html
+    assert "Uploaded patterns</h3>" not in index_html
+    assert "Edit source" not in app_js
 
 
 def test_group_power_toggle_remembers_brightness_and_live_controls_do_not_force_refresh() -> None:
@@ -956,6 +1012,7 @@ def test_fresh_page_retries_terminal_ota_reservation_gap_in_javascript() -> None
 let state = null;
 let otaInstall = null;
 let savedPatterns = [];
+let uploadedPatterns = [];
 let otaArtifact = null;
 let calibrationFrames = [];
 let releaseInfo = null;
@@ -976,6 +1033,7 @@ async function api(path) {{
     return {{conductor: {{}}, summary: {{}}, pattern: {{}}}};
   }}
   if (path === "/api/patterns") return {{patterns: []}};
+  if (path === "/api/uploaded-patterns") return {{patterns: []}};
   if (path === "/api/releases") return {{control: {{}}, firmware: {{}}, history: []}};
   if (path === "/api/operations/ota-artifact") return {{artifact: null}};
   if (path === "/api/calibration/frames") return {{frames: []}};

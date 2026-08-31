@@ -15,6 +15,7 @@ static constexpr uint16_t kFireflyScatterMask = 0x007Fu;
 static constexpr uint16_t kFireflyChorusMarker = 0x8000u;
 static constexpr uint16_t kOceanWavelengthMask = 0x03FFu;
 static constexpr uint16_t kOceanAngleMask = 0x01FFu;
+static constexpr float kOceanTroughValue = 0.22f;
 
 // Color value is metadata packed into otherwise-unused parameter bits. The
 // marker distinguishes new full-HSV configs from legacy configs, where a zero
@@ -657,6 +658,46 @@ inline float oceanIntensity(int64_t synced_us, float x, float y, float period_s,
   return n;
 }
 
+// Perceptual sRGB value for an ocean swell. A 14% floor could quantize to zero
+// after sRGB-to-linear conversion at normal dim show brightnesses. Keep a 22%
+// deep-water floor while retaining the full crest and most of its contrast.
+inline float oceanSwellValue(float intensity, float base_value = 1.0f) {
+  if (intensity < 0.0f) intensity = 0.0f;
+  if (intensity > 1.0f) intensity = 1.0f;
+  if (base_value < 0.0f) base_value = 0.0f;
+  if (base_value > 1.0f) base_value = 1.0f;
+  return base_value *
+         (kOceanTroughValue + (1.0f - kOceanTroughValue) *
+                                  powf(intensity, 1.3f));
+}
+
+// Concentric pond ripple sampled at (x,y). A crest begins at the selected
+// center, expands radially, and repeats every period. Keeping this pure and
+// position/time-derived preserves synchronization and free-run through dropped
+// beacons.
+//   period_s    time between successive rings emitted from the center
+//   wavelength  distance between successive crests in normalized field units
+//   center_x/y  ripple origin in normalized field coordinates
+inline float pondRippleIntensity(int64_t synced_us, float x, float y,
+                                 float period_s, float wavelength,
+                                 float center_x, float center_y) {
+  if (period_s <= 0.0f) period_s = 6.0f;
+  if (wavelength <= 0.0f) wavelength = 0.50f;
+  double secs = (double)synced_us / 1e6;
+  double dx = (double)x - center_x;
+  double dy = (double)y - center_y;
+  double radius = sqrt(dx * dx + dy * dy);
+  double ph = secs / (double)period_s - radius / (double)wavelength;
+  ph -= floor(ph);
+  // Crest at phase zero. Cubing the raised cosine produces a distinct narrow
+  // ring with a soft edge instead of lighting most of the field at once.
+  float broad = 0.5f * (1.0f + cosf(2.0f * kPi * (float)ph));
+  float crest = broad * broad * broad;
+  if (crest < 0.0f) crest = 0.0f;
+  if (crest > 1.0f) crest = 1.0f;
+  return crest;
+}
+
 // HSV -> RGB, all components in [0,1]. Standard six-sextant conversion; hue wraps
 // so any real hue is valid. Kept pure (no LED type) so it is host-testable; the
 // patterns layer scales the result into RGBW pixels.
@@ -722,6 +763,23 @@ inline RgbwUnit hsvToRgbw(float h, float s, float v, float intensity) {
   float w = fminf(r, fminf(g, b)) * white_mix;
   return {(r - w) * intensity, (g - w) * intensity,
           (b - w) * intensity, w * intensity};
+}
+
+// Preserve the selected ocean tint at the smallest representable PWM value.
+// Exact black (brightness or color value zero) remains black. Other patterns,
+// especially Pulse, retain their intentional fully-off phases.
+inline RgbwUnit oceanEnsureVisible(RgbwUnit color, uint8_t brightness) {
+  if (brightness == 0) return color;
+  float channels[4] = {color.r, color.g, color.b, color.w};
+  uint8_t strongest = 0;
+  for (uint8_t i = 1; i < 4; i++)
+    if (channels[i] > channels[strongest]) strongest = i;
+  if (channels[strongest] <= 0.0f ||
+      lroundf(channels[strongest] * brightness) > 0) {
+    return color;
+  }
+  channels[strongest] = (0.5f + 1e-4f) / brightness;
+  return {channels[0], channels[1], channels[2], channels[3]};
 }
 
 // Square-wave heartbeat: ON for the first half_period_us of each full cycle, OFF
