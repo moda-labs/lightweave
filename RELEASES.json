@@ -2,6 +2,17 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.6",
+      "date": "2026-08-31",
+      "title": "Power station telemetry",
+      "control_changes": [
+        "Added a SOLIX S2000 power-station reading to the Overview showing live output power, input power, and state of charge from the Anker cloud, verified against the installation's onboarded station.",
+        "Added the opt-in read-only station probe as a hardened system service that runs under its own account, keeps Anker credentials away from the web process, restarts automatically after deployments, and surfaces disconnects immediately instead of waiting for readings to go stale.",
+        "Hardened dependency installation so control-plane deployments install the station integration from a reviewed, hash-verified wheel instead of building third-party source code."
+      ],
+      "firmware_changes": []
+    },
+    {
       "version": "0.9.5",
       "date": "2026-08-30",
       "title": "Custom field patterns",
