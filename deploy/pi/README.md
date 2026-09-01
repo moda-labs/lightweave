@@ -95,6 +95,7 @@ sudo python3 -m venv /opt/lightweave/.venv
 sudo /opt/lightweave/.venv/bin/python -m pip install --upgrade pip
 sudo /opt/lightweave/.venv/bin/python -m pip install \
   --require-hashes --only-binary=:all: \
+  --find-links /opt/lightweave/control/wheels \
   --requirement /opt/lightweave/control/requirements.lock
 sudo /opt/lightweave/.venv/bin/python -m pip check
 sudo chown --recursive root:root /opt/lightweave
@@ -230,6 +231,55 @@ sudo ss -ltnp 'sport = :8000'
 
 Expected: the environment is `root:root 600`, the checkout is root-owned, and
 Uvicorn listens only on `127.0.0.1:8000`, never `0.0.0.0:8000`.
+
+### Optional SOLIX S2000 power probe
+
+The installer deploys `lightweave-solix.service` but deliberately leaves it
+disabled because it requires the owner's Anker account credentials and an
+internet connection. The service uses the unofficial `anker-solix-api` MQTT
+client pinned in `control/requirements.txt` (installed from the reviewed wheel
+vendored in `control/wheels/`); it subscribes only to the selected AS220 and
+publishes the device's read-only status-request command every 15 seconds.
+
+The probe runs as the dedicated `lightweave-solix` system user (created by
+`install-gitops.sh`), so the web control process can never read the probe's
+credential environment. The probe writes its status file group-readable at
+`/var/lib/lightweave-solix/solix-s2000.json`; the control plane reads it
+through `CONTROL_SOLIX_STATUS_FILE`. Enabling the service also hooks it to
+`lightweave-control.service` starts, so a GitOps deploy or rollback that stops
+and later starts the control plane brings the enabled probe back up with it.
+
+Create the root-only credential file:
+
+```bash
+sudo install -o root -g root -m 0600 /dev/null /etc/lightweave/solix.env
+sudoedit /etc/lightweave/solix.env
+```
+
+Set all three required values using the same owner account and country configured
+in the Anker app:
+
+```dotenv
+ANKERUSER=owner@example.com
+ANKERPASSWORD=REPLACE_WITH_ACCOUNT_PASSWORD
+ANKERCOUNTRY=US
+# Required only when the account owns more than one S2000:
+# CONTROL_SOLIX_DEVICE_SN=REPLACE_WITH_DEVICE_SERIAL
+```
+
+A shared family/member account cannot subscribe to standalone-device MQTT.
+Never place these values in the repository or the general control-plane
+environment. Confirm the file remains `root:root 0600`, then enable the probe:
+
+```bash
+sudo systemctl enable --now lightweave-solix.service
+sudo journalctl -u lightweave-solix.service -f
+```
+
+The first successful log entry reports output, input, and SOC. The probe does
+not use Bluetooth, so the official app remains available locally. Disable the
+service and check account ownership, country, S2000 Wi-Fi, and internet access
+if the log repeatedly reports authentication, MQTT, or telemetry timeouts.
 
 ### Verify the USB flashing station
 
@@ -501,6 +551,7 @@ sudo git -C /opt/lightweave checkout --detach "$new_commit"
 sudo python3 -m venv "/opt/lightweave/.venvs/$new_commit"
 sudo "/opt/lightweave/.venvs/$new_commit/bin/python" -m pip install \
   --require-hashes --only-binary=:all: \
+  --find-links /opt/lightweave/control/wheels \
   --requirement /opt/lightweave/control/requirements.lock
 sudo "/opt/lightweave/.venvs/$new_commit/bin/python" -m pip check
 sudo chown --recursive root:root /opt/lightweave

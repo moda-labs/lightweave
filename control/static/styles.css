@@ -55,7 +55,7 @@ main { min-height: 0; overflow: hidden; background: #090c0a; }
 .overview-widget-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
 .overview-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   margin-bottom: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -810,8 +810,9 @@ input[type="number"], input[type="time"], input[type="text"], input[type="passwo
   .overview-heading { align-items: stretch; flex-direction: column; }
   .overview-heading .chip { align-self: start; }
   .overview-metrics { grid-template-columns: 1fr 1fr; }
-  .overview-metric:nth-child(2) { border-right: 0; }
-  .overview-metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .overview-metric { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .overview-metric:nth-child(2n) { border-right: 0; }
+  .overview-metric:last-child { border-right: 0; border-bottom: 0; }
   .overview-grid { grid-template-columns: 1fr; }
   .field-preview-widget,
   .power-history-widget { grid-column: auto; }

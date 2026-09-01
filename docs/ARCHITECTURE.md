@@ -288,6 +288,32 @@ anchor to 100%. Operators can also click **Sync to 100%** per metered node after
 charging. This is a representative-sample tool for sizing Milestone 3's power
 levers (§8.1, Lever 2 below), not a requirement to install INA228 on every node.
 
+### 4.4 Installation power station — SOLIX S2000 **[done; live account proof pending]**
+
+The Overview can also display the installation's upstream SOLIX S2000 output,
+input, and state of charge. This is separate from the per-lantern INA228 history.
+Because the standalone AS220 does not expose power through Anker's ordinary
+cloud endpoints and did not emit status after a confirmed local BLE handshake,
+an optional Pi service consumes the owner-only Anker MQTT stream. It selects one
+owned AS220, subscribes only to that device, and publishes only the telemetry
+status-request command on a 15-second cadence; it exposes no control operations.
+
+The MQTT callback normalizes complete 0421/0900 snapshots into an atomic JSON
+handoff shared with the web process. Wrong-device and partial messages are
+ignored. Range and total checks, a 60-second freshness boundary, preserved last
+reading, and explicit connection errors prevent stale or inconsistent watts from
+appearing live; the Overview surfaces a probe disconnect immediately rather than
+waiting for the last reading to age out. Credentials exist only in root-owned
+`/etc/lightweave/solix.env`, loaded by systemd for the dedicated
+`lightweave-solix` user — a different UID from the web process, which only reads
+the group-readable status file in `/var/lib/lightweave-solix/`. The unofficial
+client library installs from a reviewed wheel vendored in `control/wheels/`, so
+the hashed, binary-only control-plane install never runs a source build. The
+browser API receives the station serial, source, readings, and health but no
+account data. The service remains opt-in because it depends on an unofficial
+cloud interface, owner credentials, S2000 Wi-Fi, and internet availability. It is
+informational only and must not become a show-control or safety dependency.
+
 ## 5. Node inventory and layout — conductor-authoritative **[done]**
 
 The conductor holds `MAC → permanent ID + optional (x,y) + group + LED count` and broadcasts it.

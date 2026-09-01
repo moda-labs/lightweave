@@ -11,7 +11,7 @@ dependency stack today.
 
 ```bash
 /opt/homebrew/bin/python3.13 -m venv .venv
-.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r control/requirements.lock
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: --find-links control/wheels -r control/requirements.lock
 .venv/bin/python -m uvicorn control.app:app --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -99,6 +99,8 @@ pio test -e native
   position reporting, and V4 soundscape autoplay
 - Animated expected-field preview and durable SQLite power history with
   1-hour through 7-day dashboard ranges
+- Optional SOLIX S2000 Anker-cloud Overview telemetry from the probe's atomic status file;
+  stale, unavailable, and implausible readings remain explicit
 - Shared lantern detail sheet
 - Actions for locate, assign, forget, replace, pattern changes, and blackout,
   plus guarded Lantern Locations single-key shortcuts

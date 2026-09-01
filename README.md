@@ -191,8 +191,10 @@ batch notes.
 - Mock conductor for UI development without hardware.
 - Real serial adapter for a USB-attached conductor.
 - Overview dashboard with field health, effective group patterns, an animated
-  expected-field rendering, the active soundtrack and play position, and
-  durable power-over-time traces.
+  expected-field rendering, the active soundtrack and play position, durable
+  power-over-time traces, and an optional SOLIX S2000 cloud-MQTT
+  input/output/SOC reading. The S2000 card stays unavailable for stale or
+  implausible probe data.
 - Sound tab for Pi-hosted looped MP3 playback, persistent pause/track selection,
   and track switching; Soundscape V4 autoplays by default.
 - Lantern Locations view with placed lanterns, missing nodes, and unpositioned

@@ -39,6 +39,7 @@ from control.preview import (
     _pond_ripple_intensity,
     _visible_hsv_color,
 )
+from control.solix_status import SolixStatusStore
 
 
 class ApiAudioBackend:
@@ -1200,7 +1201,95 @@ def test_state_endpoint_returns_mock_state() -> None:
     assert body["power_monitor"]["sample_count"] == 2
     assert body["power_monitor"]["usable_sample_count"] == 2
     assert body["power_monitor"]["estimated_node_soc_percent"] > 99
+    assert body["power_station"]["configured"] is False
     assert body["recovery"]["status"] == "missing_nodes"
+
+
+def test_state_endpoint_includes_fresh_solix_power_station_reading(tmp_path: Path) -> None:
+    store = SolixStatusStore(tmp_path / "solix.json")
+    store.write_reading(
+        {
+            "output_w": 384,
+            "input_w": 850,
+            "ac_output_w": 300,
+            "usb_output_w": 84,
+            "ac_input_w": 600,
+            "dc_input_w": 250,
+            "soc_percent": 73,
+            "temperature_c": 31,
+            "plausible": True,
+        },
+        address="00:7F:1D:55:9B:B2",
+    )
+    client = TestClient(create_app(MockConductor(), solix_status_store=store))
+
+    station = client.get("/api/state").json()["power_station"]
+
+    assert station["configured"] is True
+    assert station["connected"] is True
+    assert station["stale"] is False
+    assert station["source"] == "anker_mqtt"
+    assert station["output_w"] == 384
+    assert station["input_w"] == 850
+    assert station["soc_percent"] == 73
+
+
+def test_state_endpoint_loads_stale_probe_error_from_configured_status_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "configured-solix.json"
+    store = SolixStatusStore(path)
+    store.write_reading(
+        {
+            "output_w": 384,
+            "input_w": 850,
+            "soc_percent": 73,
+            "plausible": True,
+        },
+        address="device",
+        updated_at=1,
+    )
+    store.write_error("Bluetooth disconnected", address="device", attempted_at=2)
+    monkeypatch.setenv("CONTROL_SOLIX_STATUS_FILE", str(path))
+
+    station = TestClient(create_app(MockConductor())).get("/api/state").json()[
+        "power_station"
+    ]
+
+    assert station["configured"] is True
+    assert station["connected"] is False
+    assert station["stale"] is True
+    assert station["output_w"] == 384
+    assert station["error"] == "Bluetooth disconnected"
+
+
+def test_state_endpoint_uses_data_directory_for_default_probe_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "control-data"
+    store = SolixStatusStore(data_dir / "power" / "solix-s2000.json")
+    store.write_reading(
+        {
+            "output_w": 512,
+            "input_w": 0,
+            "soc_percent": 62,
+            "plausible": True,
+        },
+        address="device",
+    )
+    monkeypatch.delenv("CONTROL_SOLIX_STATUS_FILE", raising=False)
+    monkeypatch.setenv("CONTROL_DATA_DIR", str(data_dir))
+
+    station = TestClient(create_app(MockConductor())).get("/api/state").json()[
+        "power_station"
+    ]
+
+    assert station["configured"] is True
+    assert station["connected"] is True
+    assert station["output_w"] == 512
+    assert station["soc_percent"] == 62
 
 
 def test_health_endpoint_identifies_the_running_release(monkeypatch) -> None:

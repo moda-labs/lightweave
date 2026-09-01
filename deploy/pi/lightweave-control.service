@@ -17,6 +17,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=CONTROL_DEPLOYMENT_RECORD=/var/lib/lightweave-gitops/current.json
 Environment=CONTROL_OTA_LOCK=/var/lib/lightweave-gitops/firmware-ota.lock
 Environment=CONTROL_RELEASE_COMMIT_FILE=/var/lib/lightweave-gitops/running-commit
+Environment=CONTROL_SOLIX_STATUS_FILE=/var/lib/lightweave-solix/solix-s2000.json
 ExecStartPre=/usr/bin/test -x /usr/bin/mpg123
 ExecStartPre=/opt/lightweave/.venv/bin/python -m control.audio_player check
 ExecStart=/opt/lightweave/.venv/bin/python -m uvicorn control.app:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
@@ -27,7 +28,7 @@ TimeoutStopSec=180
 StateDirectory=lightweave
 StateDirectoryMode=0700
 ReadWritePaths=/var/lib/lightweave
-ReadOnlyPaths=-/var/lib/lightweave-gitops
+ReadOnlyPaths=-/var/lib/lightweave-gitops -/var/lib/lightweave-solix
 UMask=0077
 
 NoNewPrivileges=true

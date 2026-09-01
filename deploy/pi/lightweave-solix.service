@@ -1,0 +1,48 @@
+[Unit]
+Description=Lightweave SOLIX S2000 Anker cloud MQTT power probe
+Documentation=https://github.com/moda-labs/lightweave/tree/main/deploy/pi
+Wants=network-online.target
+Requires=lightweave-gitops-recovery.service
+After=network-online.target lightweave-gitops-recovery.service
+PartOf=lightweave-control.service
+
+[Service]
+Type=simple
+# Dedicated identity: the credential-bearing probe must not share a UID with
+# the web control process. The status file is exposed group-readable to the
+# lightweave group instead.
+User=lightweave-solix
+Group=lightweave
+WorkingDirectory=/opt/lightweave
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/lightweave/solix.env
+ExecStart=/opt/lightweave/.venv/bin/python -m control.solix_probe --status-file /var/lib/lightweave-solix/solix-s2000.json
+Restart=always
+RestartSec=10
+
+StateDirectory=lightweave-solix
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/lightweave-solix
+UMask=0027
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+# lightweave-control.service is listed so that GitOps' standalone control
+# start also pulls the enabled probe back up; PartOf above only propagates
+# stops. multi-user.target keeps the probe independent of control at boot.
+WantedBy=multi-user.target lightweave-control.service

@@ -89,6 +89,7 @@ from .releases import (
     stage_known_release_firmware,
 )
 from .serial_transport import PySerialTransport
+from .solix_status import SolixStatusStore
 
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -511,6 +512,7 @@ def create_app(
     group_store: GroupStore | None = None,
     power_monitor_store: PowerMonitorStore | None = None,
     power_history_store: PowerHistoryStore | None = None,
+    solix_status_store: SolixStatusStore | None = None,
     uploaded_pattern_store: UploadedPatternStore | None = None,
     audio_player: AudioPlayer | None = None,
 ) -> FastAPI:
@@ -790,6 +792,14 @@ def create_app(
         else app.state.power_monitor_store.root
     )
     app.state.power_history_store = power_history_store or PowerHistoryStore(power_root)
+    solix_status_path = os.getenv("CONTROL_SOLIX_STATUS_FILE")
+    app.state.solix_status_store = solix_status_store or SolixStatusStore(
+        Path(solix_status_path).expanduser()
+        if solix_status_path
+        else data_dir / "power" / "solix-s2000.json"
+        if data_dir
+        else None
+    )
     audio_dir = Path(os.getenv("CONTROL_AUDIO_DIR", str(REPO_ROOT / "sound"))).expanduser()
     audio_state_path = data_dir / "audio" / "player.json" if data_dir else Path(".control_audio/player.json")
     app.state.audio_player = audio_player or AudioPlayer(audio_dir, audio_state_path)
@@ -1214,6 +1224,7 @@ def create_app(
         state["groups"] = groups
         state["lanterns"] = enrich_lantern_groups(state.get("lanterns") or [], groups)
         state["power_monitor"] = power_monitor_summary(state)
+        state["power_station"] = app.state.solix_status_store.load()
         state["audio"] = app.state.audio_player.status()
         state["recovery"] = recovery_summary(state)
         return state

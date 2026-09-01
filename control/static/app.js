@@ -700,6 +700,7 @@ function overviewIssues(currentState) {
   const recovery = currentState.recovery || {};
   const firmware = currentState.summary?.firmware || {};
   const monitor = currentState.power_monitor || {};
+  const station = currentState.power_station || {};
   const audio = currentState.audio || {};
   const missing = lanternItems.filter((item) => item.status === "missing" && item.position === "Set").length;
   const unpositioned = lanternItems.filter((item) => item.status === "alive" && item.position !== "Set").length;
@@ -719,6 +720,13 @@ function overviewIssues(currentState) {
   if (stale) issues.push({ severity: "warn", title: `${stale} stale power meter${stale === 1 ? "" : "s"}`, detail: "Stale readings are excluded from battery estimates." });
   if (implausible) issues.push({ severity: "warn", title: `${implausible} implausible power reading${implausible === 1 ? "" : "s"}`, detail: "Check meter voltage and shunt wiring." });
   if (monitor.history?.error) issues.push({ severity: "warn", title: "Power history is not recording", detail: String(monitor.history.error) });
+  if (station.configured && station.error && station.connected !== true) {
+    issues.push({ severity: "warn", title: "S2000 probe unavailable", detail: "The Anker cloud probe reported an error; the power-station reading is not live." });
+  } else if (station.configured && station.updated_at && station.stale) {
+    issues.push({ severity: "warn", title: "S2000 reading is stale", detail: "The Anker cloud probe is reconnecting; the displayed station reading is not current." });
+  } else if (station.configured && station.plausible === false) {
+    issues.push({ severity: "warn", title: "S2000 reading is implausible", detail: "The station's reported power totals are internally inconsistent." });
+  }
   if (audio.available === false) {
     issues.push({ severity: "warn", title: "Soundtrack is unavailable", detail: audio.error || "Check the Pi audio player and MP3 files." });
   }
@@ -1016,6 +1024,7 @@ function startFieldPreviewPolling() {
 
 function renderOverview() {
   const monitor = state.power_monitor || {};
+  const station = state.power_station || {};
   const audio = audioState || state.audio || {};
   const summary = state.summary || {};
   const conductor = state.conductor || {};
@@ -1048,6 +1057,30 @@ function renderOverview() {
   $("#overview-power-note").textContent = Number(monitor.usable_sample_count || 0)
     ? `${monitor.usable_sample_count} usable meter${Number(monitor.usable_sample_count) === 1 ? "" : "s"}`
     : "No usable meter readings";
+  const stationReading = station.connected === true && station.stale !== true && station.plausible === true;
+  const stationOutput = station.output_w === null || station.output_w === undefined ? NaN : Number(station.output_w);
+  $("#overview-solix-output").textContent = stationReading && Number.isFinite(stationOutput) ? `${stationOutput.toFixed(0)} W` : "--";
+  $("#overview-solix-output").className = `overview-value ${stationReading ? "sync" : station.updated_at || station.error ? "warn" : ""}`;
+  if (stationReading) {
+    const stationInput = station.input_w === null || station.input_w === undefined ? NaN : Number(station.input_w);
+    const stationSoc = station.soc_percent === null || station.soc_percent === undefined ? NaN : Number(station.soc_percent);
+    const details = [];
+    if (Number.isFinite(stationInput)) details.push(`Input ${stationInput.toFixed(0)} W`);
+    if (Number.isFinite(stationSoc)) details.push(`${stationSoc.toFixed(0)}% SOC`);
+    $("#overview-solix-note").textContent = details.join(" · ") || "Live Anker cloud reading";
+  } else if (station.error && station.connected !== true) {
+    const age = station.age_s === null || station.age_s === undefined ? NaN : Number(station.age_s);
+    $("#overview-solix-note").textContent = Number.isFinite(age)
+      ? `Probe unavailable · last reading ${formatDuration(age)} ago`
+      : "Anker cloud probe unavailable";
+  } else if (station.updated_at) {
+    const age = station.age_s === null || station.age_s === undefined ? NaN : Number(station.age_s);
+    $("#overview-solix-note").textContent = Number.isFinite(age) ? `Last reading ${formatDuration(age)} ago` : "Last reading is stale";
+  } else if (station.configured) {
+    $("#overview-solix-note").textContent = station.error ? "Anker cloud probe unavailable" : "Waiting for Anker cloud probe";
+  } else {
+    $("#overview-solix-note").textContent = "Probe not configured";
+  }
   $("#overview-power-draw").textContent = performerDraw === null || performerDraw === undefined ? "--" : `${Number(performerDraw).toFixed(2)} W`;
   $("#overview-meter-count").textContent = `${Number(monitor.usable_sample_count || 0)} / ${Number(monitor.sample_count || 0)}`;
   $("#overview-history-status").textContent = powerHistory.loading

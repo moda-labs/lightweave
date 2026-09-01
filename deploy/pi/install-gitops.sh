@@ -13,6 +13,12 @@ fi
 
 install -d -o root -g root -m 0755 /etc/lightweave /usr/local/lib/lightweave
 install -d -o root -g root -m 0700 /var/backups/lightweave
+# The SOLIX probe carries Anker credentials, so it runs as its own system
+# user; the lightweave group only ever reads its status file.
+if ! id -u lightweave-solix >/dev/null 2>&1; then
+  useradd --system --gid lightweave --no-create-home \
+    --home-dir /nonexistent --shell /usr/sbin/nologin lightweave-solix
+fi
 if [ -L /var/lib/lightweave-gitops ]; then
   printf '%s\n' "/var/lib/lightweave-gitops must not be a symlink" >&2
   exit 1
@@ -80,6 +86,9 @@ install -o root -g root -m 0644 \
   "$repo/deploy/pi/lightweave-provisioner.service" \
   /etc/systemd/system/lightweave-provisioner.service
 install -o root -g root -m 0644 \
+  "$repo/deploy/pi/lightweave-solix.service" \
+  /etc/systemd/system/lightweave-solix.service
+install -o root -g root -m 0644 \
   "$repo/deploy/pi/lightweave-gitops-recovery.service" \
   /etc/systemd/system/lightweave-gitops-recovery.service
 install -o root -g root -m 0644 \
@@ -92,6 +101,7 @@ systemctl daemon-reload
 systemd-analyze verify \
   /etc/systemd/system/lightweave-control.service \
   /etc/systemd/system/lightweave-provisioner.service \
+  /etc/systemd/system/lightweave-solix.service \
   /etc/systemd/system/lightweave-gitops-recovery.service \
   /etc/systemd/system/lightweave-gitops.service \
   /etc/systemd/system/lightweave-gitops.timer

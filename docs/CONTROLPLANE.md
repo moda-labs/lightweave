@@ -617,6 +617,12 @@ number while showing "Not seen".
   consistency, battery SOC, attention items, and effective group patterns. Its
   power-over-time widget reads the durable history API every minute and offers
   1-hour, 6-hour, 24-hour, and 7-day views.
+- An optional SOLIX S2000 card reads the probe's atomic status handoff and shows
+  station output, input, and SOC only when the sample is fresh and internally
+  plausible. Missing, stale, and implausible samples stay unavailable and add an
+  attention item instead of presenting old power as live. The Anker cloud MQTT
+  probe remains opt-in because it requires owner credentials and internet access;
+  deployment and troubleshooting are documented in `deploy/pi/README.md`.
 - Its Expected field canvas animates the same current layout and effective
   pattern state without turning dashboard clicks into placement navigation.
 - The power chart derives a rolling 15-minute watt trace from cumulative Wh deltas

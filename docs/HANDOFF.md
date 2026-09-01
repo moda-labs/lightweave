@@ -11,6 +11,24 @@ next steps only.
 (**231 pass**) and the full control suite are green; all three device envs
 (`devkitc` / `firebeetle` / canonical `field`) build clean.
 
+Latest in this feature branch (2026-08-30): **SOLIX S2000 Overview telemetry now
+uses Anker's cloud MQTT stream instead of the incomplete local BLE subscription.**
+The optional Pi service authenticates with a root-only owner account, discovers
+exactly one owned AS220 (or a configured serial), subscribes only to its device
+topic, and sends the read-only status request every 15 seconds. Complete 0421/0900
+snapshots flow through the existing plausibility/staleness handoff into the
+Overview card; partial messages, wrong devices, timeouts, and unexpected cloud
+errors fail unavailable without exposing credentials. The unofficial upstream
+library installs from a reviewed wheel vendored in `control/wheels/` (built from
+the immutable upstream commit and verified byte-identical to it), so the hashed
+binary-only install never runs a PEP 517 source build; its runtime dependencies
+are pinned. The probe runs as the dedicated `lightweave-solix` user and hands
+the control plane a group-readable status file in `/var/lib/lightweave-solix/`;
+enabling it also hooks it to control starts so GitOps deploys bring it back up.
+The service no longer requests Bluetooth access and is confined to internet
+socket families. A live cloud reading (116 W out / 814 W in / 59% SOC) was
+verified end-to-end against the onboarded AS220 on 2026-08-31.
+
 Latest in `feat/radial-ripple` (2026-08-30): `POND_RIPPLE` adds concentric,
 center-selectable outward waves
 without changing the stable v11 transport layout; the control plane blocks its

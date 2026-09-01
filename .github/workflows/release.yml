@@ -24,7 +24,7 @@ jobs:
             control/requirements-tooling.lock
       - name: Install control-plane dependencies
         run: |
-          python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements.lock
+          python -m pip install --require-hashes --only-binary=:all: --find-links control/wheels --requirement control/requirements.lock
       - name: Verify tag and release notes
         env:
           RELEASE_TAG: ${{ github.ref_name }}

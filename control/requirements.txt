@@ -6,3 +6,16 @@ httpx==0.28.1
 pyserial==3.5
 intelhex==2.3.0
 Pillow==10.4.0
+# Upstream is not published on PyPI. Install the reviewed, vendored wheel so a
+# hashed binary-only install never runs a PEP 517 source build with unpinned
+# build tools. The wheel was built from immutable upstream commit
+# cfeceddffd4dc2d4f3c79ff8d0bf3aa7e5f3451e (tag 3.8.1) and its contents were
+# verified byte-identical to that archive's src/anker_solix_api tree.
+# Installers must pass --find-links control/wheels (see ci.yml, release.yml,
+# and deploy/pi/gitops_reconcile.py).
+anker-solix-api==3.8.1
+aiofiles==25.1.0
+aiohttp==3.14.3
+paho-mqtt==2.1.0
+python-dotenv==1.2.2
+cryptography==50.0.1
