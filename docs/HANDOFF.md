@@ -19,13 +19,15 @@ topic, and sends the read-only status request every 15 seconds. Complete 0421/09
 snapshots flow through the existing plausibility/staleness handoff into the
 Overview card; partial messages, wrong devices, timeouts, and unexpected cloud
 errors fail unavailable without exposing credentials. The unofficial upstream
-library is pinned by immutable commit and archive hash, and its runtime
-dependencies are pinned. The service no longer requests Bluetooth access
-and is confined to internet socket families. Hash-locked installation and import
-were verified on Python 3.12 and 3.13; all control and native tests are green.
-Live account/device proof remains: create `/etc/lightweave/solix.env` from the
-owner account as documented in `deploy/pi/README.md`, run the probe once, and
-confirm a real wattage reaches Overview before moving the PR out of draft.
+library installs from a reviewed wheel vendored in `control/wheels/` (built from
+the immutable upstream commit and verified byte-identical to it), so the hashed
+binary-only install never runs a PEP 517 source build; its runtime dependencies
+are pinned. The probe runs as the dedicated `lightweave-solix` user and hands
+the control plane a group-readable status file in `/var/lib/lightweave-solix/`;
+enabling it also hooks it to control starts so GitOps deploys bring it back up.
+The service no longer requests Bluetooth access and is confined to internet
+socket families. A live cloud reading (116 W out / 814 W in / 59% SOC) was
+verified end-to-end against the onboarded AS220 on 2026-08-31.
 
 Latest in `feat/radial-ripple` (2026-08-30): `POND_RIPPLE` adds concentric,
 center-selectable outward waves

@@ -24,7 +24,7 @@ jobs:
             control/requirements-tooling.lock
       - name: Install control-plane dependencies
         run: |
-          python -m pip install --require-hashes --only-binary=:all: --requirement control/requirements.lock
+          python -m pip install --require-hashes --only-binary=:all: --find-links control/wheels --requirement control/requirements.lock
       - name: Run control-plane tests
         run: python -m pytest -q control/tests
       - name: Install hash-locked firmware tooling

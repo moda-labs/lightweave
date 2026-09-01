@@ -172,6 +172,7 @@ else
   python3 -m venv "$TEST_ROOT/.venv"
   "$TEST_ROOT/.venv/bin/python" -m pip install \
     --require-hashes --only-binary=:all: \
+    --find-links "$TEST_ROOT/control/wheels" \
     --requirement "$TEST_ROOT/control/requirements.lock"
   "$TEST_ROOT/.venv/bin/python" -m pip check
   TEST_PYTHON="$TEST_ROOT/.venv/bin/python"

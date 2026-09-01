@@ -300,6 +300,7 @@ control plane, then install the per-user LaunchAgent:
 ```bash
 .venv/bin/python -m pip install \
   --require-hashes --only-binary=:all: \
+  --find-links control/wheels \
   --requirement control/requirements.lock
 .venv/bin/python scripts/install_flashing_station.py install
 ```

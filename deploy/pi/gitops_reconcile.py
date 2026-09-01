@@ -426,6 +426,8 @@ class GitOpsReconciler:
                     "install",
                     "--require-hashes",
                     "--only-binary=:all:",
+                    "--find-links",
+                    str(self.config.repo / "control" / "wheels"),
                     "--requirement",
                     str(self.config.repo / "control" / "requirements.lock"),
                 ],

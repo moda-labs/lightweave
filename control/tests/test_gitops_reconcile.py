@@ -687,6 +687,23 @@ def test_installer_provisions_hardened_unit_paths_and_versioned_runtime() -> Non
     assert "EnvironmentFile=-/etc/lightweave/solix.env" in solix_unit
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in solix_unit
     assert "AF_BLUETOOTH" not in solix_unit
+    # The credential-bearing probe must not share the control plane's UID; the
+    # status file is handed over group-readable in the probe's own state dir.
+    assert "User=lightweave-solix" in solix_unit
+    assert "Group=lightweave" in solix_unit
+    assert "StateDirectory=lightweave-solix" in solix_unit
+    assert "StateDirectoryMode=0750" in solix_unit
+    assert "UMask=0027" in solix_unit
+    assert "--status-file /var/lib/lightweave-solix/solix-s2000.json" in solix_unit
+    # Enabling the probe also hooks it to control starts, so GitOps'
+    # stop-control/start-control deploy cycle brings the opt-in probe back up.
+    assert "WantedBy=multi-user.target lightweave-control.service" in solix_unit
+    assert "useradd --system --gid lightweave --no-create-home" in installer
+    assert (
+        "CONTROL_SOLIX_STATUS_FILE=/var/lib/lightweave-solix/solix-s2000.json"
+        in control_unit
+    )
+    assert "ReadOnlyPaths=-/var/lib/lightweave-gitops -/var/lib/lightweave-solix" in control_unit
     assert "systemctl enable --now lightweave-solix.service" not in installer
     assert "-m control.provisioner --socket /run/lightweave-provisioner/provisioner.sock" in provisioner_unit
     assert "UnsetEnvironment=CONTROL_PASSWORD_HASH" in provisioner_unit
@@ -768,6 +785,8 @@ def test_python_environment_is_built_fresh_and_reused_only_after_completion(
     install = next(command for command in reconciler.commands if "install" in command)
     assert "--require-hashes" in install
     assert "--only-binary=:all:" in install
+    find_links_index = install.index("--find-links")
+    assert install[find_links_index + 1].endswith("control/wheels")
     venv_commands = [
         command for command in reconciler.commands if command[1:3] == ("-m", "venv")
     ]

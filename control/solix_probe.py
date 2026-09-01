@@ -80,7 +80,8 @@ def select_s2000_device(
         )
 
     device = candidates[0]
-    if device.get("is_admin") is False:
+    # Owner-only boundary: an absent is_admin flag must not pass as ownership.
+    if device.get("is_admin") is not True:
         raise SolixCloudError("S2000 MQTT telemetry requires the Anker owner account")
     return device
 
@@ -148,6 +149,23 @@ def _client_session() -> Any:
     return ClientSession()
 
 
+def _force_mqtt_client_cleanup(client: Any) -> None:
+    """Stop the Paho network thread even when the session is not connected.
+
+    The pinned upstream cleanup() calls disconnect()/loop_stop() only while
+    connected, so a session that dropped its connection (or never finished
+    connecting after loop_start()) would leak its network thread and callbacks
+    across reconnect attempts. The caller captures the client before upstream
+    cleanup() clears it from the session.
+    """
+    if client is None:
+        return
+    with suppress(Exception):
+        client.disconnect()
+    with suppress(Exception):
+        client.loop_stop()
+
+
 def _publish_status_request(mqtt_session: Any, device: dict[str, Any]) -> None:
     if not mqtt_session.is_connected():
         raise SolixCloudError("Anker MQTT connection closed")
@@ -196,10 +214,13 @@ async def run_session(
             loop=asyncio.get_running_loop(), serial=serial, queue=queue
         )
         mqtt_session = await api.startMqttSession(message_callback=bridge)
-        if mqtt_session is None or not mqtt_session.is_connected():
+        if mqtt_session is None:
             raise SolixCloudError("could not connect to the Anker MQTT service")
+        mqtt_client = getattr(mqtt_session, "client", None)
         request_task: asyncio.Task[None] | None = None
         try:
+            if not mqtt_session.is_connected():
+                raise SolixCloudError("could not connect to the Anker MQTT service")
             prefix = mqtt_session.get_topic_prefix(deviceDict=device)
             if not prefix:
                 raise SolixCloudError("Anker MQTT service did not provide a device topic")
@@ -254,7 +275,10 @@ async def run_session(
                 request_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await request_task
-            api.stopMqttSession()
+            try:
+                api.stopMqttSession()
+            finally:
+                _force_mqtt_client_cleanup(mqtt_client)
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -268,9 +292,13 @@ async def run(args: argparse.Namespace) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            LOGGER.warning("S2000 cloud probe unavailable: %s", error)
+            # Normal-level logs must carry only the redacted public form; raw
+            # third-party exception text may embed account or token details.
+            public_error = _public_error(error)
+            LOGGER.warning("S2000 cloud probe unavailable: %s", public_error)
+            LOGGER.debug("S2000 cloud probe failure detail", exc_info=error)
             store.write_error(
-                _public_error(error),
+                public_error,
                 address=args.device_sn,
                 source=SOLIX_SOURCE_MQTT,
             )

@@ -302,8 +302,14 @@ The MQTT callback normalizes complete 0421/0900 snapshots into an atomic JSON
 handoff shared with the web process. Wrong-device and partial messages are
 ignored. Range and total checks, a 60-second freshness boundary, preserved last
 reading, and explicit connection errors prevent stale or inconsistent watts from
-appearing live. Credentials exist only in root-owned `/etc/lightweave/solix.env`;
-the browser API receives the station serial, source, readings, and health but no
+appearing live; the Overview surfaces a probe disconnect immediately rather than
+waiting for the last reading to age out. Credentials exist only in root-owned
+`/etc/lightweave/solix.env`, loaded by systemd for the dedicated
+`lightweave-solix` user — a different UID from the web process, which only reads
+the group-readable status file in `/var/lib/lightweave-solix/`. The unofficial
+client library installs from a reviewed wheel vendored in `control/wheels/`, so
+the hashed, binary-only control-plane install never runs a source build. The
+browser API receives the station serial, source, readings, and health but no
 account data. The service remains opt-in because it depends on an unofficial
 cloud interface, owner credentials, S2000 Wi-Fi, and internet availability. It is
 informational only and must not become a show-control or safety dependency.
