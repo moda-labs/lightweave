@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.7",
+      "date": "2026-08-31",
+      "title": "Power station deployment fix",
+      "control_changes": [
+        "Fixed deployment of the v0.9.6 power-station integration: installations upgrading from earlier releases could not locate its reviewed dependency wheel and safely rolled back. The dependency lock now names the wheel location itself, so upgrades from any prior release deploy cleanly."
+      ],
+      "firmware_changes": []
+    },
+    {
       "version": "0.9.6",
       "date": "2026-08-31",
       "title": "Power station telemetry",

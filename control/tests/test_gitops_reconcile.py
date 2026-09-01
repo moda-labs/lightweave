@@ -787,6 +787,13 @@ def test_python_environment_is_built_fresh_and_reused_only_after_completion(
     assert "--only-binary=:all:" in install
     find_links_index = install.index("--find-links")
     assert install[find_links_index + 1].endswith("control/wheels")
+    # The lock must be installable with NO extra flags: during an upgrade the
+    # previous release's stable reconciler runs pip, so the vendored-wheel
+    # location has to live inside the lock file itself.
+    lock_text = (
+        SCRIPT.parents[2] / "control" / "requirements.lock"
+    ).read_text(encoding="utf-8")
+    assert "\n--find-links wheels\n" in lock_text
     venv_commands = [
         command for command in reconciler.commands if command[1:3] == ("-m", "venv")
     ]

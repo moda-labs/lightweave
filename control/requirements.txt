@@ -11,8 +11,9 @@ Pillow==10.4.0
 # build tools. The wheel was built from immutable upstream commit
 # cfeceddffd4dc2d4f3c79ff8d0bf3aa7e5f3451e (tag 3.8.1) and its contents were
 # verified byte-identical to that archive's src/anker_solix_api tree.
-# Installers must pass --find-links control/wheels (see ci.yml, release.yml,
-# and deploy/pi/gitops_reconcile.py).
+# requirements.lock itself carries `--find-links wheels` so that installers —
+# including the previous release's Pi reconciler during an upgrade — need no
+# extra flags to find the vendored wheel.
 anker-solix-api==3.8.1
 aiofiles==25.1.0
 aiohttp==3.14.3
