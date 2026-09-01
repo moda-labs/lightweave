@@ -21,7 +21,8 @@ understand. The UI should be calm, precise, and hard to misread.
 - **Environment:** night use, phone on Pi hotspot, no internet, no router, unreliable
   USB/radio conditions.
 - **Primary jobs:** know whether the field is alive, edit the layout table, tune the
-  live pattern, reset/read power telemetry, and escape to raw serial when needed.
+  live pattern, control the soundtrack, reset/read power telemetry, and escape to
+  raw serial when needed.
 - **Trust rule:** every mutation must surface the conductor ack or failure. The UI
   never pretends a write landed.
 
@@ -115,7 +116,7 @@ helper while still letting the builder get every useful byte when needed.
 ### Mobile
 
 - Primary tabs begin with `Overview`, followed by `Lantern Locations`, `Node List`,
-  `Patterns`, `Power`, `Operations`, and `Firmware`.
+  `Patterns`, `Sound`, `Power`, `Operations`, and `Firmware`.
 - `Overview` opens by default and keeps health metrics, attention items, current
   group patterns, and measured power history readable without horizontal scrolling.
 - `Lantern Locations` and `Table` are peer multi-lantern views over the same
@@ -236,7 +237,8 @@ Controls should be tactile and direct:
 
 - Pattern picker as segmented control.
 - Brightness as a slider with numeric value.
-- Hue as swatches plus slider when needed.
+- Hue as named swatches plus a keyboard- and pointer-accessible color wheel;
+  retain the native system color picker as a compact fallback.
 - Pattern params use human labels: `sweep period`, `wavelength`, `spatial hue`,
   `saturation`.
 - `SOLID` is hidden behind bench mode.

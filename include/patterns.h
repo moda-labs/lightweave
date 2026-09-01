@@ -9,6 +9,7 @@
 #include "beacon.h"
 #include "pattern_ids.h"  // PatternId enum + patternIsStatic (dependency-free)
 #include "pattern_math.h"
+#include "uploaded_pattern.h"
 
 namespace patterns {
 
@@ -223,15 +224,78 @@ inline RgbwColor oceanWave(int64_t synced_us, uint8_t brightness, float x,
   foam *= foam;
   // H, S, V all move with height (brightness-only reads flat): deep indigo-blue
   // and dark in the troughs -> azure mid-water -> cyan crest -> desaturated
-  // white foam. Value keeps a small floor so troughs still glow faintly.
-  float value = base_value * (0.14f + 0.86f * powf(n, 1.3f));
+  // white foam. The perceptual floor plus a one-PWM quantization guard keeps
+  // non-black Ocean configs visibly alive even at dim show brightnesses.
+  float value = pmath::oceanSwellValue(n, base_value);
   float hue = (hue_base + 10.0f - 27.0f * n - 8.0f * foam) / 360.0f;
   float sat = ((0.98f - 0.15f * n) - 0.70f * foam) * base_sat;
   if (!full_hsv && sat < 0.06f) sat = 0.06f;
   if (sat < 0.0f) sat = 0.0f;
   if (sat > 1.0f) sat = 1.0f;
+  pmath::RgbwUnit color = pmath::hsvToRgbw(
+      hue, sat, value, /*intensity*/ 1.0f);
+  return scaledRgbw(pmath::oceanEnsureVisible(color, brightness), brightness);
+}
+
+// Pond ripple: narrow cyan crests radiate from a configurable point across a
+// dim blue water bed. All four controls fit the existing PatternConfig wire
+// shape, so adding this effect does not change the beacon or transport layout.
+//   params[0] = period between emitted rings in ms          (default 6000)
+//   params[1] = wavelength x100 normalized coordinate units (default 50)
+//   params[2] = center X x1000                               (UI default 500)
+//   params[3] = center Y x1000                               (UI default 500)
+inline RgbwColor pondRipple(int64_t synced_us, uint8_t brightness, float x,
+                            float y, const uint16_t params[4]) {
+  float period_s = params[0] ? params[0] / 1000.0f : 6.0f;
+  float wavelength = params[1] ? params[1] / 100.0f : 0.50f;
+  // Zero is a valid edge coordinate, so unlike period/wavelength it must not be
+  // treated as an unset sentinel. The control plane always sends both centers.
+  float center_x = params[2] / 1000.0f;
+  float center_y = params[3] / 1000.0f;
+  float crest = pmath::pondRippleIntensity(
+      synced_us, x, y, period_s, wavelength, center_x, center_y);
+  float foam = crest * crest;
+  float hue = (207.0f - 20.0f * crest) / 360.0f;
+  float sat = 0.96f - 0.58f * foam;
+  float value = 0.08f + 0.92f * powf(crest, 1.15f);
   return scaledRgbw(pmath::hsvToRgbw(hue, sat, value, /*intensity*/ 1.0f),
                     brightness);
+}
+
+// Uploaded programs are rendered only through the explicit UPLOADED dispatch in
+// main.cpp. Keeping this out of render() means every existing built-in continues
+// through its original switch and pixel loop with no VM validation/execution.
+inline RgbwColor uploadedPixel(const UploadedProgram& program,
+                               int64_t synced_us, uint8_t brightness, float x,
+                               float y, uint16_t pixel_index,
+                               uint16_t pixel_count) {
+  UploadedVmOutput output = uploadedProgramRun(
+      program, synced_us, x, y, pixel_index, pixel_count,
+      /*already_validated=*/true);
+  if (!output.ok) return RgbwColor(0, 0, 0, 0);
+  return scaledRgbw(pmath::hsvToRgbw(output.hue, output.saturation,
+                                    output.value, output.intensity),
+                    brightness);
+}
+
+template <typename StripT>
+inline void renderUploaded(StripT& strip, const UploadedProgram& program,
+                           int64_t synced_us, uint8_t brightness, float x,
+                           float y, uint16_t pixel_count = 0,
+                           bool already_validated = false) {
+  uint16_t physical_count = strip.PixelCount();
+  uint16_t count = pixel_count ? pixel_count : physical_count;
+  if (count > physical_count) count = physical_count;
+  if (!already_validated && !uploadedProgramValid(program)) {
+    for (uint16_t i = 0; i < physical_count; i++)
+      strip.SetPixelColor(i, RgbwColor(0, 0, 0, 0));
+    return;
+  }
+  for (uint16_t i = 0; i < count; i++)
+    strip.SetPixelColor(i, uploadedPixel(program, synced_us, brightness, x, y,
+                                        i, count));
+  for (uint16_t i = count; i < physical_count; i++)
+    strip.SetPixelColor(i, RgbwColor(0, 0, 0, 0));
 }
 
 inline RgbwColor calibrationId(int64_t synced_us, uint8_t brightness,
@@ -314,6 +378,9 @@ inline void render(StripT& strip, const PatternConfig& b, int64_t synced_us, flo
       break;
     case WAVEFRONT:
       c = wavefront(synced_us, b.brightness, x, y, b.params);
+      break;
+    case POND_RIPPLE:
+      c = pondRipple(synced_us, b.brightness, x, y, b.params);
       break;
     case CALIBRATION:
       c = calibrationId(synced_us, b.brightness, node_id, b.params);

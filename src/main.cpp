@@ -49,6 +49,7 @@
 #include "sync.h"
 #include "table.h"
 #include "table_wire.h"
+#include "uploaded_pattern.h"
 
 // One RGBW data chain, sized for the largest supported profile. Renderers clear
 // inactive pixels, so the same image drives 16, 32, or 64 physical emitters.
@@ -147,6 +148,11 @@ static uint8_t        g_ota_local_error = OTA_ERR_NONE;
 // copies 64-entry tables before printing so radio callbacks can keep updating.
 static Roster         g_state_roster_snapshot;
 static OtaStatusTable g_state_ota_status_snapshot;
+// Machine commands are parsed only by loopTask, so one reusable workspace is
+// sufficient. Keep it in static storage: placing this growing aggregate in
+// Keeping it here also prevents the machine-command parser from consuming most
+// of loopTask's 8 KiB stack before command dispatch begins.
+static SerialJsonCommand g_serial_json_command;
 
 // Performer return traffic is serialized because ESP-NOW delivery callbacks
 // identify only the destination MAC. REGISTER, power telemetry, and OTA status
@@ -160,6 +166,22 @@ static RegistrationSchedule g_register_schedule;
 static PerformerTxState      g_performer_tx;
 static portMUX_TYPE g_register_mux = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE g_performer_tx_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// Uploaded patterns are isolated from the compiled renderer. Nine validated NVS
+// slots cover one active program per group plus an inactive staging slot, so a
+// replacement can converge without overwriting anything visible. Status is separate from the
+// byte-stable REGISTER layout so stable transport v11 remains intact.
+static UploadedProgramSlots g_uploaded_programs;
+static uint64_t g_uploaded_target_id = 0;
+static UploadedProgramStatusTable g_uploaded_status;
+static portMUX_TYPE g_uploaded_status_mux = portMUX_INITIALIZER_UNLOCKED;
+static UploadedProgram g_uploaded_install_pending = {};
+static bool g_uploaded_install_pending_dirty = false;
+static uint64_t g_uploaded_status_requested_id = 0;
+static UploadedStatusTxSchedule g_uploaded_status_schedule = {};
+static constexpr int64_t UPLOADED_VERIFICATION_WINDOW_US = 60000000LL;
+static int64_t g_uploaded_verification_until_us = 0;
+static portMUX_TYPE g_uploaded_pending_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // A relay copies packets out of the Wi-Fi callback into this bounded queue, then
 // performs all peer management and sends from loop(). One send is in flight at
@@ -194,6 +216,12 @@ static bool otaUnicastBegin(const uint8_t mac[6], uint32_t size,
 static bool otaUnicastActivate(const uint8_t mac[6]);
 static void maybeRelayDeliveryReceipt();
 static void drainRelayQueue();
+static void maybeInstallUploadedProgram();
+static void maybeUploadedStatusReport();
+static bool uploadedProgramSend(const uint8_t destination[6],
+                                const UploadedProgram& program);
+static bool uploadedProgramQuerySend(const uint8_t destination[6],
+                                     uint64_t requested_id);
 
 static void onSend(const uint8_t* mac, esp_now_send_status_t status) {
   bool delivered = status == ESP_NOW_SEND_SUCCESS;
@@ -232,6 +260,14 @@ static void onSend(const uint8_t* mac, esp_now_send_status_t status) {
     registrationSendResult(g_register_schedule, esp_timer_get_time(), g_mac,
                            REGISTER_CONFIG, completion.delivered);
     portEXIT_CRITICAL(&g_register_mux);
+  }
+  if (completion.matched &&
+      completion.purpose == PERFORMER_TX_PROGRAM_STATUS) {
+    portENTER_CRITICAL(&g_uploaded_pending_mux);
+    uploadedStatusScheduleResult(g_uploaded_status_schedule,
+                                 esp_timer_get_time(), g_mac,
+                                 completion.delivered);
+    portEXIT_CRITICAL(&g_uploaded_pending_mux);
   }
 }
 
@@ -569,6 +605,191 @@ static void patternConfigSave(const BeaconMsg& b) {
   g_prefs.end();
 }
 
+static void uploadedProgramsLoad() {
+  uploadedProgramSlotsInit(g_uploaded_programs);
+  g_prefs.begin("node", /*readonly*/ true);
+  if (g_prefs.getBytesLength("uprog") == sizeof(g_uploaded_programs))
+    g_prefs.getBytes("uprog", &g_uploaded_programs,
+                     sizeof(g_uploaded_programs));
+  g_uploaded_target_id = g_prefs.getULong64("uprog_t", 0);
+  g_prefs.end();
+  for (uint8_t i = 0; i < UPLOADED_PROGRAM_SLOTS; i++) {
+    if (!uploadedProgramValid(g_uploaded_programs.slots[i]))
+      memset(&g_uploaded_programs.slots[i], 0,
+             sizeof(g_uploaded_programs.slots[i]));
+  }
+  if (uploadedProgramFind(g_uploaded_programs, g_uploaded_target_id) < 0)
+    g_uploaded_target_id = 0;
+}
+
+static bool uploadedProgramsSave() {
+  g_prefs.begin("node", /*readonly*/ false);
+  size_t programs = g_prefs.putBytes("uprog", &g_uploaded_programs,
+                                     sizeof(g_uploaded_programs));
+  size_t target = g_prefs.putULong64("uprog_t", g_uploaded_target_id);
+  g_prefs.end();
+  return programs == sizeof(g_uploaded_programs) && target == sizeof(uint64_t);
+}
+
+static bool currentFirmwareFleetReady(int64_t t) {
+  const uint8_t expected = tablePositionedCount(g_table);
+  uint8_t seen = 0;
+  uint8_t matching = 0;
+  const FirmwareVersion conductor_firmware =
+      currentFirmwareVersion(PROTO_VERSION);
+  for (uint8_t i = 0; i < g_table.count; i++) {
+    if (!tableHasPosition(g_table.entries[i])) continue;
+    int64_t registered_us = 0;
+    FirmwareVersion reported = {};
+    bool known = false;
+    portENTER_CRITICAL(&g_roster_mux);
+    const int roster_index = rosterFind(g_roster, g_table.entries[i].mac);
+    if (roster_index >= 0) {
+      registered_us = g_roster.entries[roster_index].last_us;
+      reported = rosterEntryFirmware(g_roster.entries[roster_index]);
+      known = true;
+    }
+    portEXIT_CRITICAL(&g_roster_mux);
+    if (!known ||
+        !otaSeenRecently(registered_us, t, OTA_COHORT_FRESH_US))
+      continue;
+    seen++;
+    if (firmwareSame(conductor_firmware, reported)) matching++;
+  }
+  return firmwareFleetReady(expected, seen, matching);
+}
+
+static bool uploadedProgramInstallLocal(const UploadedProgram& program) {
+  UploadedProgramSlots previous_programs = g_uploaded_programs;
+  uint64_t previous_target = g_uploaded_target_id;
+  BeaconMsg beacon;
+  portENTER_CRITICAL(&g_sync_mux);
+  beacon = g_beacon;
+  portEXIT_CRITICAL(&g_sync_mux);
+  if (!uploadedProgramValid(program)) return false;
+  int existing = uploadedProgramFind(g_uploaded_programs, program.id);
+  uint8_t changed_slot = UINT8_MAX;
+  if (existing < 0) {
+    uint64_t active_ids[UPLOADED_PROGRAM_SLOTS] = {0};
+    uint8_t active_count = 0;
+    for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
+      const PatternConfig& pattern = beacon.patterns[group_id];
+      if (pattern.pattern_id != patterns::UPLOADED) continue;
+      uint64_t id = patterns::uploadedPatternProgramId(pattern.params);
+      bool known = id == 0;
+      for (uint8_t i = 0; i < active_count; i++) known = known || active_ids[i] == id;
+      if (!known && active_count < UPLOADED_PROGRAM_SLOTS)
+        active_ids[active_count++] = id;
+    }
+    if (!uploadedProgramInstallPreserving(
+            g_uploaded_programs, program, active_ids, active_count,
+            &changed_slot))
+      return false;
+  }
+  g_uploaded_target_id = program.id;
+  bool persistence_changed = changed_slot != UINT8_MAX ||
+                             previous_target != g_uploaded_target_id;
+  if (!persistence_changed) return true;
+  if (uploadedProgramsSave()) return true;
+  g_uploaded_programs = previous_programs;
+  g_uploaded_target_id = previous_target;
+  return false;
+}
+
+static bool uploadedFleetReady(uint64_t requested_id, int64_t t,
+                               uint8_t* ready_count = nullptr,
+                               uint8_t* seen_count = nullptr) {
+  uint8_t ready = 0;
+  uint8_t seen = 0;
+  uint8_t expected = tablePositionedCount(g_table);
+  FirmwareVersion conductor_firmware = currentFirmwareVersion(PROTO_VERSION);
+  if (!requested_id ||
+      uploadedProgramFind(g_uploaded_programs, requested_id) < 0) {
+    if (ready_count) *ready_count = 0;
+    if (seen_count) *seen_count = 0;
+    return false;
+  }
+  for (uint8_t i = 0; i < g_table.count; i++) {
+    if (!tableHasPosition(g_table.entries[i])) continue;
+    bool online = false;
+    int64_t registered_us = 0;
+    FirmwareVersion roster_firmware = {};
+    portENTER_CRITICAL(&g_roster_mux);
+    int roster_index = rosterFind(g_roster, g_table.entries[i].mac);
+    if (roster_index >= 0) {
+      registered_us = g_roster.entries[roster_index].last_us;
+      roster_firmware = rosterEntryFirmware(g_roster.entries[roster_index]);
+      online = otaSeenRecently(registered_us, t, OTA_COHORT_FRESH_US) &&
+               firmwareSame(conductor_firmware, roster_firmware);
+    }
+    portEXIT_CRITICAL(&g_roster_mux);
+    bool capable = false;
+    bool available = false;
+    uint64_t installed_id = 0;
+    portENTER_CRITICAL(&g_uploaded_status_mux);
+    int status = uploadedStatusFind(g_uploaded_status, g_table.entries[i].mac);
+    if (status >= 0) {
+      const UploadedProgramStatusEntry& entry =
+          g_uploaded_status.entries[status];
+      capable = entry.vm_version == UPLOADED_VM_VERSION && entry.last_us > 0 &&
+                firmwareSame(entry.firmware, conductor_firmware) &&
+                firmwareSame(entry.firmware, roster_firmware) &&
+                entry.last_us >= registered_us;
+      available = entry.available;
+      installed_id = entry.requested_id;
+    }
+    portEXIT_CRITICAL(&g_uploaded_status_mux);
+    if (online && capable) seen++;
+    if (online && capable && available && installed_id == requested_id)
+      ready++;
+  }
+  if (ready_count) *ready_count = ready;
+  if (seen_count) *seen_count = seen;
+  return expected > 0 && ready == expected && seen == expected;
+}
+
+static bool fallbackPatternsForMismatchedFirmware(const uint8_t mac[6],
+                                                  bool positioned,
+                                                  BeaconMsg& beacon) {
+  FirmwareVersion reported = {};
+  bool known = false;
+  portENTER_CRITICAL(&g_roster_mux);
+  int roster_index = rosterFind(g_roster, mac);
+  if (roster_index >= 0) {
+    reported = rosterEntryFirmware(g_roster.entries[roster_index]);
+    known = true;
+  }
+  portEXIT_CRITICAL(&g_roster_mux);
+  bool firmware_matches = known &&
+      firmwareSame(currentFirmwareVersion(PROTO_VERSION), reported);
+  if (!patterns::patternMismatchRequiresFallback(positioned,
+                                                  firmware_matches))
+    return false;
+
+  bool changed = false;
+  portENTER_CRITICAL(&g_sync_mux);
+  for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
+    PatternConfig& pattern = g_beacon.patterns[group_id];
+    uint16_t fallback = patterns::patternAfterFirmwareMismatch(pattern.pattern_id);
+    if (fallback == pattern.pattern_id) continue;
+    pattern.pattern_id = fallback;
+    pattern.params[0] = 40;
+    pattern.params[1] = 100;
+    pattern.params[2] = pmath::colorValuePack(128);
+    pattern.params[3] = 0;
+    changed = true;
+  }
+  beacon = g_beacon;
+  portEXIT_CRITICAL(&g_sync_mux);
+  if (!changed) return false;
+
+  patternConfigSave(beacon);
+  char formatted[18];
+  Serial.printf("[pattern] firmware mismatch from %s; reverted new-only "
+                "patterns to Glow\n", macStr(mac, formatted));
+  return true;
+}
+
 static uint16_t powerPolicyCurrentMinute(int64_t t) {
   int64_t elapsed_min = 0;
   if (g_policy_clock_set_us > 0 && t >= g_policy_clock_set_us) {
@@ -742,7 +963,8 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       } else if (routeChildUplinkValid(route, src, hdr)) {
         uint8_t copies = (hdr.type == MSG_REGISTER ||
                           hdr.type == MSG_OTA_STATUS ||
-                          hdr.type == MSG_POWER) ? 2 : 1;
+                          hdr.type == MSG_POWER ||
+                          hdr.type == MSG_PROGRAM_STATUS) ? 2 : 1;
         relayQueuePacket(data, len, route.primary, received_us, copies);
         return;
       } else {
@@ -783,6 +1005,14 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
         g_rowreq_n = g_rowreq_n + 1;
       }
       portEXIT_CRITICAL(&g_roster_mux);
+      FirmwareVersion reported_firmware = {r.fw, r.build, r.dirty, {0}};
+      firmwareCopyVersion(reported_firmware.version, r.version);
+      if (!firmwareSame(currentFirmwareVersion(PROTO_VERSION),
+                        reported_firmware)) {
+        portENTER_CRITICAL(&g_uploaded_status_mux);
+        uploadedStatusInvalidate(g_uploaded_status, r.mac);
+        portEXIT_CRITICAL(&g_uploaded_status_mux);
+      }
       // A staged performer reports again only after the targeted activation
       // reboot. Preserve its verified size/CRC while advancing the conductor's
       // job table to complete.
@@ -889,6 +1119,52 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
         g_power_q_dropped++;  // can't happen at 1–2 nodes / 60 s, but never lie
       }
       portEXIT_CRITICAL(&g_power_mux);
+      break;
+    }
+    case MSG_PROGRAM_INSTALL: {
+      if (isConductor() || !from_primary) return;
+      if (!programInstallMsgLenPlausible(len)) return;
+      ProgramInstallMsg message = {};
+      memcpy(&message, data, len);
+      if (message.vm_version != UPLOADED_VM_VERSION ||
+          !programInstallMsgLenValid(len, message.length))
+        return;
+      UploadedProgram program = {};
+      program.id = message.program_id;
+      program.version = message.vm_version;
+      program.length = message.length;
+      memcpy(program.data, message.data, message.length);
+      if (!uploadedProgramValid(program)) return;
+      portENTER_CRITICAL(&g_uploaded_pending_mux);
+      g_uploaded_install_pending = program;
+      g_uploaded_install_pending_dirty = true;
+      portEXIT_CRITICAL(&g_uploaded_pending_mux);
+      break;
+    }
+    case MSG_PROGRAM_QUERY: {
+      if (isConductor() || !from_primary ||
+          len != (int)sizeof(ProgramQueryMsg)) return;
+      ProgramQueryMsg message;
+      memcpy(&message, data, sizeof(message));
+      portENTER_CRITICAL(&g_uploaded_pending_mux);
+      g_uploaded_status_requested_id = message.requested_id;
+      uploadedStatusScheduleRequest(g_uploaded_status_schedule, received_us,
+                                    g_mac);
+      portEXIT_CRITICAL(&g_uploaded_pending_mux);
+      break;
+    }
+    case MSG_PROGRAM_STATUS: {
+      if (!isConductor() || len != (int)sizeof(ProgramStatusMsg)) return;
+      ProgramStatusMsg message;
+      memcpy(&message, data, sizeof(message));
+      if (!routeMacEqual(message.mac, hdr.origin)) return;
+      FirmwareVersion firmware = {message.fw, message.build, message.dirty, {0}};
+      firmwareCopyVersion(firmware.version, message.version);
+      portENTER_CRITICAL(&g_uploaded_status_mux);
+      uploadedStatusUpsert(g_uploaded_status, message.mac,
+                           message.vm_version, message.requested_id,
+                           message.available != 0, firmware, received_us);
+      portEXIT_CRITICAL(&g_uploaded_status_mux);
       break;
     }
     case MSG_OTA_BEGIN: {
@@ -1271,6 +1547,98 @@ static void drainPowerReports() {
                   (unsigned long)dropped);
 }
 
+static void maybeInstallUploadedProgram() {
+  if (isConductor()) return;
+  UploadedProgram program = {};
+  bool pending = false;
+  portENTER_CRITICAL(&g_uploaded_pending_mux);
+  if (g_uploaded_install_pending_dirty) {
+    program = g_uploaded_install_pending;
+    g_uploaded_install_pending_dirty = false;
+    pending = true;
+  }
+  portEXIT_CRITICAL(&g_uploaded_pending_mux);
+  if (!pending) return;
+
+  bool installed = uploadedProgramInstallLocal(program);
+  portENTER_CRITICAL(&g_uploaded_pending_mux);
+  g_uploaded_status_requested_id = program.id;
+  uploadedStatusScheduleRequest(g_uploaded_status_schedule, now_us(), g_mac);
+  portEXIT_CRITICAL(&g_uploaded_pending_mux);
+  if (!installed)
+    Serial.println("[program] rejected or failed to persist uploaded program");
+}
+
+static void maybeUploadedStatusReport() {
+  if (isConductor() || !g_radio_on || !performerTxReady()) return;
+  uint64_t requested_id = 0;
+  bool due = false;
+  int64_t t = now_us();
+  portENTER_CRITICAL(&g_uploaded_pending_mux);
+  if (uploadedStatusScheduleExpired(g_uploaded_status_schedule, t))
+    uploadedStatusScheduleInit(g_uploaded_status_schedule);
+  else
+    due = uploadedStatusScheduleDue(g_uploaded_status_schedule, t);
+  requested_id = g_uploaded_status_requested_id;
+  portEXIT_CRITICAL(&g_uploaded_pending_mux);
+  if (!due) return;
+
+  uint8_t parent[6], primary[6];
+  if (!conductorPeerReady(parent, primary)) return;
+  bool available = requested_id == 0 ||
+      uploadedProgramFind(g_uploaded_programs, requested_id) >= 0;
+  ProgramStatusMsg message = {};
+  message.hdr = makeMsgHeader(MSG_PROGRAM_STATUS);
+  message.vm_version = UPLOADED_VM_VERSION;
+  message.available = available ? 1 : 0;
+  message.requested_id = requested_id;
+  FirmwareVersion firmware = currentFirmwareVersion(PROTO_VERSION);
+  message.fw = firmware.proto;
+  message.build = firmware.build_id;
+  message.dirty = firmware.dirty;
+  firmwareCopyVersion(message.version, firmware.version);
+  memcpy(message.mac, g_mac, 6);
+  routeHeaderSet(message.hdr, g_mac, primary);
+  if (!performerSend(parent, (const uint8_t*)&message, sizeof(message),
+                     PERFORMER_TX_PROGRAM_STATUS)) {
+    portENTER_CRITICAL(&g_uploaded_pending_mux);
+    uploadedStatusScheduleResult(g_uploaded_status_schedule, t, g_mac, false);
+    portEXIT_CRITICAL(&g_uploaded_pending_mux);
+  }
+}
+
+static bool uploadedProgramSend(const uint8_t destination[6],
+                                const UploadedProgram& program) {
+  if (!isConductor() || !uploadedProgramValid(program)) return false;
+  ProgramInstallMsg message = {};
+  message.hdr = makeMsgHeader(MSG_PROGRAM_INSTALL);
+  routeHeaderSet(message.hdr, g_mac, destination);
+  message.program_id = program.id;
+  message.vm_version = program.version;
+  message.length = program.length;
+  memcpy(message.data, program.data, program.length);
+  size_t len = offsetof(ProgramInstallMsg, data) + program.length;
+  bool queued = false;
+  for (uint8_t copy = 0; copy < 3; copy++)
+    queued = esp_now_send(BROADCAST_ADDR, (const uint8_t*)&message, len) == ESP_OK ||
+             queued;
+  return queued;
+}
+
+static bool uploadedProgramQuerySend(const uint8_t destination[6],
+                                     uint64_t requested_id) {
+  if (!isConductor() || !requested_id) return false;
+  ProgramQueryMsg message = {};
+  message.hdr = makeMsgHeader(MSG_PROGRAM_QUERY);
+  routeHeaderSet(message.hdr, g_mac, destination);
+  message.requested_id = requested_id;
+  bool queued = false;
+  for (uint8_t copy = 0; copy < 2; copy++)
+    queued = esp_now_send(BROADCAST_ADDR, (const uint8_t*)&message,
+                          sizeof(message)) == ESP_OK || queued;
+  return queued;
+}
+
 // Conductor: broadcast the authoritative inventory in ESP-NOW-sized chunks. A
 // node adopts its permanent ID and optional placement, then caches both in NVS.
 // Chunk math lives in table_wire.h; this is just the radio call per chunk.
@@ -1616,6 +1984,8 @@ static const char* patternName(uint16_t id) {
     case patterns::FIRE_FLICKER: return "Fire Flicker";
     case patterns::FIRE2012: return "Fire2012";
     case patterns::WAVEFRONT: return "Wavefront";
+    case patterns::POND_RIPPLE: return "Pond Ripple";
+    case patterns::UPLOADED: return "Uploaded Pattern";
     case patterns::CALIBRATION: return "Calibration";
     case patterns::WHITE: return "White";
     default: return "Unknown";
@@ -1680,6 +2050,35 @@ static void printPatternsJson(const BeaconMsg& b) {
                 beaconLocatorActive(b) ? "true" : "false",
                 b.locator.brightness, b.locator.slot_ms,
                 b.locator.bit_count, b.locator.min_hamming_distance);
+}
+
+static void printUploadedProgramJson(const BeaconMsg& b, int64_t t) {
+  uint8_t ready_count = 0;
+  uint8_t seen_count = 0;
+  bool ready = uploadedFleetReady(g_uploaded_target_id, t, &ready_count,
+                                  &seen_count);
+  uint8_t expected = tablePositionedCount(g_table);
+  uint64_t active_id = 0;
+  for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
+    const PatternConfig& pattern = b.patterns[group_id];
+    if (pattern.pattern_id == patterns::UPLOADED) {
+      active_id = patterns::uploadedPatternProgramId(pattern.params);
+      break;
+    }
+  }
+  Serial.printf("\"uploaded_program\":{\"vm_version\":%u,"
+                "\"target_id\":%lu,\"target_tag\":%lu,"
+                "\"target_label\":\"%016llx\","
+                "\"active_id\":%lu,\"active_tag\":%lu,"
+                "\"ready\":%s,\"ready_count\":%u,"
+                "\"seen\":%u,\"expected\":%u}",
+                UPLOADED_VM_VERSION,
+                (unsigned long)(g_uploaded_target_id & 0xffffffffULL),
+                (unsigned long)(g_uploaded_target_id >> 32),
+                (unsigned long long)g_uploaded_target_id,
+                (unsigned long)(active_id & 0xffffffffULL),
+                (unsigned long)(active_id >> 32),
+                ready ? "true" : "false", ready_count, seen_count, expected);
 }
 
 static void printPowerPolicyJson(const PowerPolicy& p) {
@@ -2621,7 +3020,8 @@ static void printMachineState(uint32_t id) {
   Serial.printf("\"conductor\":{\"connected\":true,\"uptime_s\":%.1f,"
                 "\"seq\":%lu,\"wake\":%s,\"sync\":\"%s\","
                 "\"firmware\":{\"version\":\"%s\",\"proto\":%u,\"build_id\":%lu,"
-                "\"build_label\":\"%08lx\",\"dirty\":%s}},",
+                "\"build_label\":\"%08lx\",\"dirty\":%s,"
+                "\"features\":[\"pond_ripple\",\"uploaded_patterns_v1\"]}},",
                 millis() / 1000.0f, (unsigned long)g_tx_seq,
                 g_wake_flag ? "true" : "false",
                 isConductor() ? "locked" : (locked ? "locked" : "free-run"),
@@ -2639,6 +3039,8 @@ static void printMachineState(uint32_t id) {
                 (unsigned long)conductor_fw.build_id,
                 conductor_fw.dirty ? "true" : "false");
   printPatternsJson(b);
+  Serial.print(",");
+  printUploadedProgramJson(b, t);
   Serial.printf(",\"blackout\":{\"restore_available\":%s},",
                 g_blackout_state.restore_available ? "true" : "false");
   printPowerPolicyJson(policy);
@@ -2728,6 +3130,14 @@ static void printMachineState(uint32_t id) {
 static void handleMachineCommand(const SerialJsonCommand& cmd) {
   if (cmd.kind == SJ_STATE) {
     printMachineState(cmd.id);
+  } else if (cmd.kind == SJ_PROGRAM_PROGRESS) {
+    BeaconMsg beacon;
+    portENTER_CRITICAL(&g_sync_mux);
+    beacon = g_beacon;
+    portEXIT_CRITICAL(&g_sync_mux);
+    Serial.printf("{\"id\":%lu,\"ok\":true,", (unsigned long)cmd.id);
+    printUploadedProgramJson(beacon, now_us());
+    Serial.println("}");
   } else if (cmd.kind == SJ_IDENTIFY) {
     jsonOk(cmd.id, "identify acknowledged");
   } else if (cmd.kind == SJ_ASSIGN) {
@@ -2819,6 +3229,42 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
       jsonReservedId(cmd.id, reserved.id, created);
     }
   } else if (cmd.kind == SJ_PATTERN) {
+    bool current_firmware_activation =
+        patterns::patternNeedsCurrentFirmware(cmd.pattern_id);
+    bool capability_off = current_firmware_activation && cmd.has_brightness &&
+                          cmd.brightness == 0;
+    if (current_firmware_activation && !capability_off &&
+        (!isConductor() || !currentFirmwareFleetReady(now_us()))) {
+      jsonError(cmd.id,
+                "pattern requires current firmware on every placed lantern");
+      return;
+    }
+    bool uploaded_activation = cmd.pattern_id == patterns::UPLOADED;
+    bool uploaded_off = uploaded_activation && cmd.has_brightness &&
+                        cmd.brightness == 0;
+    uint16_t uploaded_params[4] = {0, 0, 0, 0};
+    if (uploaded_activation) {
+      uint16_t encoded[4] = {0, 0, 0, 0};
+      patterns::uploadedPatternSetProgramId(encoded, g_uploaded_target_id);
+      uint16_t requested_params[4];
+      for (uint8_t i = 0; i < 4; i++)
+        requested_params[i] = cmd.has_params[i] ? cmd.params[i] : encoded[i];
+      uint64_t requested_id =
+          patterns::uploadedPatternProgramId(requested_params);
+      if (!isConductor()) {
+        jsonError(cmd.id, "uploaded pattern activation is conductor-only");
+        return;
+      }
+      if (!uploaded_off &&
+          (!requested_id || requested_id != g_uploaded_target_id ||
+           !uploadedFleetReady(requested_id, now_us()))) {
+        jsonError(cmd.id,
+                  "uploaded program is not verified on every placed lantern");
+        return;
+      }
+      patterns::uploadedPatternSetProgramId(
+          uploaded_params, uploaded_off ? requested_id : g_uploaded_target_id);
+    }
     portENTER_CRITICAL(&g_sync_mux);
     uint8_t first = cmd.has_group_id ? cmd.group_id : 0;
     uint8_t end = cmd.has_group_id ? (uint8_t)(cmd.group_id + 1) : GROUP_COUNT;
@@ -2829,12 +3275,32 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
         p.brightness =
             cmd.brightness > MAX_BRIGHTNESS ? MAX_BRIGHTNESS : cmd.brightness;
       }
-      for (uint8_t i = 0; i < 4; i++)
-        if (cmd.has_params[i]) p.params[i] = cmd.params[i];
+      if (uploaded_activation) {
+        memcpy(p.params, uploaded_params, sizeof(p.params));
+      } else {
+        for (uint8_t i = 0; i < 4; i++)
+          if (cmd.has_params[i]) p.params[i] = cmd.params[i];
+      }
     }
     portEXIT_CRITICAL(&g_sync_mux);
     saveBeaconSnapshot();
+    if (uploaded_activation) g_uploaded_verification_until_us = 0;
     jsonOk(cmd.id, "pattern changed");
+  } else if (cmd.kind == SJ_PROGRAM_INSTALL) {
+    if (!isConductor()) {
+      jsonError(cmd.id, "program install is conductor-only");
+    } else if (!uploadedProgramInstallLocal(cmd.uploaded_program)) {
+      jsonError(cmd.id,
+                "uploaded program invalid or no inactive staging slot remains");
+    } else {
+      portENTER_CRITICAL(&g_uploaded_status_mux);
+      uploadedStatusInit(g_uploaded_status);
+      portEXIT_CRITICAL(&g_uploaded_status_mux);
+      g_uploaded_verification_until_us =
+          now_us() + UPLOADED_VERIFICATION_WINDOW_US;
+      uploadedProgramSend(BROADCAST_ADDR, cmd.uploaded_program);
+      jsonOk(cmd.id, "uploaded program staged; waiting for fleet verification");
+    }
   } else if (cmd.kind == SJ_LOCATOR) {
     if (!isConductor()) {
       jsonError(cmd.id, "locator is conductor-only");
@@ -2927,15 +3393,19 @@ static void handleMachineCommand(const SerialJsonCommand& cmd) {
   }
 }
 
-static void handleCommand(char* line) {
-  if (serialJsonLooksLike(line)) {
-    SerialJsonCommand cmd;
-    const char* error = nullptr;
-    if (serialJsonParse(line, cmd, error)) handleMachineCommand(cmd);
-    else jsonError(cmd.id, error ? error : "bad json");
-    return;
-  }
+// Keep machine-command dispatch out of the much larger legacy text-command
+// frame below. Both are called from Arduino's 8 KiB loopTask stack; nesting a
+// state response inside the text parser's frame exhausted that stack while an
+// OTA session added its status rows. noinline makes this safety boundary
+// explicit and keeps future compiler decisions from folding it back together.
+static void __attribute__((noinline)) handleMachineLine(char* line) {
+  SerialJsonCommand& cmd = g_serial_json_command;
+  const char* error = nullptr;
+  if (serialJsonParse(line, cmd, error)) handleMachineCommand(cmd);
+  else jsonError(cmd.id, error ? error : "bad json");
+}
 
+static void __attribute__((noinline)) handleTextCommand(char* line) {
   char* cmd = strtok(line, " \t");
   if (!cmd) return;
 
@@ -3065,12 +3535,28 @@ static void handleCommand(char* line) {
       // every read-modify-write goes under g_sync_mux; the NVS save works from
       // a snapshot taken inside the same critical section.
       uint16_t v = (uint16_t)atoi(a);
+      if (patterns::patternNeedsCurrentFirmware(v) &&
+          (!isConductor() || !currentFirmwareFleetReady(now_us()))) {
+        Serial.println("? pattern requires current firmware on every placed lantern");
+        return;
+      }
+      if (v == patterns::UPLOADED &&
+          (!isConductor() || !uploadedFleetReady(g_uploaded_target_id,
+                                                 now_us()))) {
+        Serial.println("? uploaded program is not verified on every placed lantern");
+        return;
+      }
       portENTER_CRITICAL(&g_sync_mux);
-      for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
+      for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
         g_beacon.patterns[group_id].pattern_id = v;
+        if (v == patterns::UPLOADED)
+          patterns::uploadedPatternSetProgramId(
+              g_beacon.patterns[group_id].params, g_uploaded_target_id);
+      }
       BeaconMsg snap = g_beacon;
       portEXIT_CRITICAL(&g_sync_mux);
       patternConfigSave(snap);
+      if (v == patterns::UPLOADED) g_uploaded_verification_until_us = 0;
       printInfo();
     }
   } else if (!strcmp(cmd, "bri")) {
@@ -3079,6 +3565,29 @@ static void handleCommand(char* line) {
       int v = atoi(a);
       if (v < 0) v = 0;
       if (v > MAX_BRIGHTNESS) v = MAX_BRIGHTNESS;  // never store above the cap
+      BeaconMsg current;
+      portENTER_CRITICAL(&g_sync_mux);
+      current = g_beacon;
+      portEXIT_CRITICAL(&g_sync_mux);
+      bool firmware_ready = true;
+      if (v > 0) firmware_ready = isConductor() &&
+          currentFirmwareFleetReady(now_us());
+      for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
+        const PatternConfig& pattern = current.patterns[group_id];
+        if (!patterns::patternBrightnessRequiresReadiness(pattern.pattern_id,
+                                                          (uint8_t)v))
+          continue;
+        if (!firmware_ready) {
+          Serial.println("? brightness requires current firmware on every placed lantern");
+          return;
+        }
+        if (pattern.pattern_id == patterns::UPLOADED &&
+            !uploadedFleetReady(
+                patterns::uploadedPatternProgramId(pattern.params), now_us())) {
+          Serial.println("? brightness requires the uploaded program on every placed lantern");
+          return;
+        }
+      }
       portENTER_CRITICAL(&g_sync_mux);
       for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
         g_beacon.patterns[group_id].brightness = (uint8_t)v;
@@ -3094,6 +3603,17 @@ static void handleCommand(char* line) {
       int i = atoi(ai);
       if (i >= 0 && i < 4) {
         uint16_t v = (uint16_t)atoi(av);
+        BeaconMsg current;
+        portENTER_CRITICAL(&g_sync_mux);
+        current = g_beacon;
+        portEXIT_CRITICAL(&g_sync_mux);
+        for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
+          if (!patterns::patternParamsMayChangeDirectly(
+                  current.patterns[group_id].pattern_id)) {
+            Serial.println("? uploaded program parameters are atomic; use program_install");
+            return;
+          }
+        }
         portENTER_CRITICAL(&g_sync_mux);
         for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++)
           g_beacon.patterns[group_id].params[i] = v;
@@ -3205,7 +3725,12 @@ static void pollSerialCommands() {
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
-      if (len) { buf[len] = '\0'; handleCommand(buf); len = 0; }
+      if (len) {
+        buf[len] = '\0';
+        if (serialJsonLooksLike(buf)) handleMachineLine(buf);
+        else handleTextCommand(buf);
+        len = 0;
+      }
     } else if (len < sizeof(buf) - 1) {
       buf[len++] = c;
     }
@@ -3223,6 +3748,7 @@ void setup() {
   configLoad();
   g_policy_clock_set_us = now_us();
   patternConfigLoad();
+  uploadedProgramsLoad();
   blackoutStateLoad();
   if (g_timer_wake && g_rtc_have_power_policy) {
     g_power_policy = g_rtc_power_policy;
@@ -3245,6 +3771,16 @@ void setup() {
   otaPeerLeaseInit(g_relay_peer);
   powerTableInit(g_power_table);
   otaStatusInit(g_ota_status);
+  uploadedStatusInit(g_uploaded_status);
+  uploadedStatusScheduleInit(g_uploaded_status_schedule);
+  for (uint8_t group_id = 0; group_id < GROUP_COUNT; group_id++) {
+    const PatternConfig& pattern = g_beacon.patterns[group_id];
+    if (pattern.pattern_id != patterns::UPLOADED) continue;
+    g_uploaded_status_requested_id =
+        patterns::uploadedPatternProgramId(pattern.params);
+    uploadedStatusScheduleRequest(g_uploaded_status_schedule, now_us(), g_mac);
+    break;
+  }
   otaCohortInit(g_ota_cohort);
   tableLoad();
   if (!identityProvisioned(g_id))
@@ -3393,12 +3929,73 @@ void loop() {
             entry >= 0, entry >= 0 ? g_table.entries[entry].id : 0,
             entry >= 0 ? g_table.entries[entry].group_id : 0,
             entry >= 0 ? g_table.entries[entry].led_count : DEFAULT_LED_COUNT);
-        if (!reply) continue;
-        TableMsg m;
-        size_t len = tableRowBuild(g_table, req[i].mac, m);
-        if (len) {
-          routeHeaderSet(m.hdr, g_mac, BROADCAST_ADDR);
-          esp_now_send(BROADCAST_ADDR, (const uint8_t*)&m, len);
+        if (reply) {
+          TableMsg m;
+          size_t len = tableRowBuild(g_table, req[i].mac, m);
+          if (len) {
+            routeHeaderSet(m.hdr, g_mac, BROADCAST_ADDR);
+            esp_now_send(BROADCAST_ADDR, (const uint8_t*)&m, len);
+          }
+        }
+
+        bool positioned = entry >= 0 && tableHasPosition(g_table.entries[entry]);
+        fallbackPatternsForMismatchedFirmware(req[i].mac, positioned, b);
+
+        // During a verification window, repair the newly staged program. After
+        // activation, repair the program assigned to this node's own group. A
+        // single global target is insufficient because groups may intentionally
+        // keep different uploaded programs active at the same time.
+        bool verification_active =
+            positioned && t < g_uploaded_verification_until_us;
+        uint64_t assigned_active_id = 0;
+        if (positioned) {
+          const PatternConfig& assigned = beaconPattern(
+              b, groupIdSafe(g_table.entries[entry].group_id));
+          if (assigned.pattern_id == patterns::UPLOADED)
+            assigned_active_id =
+                patterns::uploadedPatternProgramId(assigned.params);
+        }
+        uint64_t target_id = uploadedRepairProgramId(
+            g_uploaded_target_id, verification_active, assigned_active_id);
+        if (target_id) {
+          FirmwareVersion conductor_firmware =
+              currentFirmwareVersion(PROTO_VERSION);
+          FirmwareVersion roster_firmware = {};
+          int64_t registered_us = 0;
+          bool firmware_matches = false;
+          portENTER_CRITICAL(&g_roster_mux);
+          int roster_index = rosterFind(g_roster, req[i].mac);
+          if (roster_index >= 0) {
+            roster_firmware = rosterEntryFirmware(g_roster.entries[roster_index]);
+            registered_us = g_roster.entries[roster_index].last_us;
+            firmware_matches = firmwareSame(conductor_firmware,
+                                            roster_firmware);
+          }
+          portEXIT_CRITICAL(&g_roster_mux);
+          bool ready = false;
+          bool after_registration = false;
+          portENTER_CRITICAL(&g_uploaded_status_mux);
+          int status = uploadedStatusFind(g_uploaded_status, req[i].mac);
+          if (status >= 0) {
+            const UploadedProgramStatusEntry& status_entry =
+                g_uploaded_status.entries[status];
+            ready = status_entry.vm_version == UPLOADED_VM_VERSION &&
+                    status_entry.available &&
+                    status_entry.requested_id == target_id &&
+                    firmwareSame(status_entry.firmware, conductor_firmware) &&
+                    firmwareSame(status_entry.firmware, roster_firmware);
+            after_registration = status_entry.last_us >= registered_us;
+          }
+          portEXIT_CRITICAL(&g_uploaded_status_mux);
+          bool target_active = assigned_active_id == target_id;
+          UploadedRepairAction action = uploadedRepairAction(
+              target_active, verification_active, firmware_matches, ready,
+              after_registration);
+          int slot = uploadedProgramFind(g_uploaded_programs, target_id);
+          if (action == UPLOADED_REPAIR_INSTALL && slot >= 0)
+            uploadedProgramSend(req[i].mac, g_uploaded_programs.slots[slot]);
+          else if (action == UPLOADED_REPAIR_QUERY)
+            uploadedProgramQuerySend(req[i].mac, target_id);
         }
       }
       if (inventory_changed) tableSave();
@@ -3427,17 +4024,24 @@ void loop() {
     // the only registration state that extends the window.
     if (g_radio_on) maybeRegister(t);
     bool register_holds_radio = registrationHoldingRadio(t);
+    bool program_holds_radio = false;
+    portENTER_CRITICAL(&g_uploaded_pending_mux);
+    program_holds_radio = uploadedProgramHoldsRadio(
+        g_uploaded_install_pending_dirty, g_uploaded_status_schedule, t);
+    portEXIT_CRITICAL(&g_uploaded_pending_mux);
     if ((otaSessionIsActive(g_ota_session) || isRelay()) && !g_radio_on)
       radioWake();
     if (field_awake && !g_radio_on) radioWake();
     if (isPerformer() && g_powersave && !otaSessionIsActive(g_ota_session) &&
-        !field_awake && !register_holds_radio) {
+        !field_awake && !register_holds_radio && !program_holds_radio) {
       DutyAction act = dutyStep(g_duty, currentDutyConfig(policy), t);
       if (act == DUTY_WAKE) radioWake();
       else if (act == DUTY_SLEEP) radioSleep();
     }
     // A duty wake above opens a fresh window; schedule its slot immediately.
     if (g_radio_on) maybeRegister(t);  // TX only when the radio is powered
+    maybeInstallUploadedProgram();
+    maybeUploadedStatusReport();
     maybePowerReport(t);   // no-op without the INA228; defers until radio-on
     maybeOtaStatusReport();
     maybeRelayDeliveryReceipt();
@@ -3492,6 +4096,26 @@ void loop() {
   uint16_t render_node_id = (p.pattern_id == patterns::CALIBRATION && calibration_rank)
                                 ? calibration_rank
                                 : g_id.id;
+  const UploadedProgram* uploaded_program = nullptr;
+  bool uploaded_static = false;
+  if (p.pattern_id == patterns::UPLOADED) {
+    uint64_t program_id = patterns::uploadedPatternProgramId(p.params);
+    int slot = uploadedProgramFindValidatedSlot(g_uploaded_programs, program_id);
+    if (slot >= 0) {
+      uploaded_program = &g_uploaded_programs.slots[slot];
+      uploaded_static =
+          !uploadedProgramUsesTimeValidated(*uploaded_program);
+    } else {
+      // This should be unreachable after the conductor's activation barrier.
+      // Fail visibly and safely to a dim compiled Glow instead of blanking or
+      // interpreting program-id words as pattern parameters.
+      p.pattern_id = patterns::GLOW;
+      p.params[0] = 40;
+      p.params[1] = 100;
+      p.params[2] = pmath::colorValuePack(128);
+      p.params[3] = 0;
+    }
+  }
   // Static patterns (GLOW/SOLID) latch: pushing the identical frame at 60 Hz is
   // pure RMT + CPU waste, and it delays every Stage-B nap behind the CanShow()
   // wait. Re-render them only when the pattern changes, plus a ~1 Hz safety
@@ -3504,10 +4128,19 @@ void loop() {
   bool pattern_changed = !shown_once ||
                         memcmp(&last_shown, &p, sizeof(p)) != 0 ||
                         last_led_count != g_id.led_count;
-  if (!patterns::patternIsStatic(p.pattern_id) || pattern_changed ||
+  bool pattern_static = uploaded_program ? uploaded_static
+                                         : patterns::patternIsStatic(p.pattern_id);
+  if (!pattern_static || pattern_changed ||
       t >= next_static_refresh) {
-    patterns::render(strip, p, render_us, g_id.x, g_id.y, render_node_id,
-                     ledCountSafe(g_id.led_count));
+    if (uploaded_program) {
+      patterns::renderUploaded(strip, *uploaded_program, render_us,
+                               p.brightness, g_id.x, g_id.y,
+                               ledCountSafe(g_id.led_count),
+                               /*already_validated=*/true);
+    } else {
+      patterns::render(strip, p, render_us, g_id.x, g_id.y, render_node_id,
+                       ledCountSafe(g_id.led_count));
+    }
     strip.Show();
     last_shown = p;
     last_led_count = g_id.led_count;
@@ -3541,7 +4174,7 @@ void loop() {
     in.synced_us = syncedTime(s, in.now_us);
     in.radio_on = g_radio_on;
     in.radio_change_at_us = g_duty.change_at_us;
-    in.pattern_static = patterns::patternIsStatic(p.pattern_id);
+    in.pattern_static = pattern_static;
     in.last_serial_us = g_last_serial_us;
     in.heartbeat_half_us = HEARTBEAT_LED ? HEARTBEAT_HALF_US : 0;
     nap = napPlan(NAP_CFG, in);

@@ -8,8 +8,8 @@ next steps only.
 [`FLASHING.md`](FLASHING.md) → [`PROJECT_BRIEF.md`](PROJECT_BRIEF.md).
 
 **Repo:** https://github.com/moda-labs/lightweave · `pio test -e native`
-(**206 pass**) is green; **529 control tests** are green; all three
-device envs (`devkitc` / `firebeetle` / canonical `field`) build clean.
+(**231 pass**) and the full control suite are green; all three device envs
+(`devkitc` / `firebeetle` / canonical `field`) build clean.
 
 Latest in this feature branch (2026-08-30): **SOLIX S2000 Overview telemetry now
 uses Anker's cloud MQTT stream instead of the incomplete local BLE subscription.**
@@ -27,28 +27,75 @@ Live account/device proof remains: create `/etc/lightweave/solix.env` from the
 owner account as documented in `deploy/pi/README.md`, run the probe once, and
 confirm a real wattage reaches Overview before moving the PR out of draft.
 
-Latest in this feature branch (2026-08-10): **Wavefront, the Firefly chorus,
-and Fire2012 are ready for live pattern tuning.** `WAVEFRONT` (`pattern 11`)
-sends one soft directional band across the normalized 2-D field; angle 0 is the
-left-to-right test for the current ten-board line. `FIREFLY` (`pattern 6`) now
-uses deterministic irregular solo flashes, including skipped flashes and varied
-timing, before the field crossfades into exactly three synchronized beats and
-disperses again. `FIRE2012` (`pattern 10`) adapts FastLED's heat-cell simulation
-to the ring/strip emitter sequence with deterministic cooling, upward diffusion,
-sparking, and a black-to-red-to-yellow-to-white heat ramp. Its bounded,
-overlapping simulation checkpoints keep a cold field preview fast without
-visible heat resets. Firmware, control-plane preview, saved-pattern API, live UI
-controls, authoring docs, and host regression coverage are included for all
-three changes.
+Latest in `feat/radial-ripple` (2026-08-30): `POND_RIPPLE` adds concentric,
+center-selectable outward waves
+without changing the stable v11 transport layout; the control plane blocks its
+broadcast until every placed lantern is online on the exact current firmware.
+`OCEAN_WAVE` now retains a 22% perceptual deep-water floor plus a one-PWM
+quantization guard, so a non-black Ocean config never drops fully dark between
+crests at low nonzero brightness. `UPLOADED` preserves every existing pattern
+option and adds a versioned, loop-free 192-byte expression VM. The control plane
+preflights exact full-fleet firmware, stages into a slot that cannot overwrite any
+of eight active group programs, waits for exact acknowledgements from every placed
+node, and only then activates the full 64-bit BLAKE2s program identity. Every acknowledgement includes the
+reporter's exact firmware identity and must be newer than its latest registration,
+so a rollback or reboot cannot reuse stale readiness. A mixed rollout has no
+uploaded target, sends no program traffic, and cannot broadcast the new ID;
+built-in rendering and the stable v11 beacon remain unchanged. If firmware becomes
+mixed after activation, the conductor reverts every new-only group to compiled
+Glow; zero brightness remains available as a safe off command. Status responses
+are deterministically spread across 500 ms and use bounded retry backoff inside
+a two-second response window, and the control plane uses a compact progress poll.
+Repair
+for a staged but inactive target ends after a 60-second verification window;
+active targets are repaired only when a node registers. Firmware and preview
+implementations share host/control regression coverage. The interpreter enforces
+a weighted execution budget in addition to its instruction and stack limits.
+The current field build uses 74,816 B RAM (22.8%) and 905,605 B flash (69.1%).
+Bench nodes #56 (conductor), #57, and #58 run integrated firmware build
+`be36f8aa`. Mixed old/current fleets rejected both new-only patterns without
+changing the active show while legacy Glow and Ocean remained usable; the full
+7,128-chunk OTA plus repeated state snapshots completed without a stack panic;
+Pond Ripple and Ocean rendered on the reconciled fleet; and uploaded program
+`e5d021f64150da90` reached the exact 2/2 readiness barrier. Performer #57 and the
+conductor were reset independently and recovered their roles, positions,
+firmware, show state, and uploaded-program persistence. The control plane was
+restarted twice, and saved uploaded-pattern CRUD plus rebroadcast recovery
+remained healthy. A final selective OTA updated only stale performer #58 from
+`5c05ebe9` to `be36f8aa`: its full-image CRC matched, activation was verified
+from post-reboot firmware identity, and the operation completed with zero repair
+chunks. The resulting fleet reports 2/2 exact firmware matches, no attention
+flags, and recovery ready. The saved uploaded program then activated at 2/2
+readiness on the integrated image before the bench was restored to Ocean Wave at
+brightness 48 with params `[9000, 64612, 65069, 205]`.
 
-All ten USB-connected performers were serial-flashed and read back as performer
-IDs 1–10 on `0.9.3-dev`, protocol 11, build `b1e7d434`; the conductor was flashed
-last and read back as conductor ID 1 on the same build. The restarted local
-control plane at `http://127.0.0.1:8000` reports `alive=10`, `total=10`, and a
-firmware-consistent `matching=10` / `seen=10` field with conductor build
-`b1e7d434`. Automatic OTA remains disabled and the prior interrupted OTA journal
-remains paused. No release has been cut: live appearance and parameter tuning on
-the ten rings is the next gate.
+The operator UI now presents the VM-backed option as **Custom Pattern** and
+provides guided controls for traveling waves, center ripples, whole-field
+pulses, per-lantern shimmer, and steady glow. Color, timing, spacing, direction,
+ripple center, and dim/bright levels compile into the same bounded program
+format; JSON is retained only as a collapsed **Advanced source** escape hatch
+for existing or hand-authored programs. The stable firmware/API identifier
+remains `Uploaded Pattern`. Browser QA covered desktop and mobile layouts,
+guided save/reload/validation/activation, and lossless editing of a legacy JSON
+program. The generated center ripple reached the exact 2/2 bench readiness
+barrier before the bench was restored to the Ocean Wave state above.
+
+Also present from v0.9.4: `WAVEFRONT` remains pattern 11, `FIRE2012` remains
+pattern 10, while new IDs are allocated after them (`POND_RIPPLE` 12 and
+`UPLOADED` 13). Firefly retains its deterministic three-beat chorus. All ten
+USB-connected performers were last read back on protocol 11; no pattern ID from
+that release may be reused by later firmware.
+
+Also merged from `main` (2026-08-30): the control plane now owns a simple
+Pi-hosted soundtrack player. It discovers MP3s in `sound/`, autoplays
+`baskets-soundscape-v4.mp3` in a continuous loop, and preserves the selected
+track plus paused state across service restarts. Overview shows the soundtrack
+and current minute; the new Sound tab supports pause/resume, restart, and track
+selection. Playback uses `mpg123` through the system ALSA output, with an
+optional `CONTROL_AUDIO_DEVICE` override. The service has audio-group access,
+the Pi runbook installs `mpg123` and Git LFS, and MP3 assets are marked for LFS.
+Focused player/API tests and JavaScript/Python syntax checks are green; physical
+audio-jack playback on the production Pi remains to be verified.
 
 Also in this feature branch (2026-08-10): the lantern locator is now one
 temporary field-wide beacon override instead of a calibration pattern copied
@@ -433,7 +480,7 @@ anti-framing, HSTS, and field network-mutation rules are covered by tests.
 Field OTA now returns `202` after bounded preflight, runs as one server-owned
 task, exposes authoritative progress through GET, and returns immediate
 `423 Locked` for competing serial work instead of queuing it behind the
-transfer. Mutable OTA/pattern/calibration state is rooted by
+transfer. Mutable OTA/pattern/calibration/audio state is rooted by
 `CONTROL_DATA_DIR`. Pi Zero 2 W packaging and the complete Starlink +
 Cloudflare Tunnel runbook are under [`deploy/pi/`](../deploy/pi/README.md);
 stable architecture is in [`REMOTE_ADMIN.md`](REMOTE_ADMIN.md). The next owner
@@ -613,10 +660,15 @@ full-repo adversarial self-review with all 5 correctness findings fixed, the
 production BOM, and the **pilot-batch order placed 2026-07-03** (most parts
 arrive Mon Jul 6, batteries Jul 10 — see "Pilot batch: ORDERED" below).
 
-## ▶ Next session: pick up here (updated 2026-08-10)
+## ▶ Next session: pick up here (updated 2026-08-30)
 
 Priority order:
-1. **Live-tune the new patterns on the ten-board line:** start with Wavefront at
+1. **Hardware-verify and live-tune the new patterns on the ten-board line:**
+   first distribute one uploaded expression through a relay, confirm every
+   placed node acknowledges the exact program and firmware identity, and measure
+   frame timing with the VM active. Then run Pond Ripple from the center and an
+   off-center point, including a mixed-firmware negative check that leaves the
+   current built-in show untouched. Continue with Wavefront at
    angle 0 and confirm the band travels left-to-right in physical board order.
    Then evaluate Firefly's irregular solo behavior and three-beat chorus, and
    Fire2012's speed/cooling/sparking against the actual ring orientation and
@@ -725,7 +777,9 @@ revised cost roll-up.
   `FIRE_FLICKER` extends the local model to `f(x,y,pixel_index,t)` and is the
   first pattern to render distinct values across the ring; it appends ID 9.
   `FIRE2012` (ID 10) adds deterministic heat cells across the active emitter
-  sequence, and `WAVEFRONT` is ID 11.
+  sequence, `WAVEFRONT` is ID 11, `POND_RIPPLE` is ID 12, and the bounded
+  data-driven `UPLOADED` option is ID 13. Uploaded programs use a separate
+  capability-gated distribution path; all earlier renderers stay unchanged.
 - **NVS identity:** `id` + `(x,y)` + group persist across reboot; position/group
   are adopted from the conductor table.
 - **Group pattern configs persist** too: all eight
@@ -743,7 +797,7 @@ revised cost roll-up.
   mode enter/exit, firmware artifact staging, and field-wide OTA install.
   Serial calls are serialized and run
   off the FastAPI event loop, so one serial timeout does not block unrelated
-  async work. The UI has Overview, Lantern Locations, Node List, Patterns,
+  async work. The UI has Overview, Lantern Locations, Node List, Patterns, Sound,
   Power, Operations, and Firmware views; location-map zoom/pan,
   drag-to-move/place, unpositioned tray, single bottom-sheet actions,
   per-pattern controls, field firmware consistency display, Recovery card, and
@@ -1152,7 +1206,8 @@ wall-powered; gate all of this on `role == performer`.
   performer with `powersave on` and **only while the radio is already off**
   (never into a listen window); a nap ends at the earliest of the next radio
   duty transition, the next ~30 fps frame (animated patterns only — GLOW/SOLID
-  skip this and sleep clear through), the next heartbeat edge (keeps the GPIO2
+  and uploaded programs without a time input skip this and sleep clear through),
+  the next heartbeat edge (keeps the GPIO2
   sync blink square), or a 1 s safety cap. Serial safety: any serial byte holds
   naps off for 30 s, a UART wakeup (typing at a sleeping node — hit Enter once,
   then type) does the same, and boot seeds the grace so a fresh flash has a

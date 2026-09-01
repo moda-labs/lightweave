@@ -49,3 +49,8 @@ inline bool firmwareFleetConsistent(const FirmwareVersion& expected,
   }
   return true;
 }
+
+inline bool firmwareFleetReady(uint8_t expected, uint8_t seen,
+                               uint8_t matching) {
+  return expected > 0 && seen == expected && matching == expected;
+}
