@@ -1,7 +1,7 @@
 # Remote administration
 
-> **Status:** Building
-> **Tracking issue:** moda-labs/lightweave#3 · **Created:** 2026-07-22 · **Last amended:** 2026-07-23 (see Amendments)
+> **Status:** Complete
+> **Tracking issue:** moda-labs/lightweave#3 · **Created:** 2026-07-22 · **Last amended:** 2026-09-17 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -432,12 +432,25 @@ command fails, fix the cause and re-run.
   environment/token files, least-privilege settings, and restart behavior above;
   installed-unit and reboot proof belongs to Phase 4.
 
-### Phase 4 - Human-owned field rollout and recovery proof
+### Phase 4 - Human-owned field rollout and recovery proof `[x]`
 
 This phase is a rollout gate owned by an operator with the Cloudflare account,
 Starlink installation, Pi, and 3-board bench. It begins only after the code lane
 lands; the builder supplies the runbook and records evidence but does not invent
 account credentials or claim physical verification.
+
+**Closed out 2026-08-04 by operator sign-off** (Zach): the deployment is
+validated working on the Pi, including survival of Pi power loss/restart. That
+sign-off, not merged code, is this phase's evidence, so the phase heading is
+marked done.
+
+The boxes below are a separate, stricter ledger: each one is ticked only when
+every verification it names is corroborated. Most of these items are compound,
+naming a retained-output check alongside the outcome, and an outcome-level
+sign-off does not establish that a specific command was run. Nine of the ten
+therefore stay `[ ]` rather than being back-filled, even where part of the item
+is independently established. The 2026-08-04 Amendments entry records, item by
+item, what the sign-off and the tree do and do not corroborate.
 
 - [ ] Install the documented Raspberry Pi OS Lite 64-bit Trixie image on the Pi
   Zero 2 W, create the Python 3.13 virtualenv, install every pinned requirement,
@@ -448,7 +461,7 @@ account credentials or claim physical verification.
 - [ ] Verify both installed unit files with `systemd-analyze verify`, confirm
   `cloudflared --version` is at least 2025.4.0, and reboot to prove FastAPI and the
   tunnel return without login.
-- [ ] Remotely change a harmless pattern and verify the serial acknowledgement
+- [x] Remotely change a harmless pattern and verify the serial acknowledgement
   plus performer update.
 - [ ] Disconnect Starlink and verify the field continues its stored pattern and
   power policy without Pi/internet participation.
@@ -507,7 +520,7 @@ installed systemd runtime.
 
 | Lane | Dispatch issue | Phases | One-line scope | Marker mode | Status |
 |---|---|---|---|---|---|
-| Implementation lane | #6 | 1-3 | Control-plane contract, tests, and Pi deployment artifacts | solo | ready |
+| Implementation lane | #6 | 1-3 | Control-plane contract, tests, and Pi deployment artifacts | solo | done (#9) |
 
 **Lanes:** One solo lane owns the OTA API/UI contract, authentication and
 deployment safety settings, systemd contract, documentation, and all phase 1-3
@@ -538,6 +551,71 @@ gate, not a parallel builder lane.
 - **2026-07-23** (Codex, Moda Amendment review): Red-team and integration review
   returned LANDABLE, and the implementer Ready rubric returned READY after the
   shared-password contracts were made exact; restored Approved/ready status.
+- **2026-08-04** (Zach, sign-off relayed by Moda Agent): Phase 4 closed out and
+  the plan moved to Complete. Zach ruled the initiative "fully closed out on
+  remote administration ... validated working on the pi, including surviving pi
+  power loss/restart", and separately that "status should be complete". Phase 4
+  is an operator-attested gate by construction, so that ruling, not merged code,
+  is its evidence, and the phase heading is marked done on it.
+
+  Phases 1-3 landed via #9 (lane #6, merged 2026-07-29) and were already fully
+  marked. Corroborating merged work since: the Pi runs the control plane as a
+  systemd service under pull-based GitOps releases (#10), with v0.5.0 and v0.5.1
+  promoted to production (#18, #21) and a Pi-only release-environment permission
+  bug found and fixed on the live host (#19); the named tunnel is published and
+  documented at `control.basketbrain.dev` (#13).
+
+  **What the sign-off establishes.** Zach attested outcomes: the Pi deployment
+  works, it survives power loss and restart, and remote administration is
+  validated. One Phase 4 item is outcome-shaped and names a single verification
+  that the attestation covers directly, so it is ticked: remotely changing a
+  pattern and seeing the serial acknowledgement plus performer update.
+
+  **What it does not establish.** The other nine items each name a specific
+  procedure or a retained output, and an outcome-level attestation does not
+  establish that a named command was run or that its result was checked. They
+  stay `[ ]`. Three of them are partly corroborated, and that partial standing
+  is recorded here rather than converted into a tick:
+
+  - Pi installation: a live Pi running the control plane and deploying promoted
+    releases establishes the image, virtualenv, and pinned requirements. The
+    item also requires running the complete control test suite on that Pi, and
+    no such run is retained.
+  - Tunnel route: `control.basketbrain.dev` serving the loopback application
+    establishes the named route and an installed token. The item also requires
+    the host-specific HTTP-to-HTTPS redirect, token installation without shell
+    history exposure, and confirming only the expected connector is active;
+    none of those is retained.
+  - Unit verification: the sign-off covers the reboot clause, since the services
+    return after a real power cycle. The item also requires `systemd-analyze
+    verify` on both installed units and a `cloudflared --version` floor check,
+    and neither output is retained.
+
+  The remaining six retain no in-repo artifact at all: the Starlink disconnect
+  and restore drills, the browser-disconnect 3-board OTA drill, the logged-out
+  firmware-staging negative check, the process-restart-during-OTA drill, and the
+  `docs/HANDOFF.md` deployment record. The Phase 4 validation gate is unretained
+  on the same basis and is left unmarked.
+
+  Note that the deployed hostname and service-verification commands are
+  recorded, but in `docs/SSH_ACCESS.md` rather than `docs/HANDOFF.md` as this
+  plan specified, and `docs/HANDOFF.md` still lists the rollout as a pending
+  next-session task. That is a documentation follow-up, not open design work.
+  No remaining scope is contradicted by the tree, and no further code work is
+  required by this plan.
+- **2026-09-17** (Moda Agent, late reconciliation): The 2026-08-04 closeout was
+  written but never landed, leaving the file reading `Building` for six weeks
+  while the work was in production. Landing it now, rebased from the merge base
+  onto current `main`, with three corrections made during that rebase.
+  Status reads `Complete`, matching this repository's plan vocabulary and Zach's
+  own wording, where the parked draft had invented `Done`. The tracking issue
+  keeps the `moda-labs/lightweave` owner introduced by `abcc320`, which the
+  parked draft would have reverted to the retired `underminedsk` path. Three
+  Phase 4 items the draft ticked are returned to `[ ]`, because each names a
+  retained-output check that the sign-off does not cover; their partial standing
+  is recorded in the entry above instead. Re-verified against `main` at v0.9.7:
+  the six unevidenced drills and the validation gate are still unevidenced, and
+  `docs/HANDOFF.md` still carries the rollout as a pending task.
 
 ## Notes
 
